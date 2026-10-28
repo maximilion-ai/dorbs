@@ -3,11 +3,22 @@ packages:
   - packages/*
 
 catalog:
+  "@alchemy.run/cloudflare": 2.0.0-beta.84
+  "@cloudflare/computer": 0.8.0
+  "@cloudflare/vitest-plugin": 1.4.9
+  # 5.20261028.1 is newer than pnpm's minimumReleaseAge allows.
+  "@cloudflare/workers-types": 5.20261027.1
+  # agents supports one Pi minor at a time.
+  "@earendil-works/chord": 1.4.0
+  "@earendil-works/pi-ai": 1.4.0
+  "@earendil-works/pi-durable": 1.4.0
   "@effect/platform-node": 4.0.6
   "@effect/vitest": 4.0.6
   # Must match the oxlint that vite-plus bundles, which loads our JS plugin.
   "@oxlint/plugins": 1.89.0
   "@types/node": 26.6.5
+  agents: 0.31.0
+  alchemy: 2.0.0-beta.84
   # effect 4.0.7 is newer than pnpm's minimumReleaseAge allows.
   effect: 4.0.6
   knip: 6.43.0
@@ -15,6 +26,7 @@ catalog:
   vite: npm:@voidzero-dev/vite-plus-core@1.4.0
   vite-plus: 1.4.0
   vitest: 5.0.5
+  zod: 4.6.6
 
 # One vite and one vitest across the tree, so @effect/vitest and
 # @cloudflare/vitest-plugin share the runner that vite-plus bundles.
@@ -26,3 +38,11 @@ overrides:
 peerDependencyRules:
   allowedVersions:
     vite: "*"
+
+# workerd and esbuild download their native binaries in postinstall.
+allowBuilds:
+  esbuild: true
+  workerd: true
+  "@google/genai": false
+  core-js-pure: false
+  protobufjs: false
