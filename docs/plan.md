@@ -41,3 +41,34 @@ Research behind every choice: `docs/research/t3-conventions.md`, `docs/research/
 ## Out of scope for this run
 
 Deploys, MCP over ACP (`mcpCapabilities.acp`), Executor injection, `session/load`, CI and preview-browser verification. Each is a follow-up once the end-to-end gate holds.
+
+## Principle: compute efficiency
+
+Agents run in Durable Objects, so an idle agent costs nothing and the agent count scales freely. No compute lives as long as an agent or a thread. Every piece of heavy work is a pure function of content hashes. It runs on a shared stateless pool, and its result is cached across all agents. Cost then scales with distinct work, not with agents times time. This is Bazel's remote-execution model (REAPI): a content-addressed store plus an action cache. The blob store and the per-lockfile installs in `apps/typecheck` already follow it.
+
+The gaps beyond TypeScript (ad-hoc execution, semantic navigation, tools that write files back, and warm builds for compiled languages) must never be filled with per-thread containers or per-session language servers. Those bring back exactly the cost the DO design removes.
+
+### Actions (Unit 2d)
+
+- A check is the first kind of a generic action: a pure function of `{repo, commit, changed files by sha256, deleted paths, kind, toolchain}`, cached by its action digest.
+- Repo registration, protected paths and `Rejected` apply to every kind. Only `check` exists. No other kind gets built until a unit needs it.
+- `Diagnostic.tool` is an open tool name.
+- An action result carries output file digests next to diagnostics, to be written back to the DO workspace later. For `check` the list is always empty.
+
+### Later units
+
+- **Ad-hoc execution.** An `exec` action on the shared pool, cached by action digest. Scratch JavaScript, Python (Pyodide) and wasm stay in the isolate. There is no REPL: code mode submits a whole experiment in one call. Evaluate existing REAPI servers (NativeLink, Buildbarn, BuildBuddy) before building a pool.
+- **Navigation.** The check action also emits a SCIP index, cached by snapshot digest: one base index per commit, shared by every agent. tree-sitter or ast-grep in wasm covers the session's own edits inside the isolate. Queries run in the DO or against R2. No LSP.
+- **Warm builds for compiled languages.** One base build cache per lockfile, plus a copy-on-write overlay per action. Never a cache per session.
+
+### Claude subscription in the DOs (Unit 4)
+
+Claude Code doesn't have to run. The DO needs only a Claude OAuth token. What's unsettled is billing. Anthropic's support page (article 15036540, updated 2026-10-27) says third-party app usage draws from plan limits. But on 2026-10-18 a stock Pi request with a Claude login got `400 Third-party apps now draw from your extra usage` (pi-claude-oauth `docs/architecture.md`). Anthropic classifies requests server-side, and nobody has published which request feature it keys on.
+
+1. **Probe first.** Turn off extra usage at claude.ai/settings/usage, so a misclassified request fails with a 400 instead of billing per token. Make a fresh login with `pnpm claude-login`. Send one request in pi-ai's stock shape and one in pi-claude-subscription's shape. The result decides the path.
+2. **If one shape draws from the plan:** one `ClaudeCredentials` DO per account holds `LoggedOut | Ready {access, refresh, expires}` and is the only actor that refreshes. Concurrent callers share one in-flight refresh, and each rotated refresh token is persisted before the access token is returned. A rejected refresh moves it to `LoggedOut`. The login is a fresh grant, never the laptop's Pi or Claude Code tokens.
+3. **If neither does:** use the Max plan's monthly API credits (Max 5x $100, Max 20x $200, since 2026-10-07) through an API key from the linked Console organization. That path is documented for the Claude API and works from a DO with no token lifecycle.
+
+### Session robustness (Unit 5)
+
+One DO per ACP session instead of per connection, plus `session/load`. A reconnect, or T3's 30-minute idle unload, then reattaches to the same pi-durable session instead of starting over.
