@@ -61,13 +61,19 @@ The gaps beyond TypeScript (ad-hoc execution, semantic navigation, tools that wr
 - **Navigation.** The check action also emits a SCIP index, cached by snapshot digest: one base index per commit, shared by every agent. tree-sitter or ast-grep in wasm covers the session's own edits inside the isolate. Queries run in the DO or against R2. No LSP.
 - **Warm builds for compiled languages.** One base build cache per lockfile, plus a copy-on-write overlay per action. Never a cache per session.
 
-### Claude subscription in the DOs (Unit 4)
+### Claude subscription (Unit 4)
 
-Claude Code doesn't have to run. The DO needs only a Claude OAuth token. What's unsettled is billing. Anthropic's support page (article 15036540, updated 2026-10-27) says third-party app usage draws from plan limits. But on 2026-10-18 a stock Pi request with a Claude login got `400 Third-party apps now draw from your extra usage` (pi-claude-oauth `docs/architecture.md`). Anthropic classifies requests server-side, and nobody has published which request feature it keys on.
+Anthropic's support page (article 15036540, updated 2026-10-27) names two ways to use a Claude plan: the Claude Agent SDK and `claude -p`. Both run the Claude Code binary. Raw OAuth calls from Pi are not one of them, and on 2026-10-18 they got `400 Third-party apps now draw from your extra usage`. So with a subscription, Claude Code is the harness, not Pi. pi-durable stays the harness for API-key models, including the Max plan's monthly API credits through a linked Console key.
 
-1. **Probe first.** Turn off extra usage at claude.ai/settings/usage, so a misclassified request fails with a 400 instead of billing per token. Make a fresh login with `pnpm claude-login`. Send one request in pi-ai's stock shape and one in pi-claude-subscription's shape. The result decides the path.
-2. **If one shape draws from the plan:** one `ClaudeCredentials` DO per account holds `LoggedOut | Ready {access, refresh, expires}` and is the only actor that refreshes. Concurrent callers share one in-flight refresh, and each rotated refresh token is persisted before the access token is returned. A rejected refresh moves it to `LoggedOut`. The login is a fresh grant, never the laptop's Pi or Claude Code tokens.
-3. **If neither does:** use the Max plan's monthly API credits (Max 5x $100, Max 20x $200, since 2026-10-07) through an API key from the linked Console organization. That path is documented for the Claude API and works from a DO with no token lifecycle.
+The Claude Code binary can't run in a Worker isolate, so the subscription path is a turn runner:
+
+- A pool of containers runs the Agent SDK, one process per active turn. It exists while a turn runs and never while a thread idles, which keeps compute off the agent's lifetime.
+- The DO stays the source of truth. It serves its workspace tools (read, write, edit, list, grep, typecheck, clone) to the runner as an MCP server over HTTP, scoped to one session by a short-lived token. Claude Code's built-in file and shell tools are turned off.
+- The DO stores the SDK transcript. The runner restores it before `resume` and hands it back after the turn, so any runner can take the next turn.
+- The runner streams SDK messages to the DO, which maps them to ACP `session/update` through a second table next to the Pi one.
+- Each user logs in with their own plan, and the login lives in the runner pool's credential store, not in the DO.
+
+Open until a prototype runs: how the SDK persists and restores sessions, a runner's memory and cold start, and whether the pool is Cloudflare Containers or the Dokploy host.
 
 ### Session robustness (Unit 5)
 
