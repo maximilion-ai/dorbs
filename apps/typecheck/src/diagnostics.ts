@@ -8,8 +8,8 @@ const UNLOCATED = /^(error|warning) (TS\d+): (.*)$/;
 const isRelativePath = Schema.is(RelativePath);
 const CONFIG_PATH = RelativePath.make("tsconfig.json");
 
-// Errors with no file, or in a file outside the project (a dependency), point at the tsconfig,
-// so a failing check never comes back with zero diagnostics.
+// Errors with no file, or in a file outside the project, point at the tsconfig, so a failing check
+// never comes back empty. Outside text is withheld: a tsconfig can pull in any readable file.
 const tsrsDiagnostic = (line: string): Diagnostic | undefined => {
   const located = LOCATED.exec(line);
   if (located) {
@@ -21,7 +21,7 @@ const tsrsDiagnostic = (line: string): Diagnostic | undefined => {
       line: inProject ? Number(row) : 1,
       column: inProject ? Number(column) : 1,
       code,
-      message: inProject ? message : `${path}(${row},${column}): ${message}`,
+      message: inProject ? message : "Error in a file outside the project.",
       severity: severity === "warning" ? "warning" : "error",
     };
   }

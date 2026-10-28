@@ -39,7 +39,7 @@ it("keeps indented lines with their message and pins config errors to tsconfig.j
       line: 1,
       column: 1,
       code: "TS1005",
-      message: "../deps/node_modules/x/index.d.ts(3,1): ';' expected.",
+      message: "Error in a file outside the project.",
       severity: "error",
     },
   ]);

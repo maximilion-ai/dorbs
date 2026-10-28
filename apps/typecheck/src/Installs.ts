@@ -7,7 +7,6 @@ import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
-import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -40,8 +39,9 @@ export class Installs extends Context.Service<
   }
 >()("dorbs/typecheck/Installs") {}
 
+// pnpm-workspace.yaml is not copied: it carries pnpm settings a client must not control.
 export const isManifest = (path: string) =>
-  path === "package.json" || path.endsWith("/package.json") || path === "pnpm-workspace.yaml";
+  path === "package.json" || path.endsWith("/package.json");
 
 const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -68,14 +68,13 @@ const make = Effect.gen(function* () {
         yield* fs.copyFile(blobs.pathOf(file.sha256), target);
       }
     }).pipe(Effect.orDie);
-    const result = yield* runProcess(
-      spawner,
-      ChildProcess.make(
-        "pnpm",
-        ["install", "--frozen-lockfile", "--ignore-scripts", "--store-dir", storeDir],
-        { cwd: staging },
-      ),
-    ).pipe(
+    const result = yield* runProcess(spawner, staging, "pnpm", [
+      "install",
+      "--frozen-lockfile",
+      "--ignore-scripts",
+      "--store-dir",
+      storeDir,
+    ]).pipe(
       Effect.catchTags({
         PlatformError: (error) =>
           Effect.succeed({ exitCode: -1, stdout: "", stderr: error.message }),
