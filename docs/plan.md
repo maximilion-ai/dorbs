@@ -61,19 +61,13 @@ The gaps beyond TypeScript (ad-hoc execution, semantic navigation, tools that wr
 - **Navigation.** The check action also emits a SCIP index, cached by snapshot digest: one base index per commit, shared by every agent. tree-sitter or ast-grep in wasm covers the session's own edits inside the isolate. Queries run in the DO or against R2. No LSP.
 - **Warm builds for compiled languages.** One base build cache per lockfile, plus a copy-on-write overlay per action. Never a cache per session.
 
-### Claude subscription (Unit 4)
+### Claude subscription (Unit 4: not built)
 
-Compliance rule: a Claude plan is used only through the Claude Agent SDK or `claude -p`, signed in with the user's own plan (support article 15036540). Both run the Claude Code binary as a process. No isolate can run it, and we run no containers or sandboxes. So the only compliant compute is a machine the user already runs: their T3 environment, where acp-mux already lives. Rejected: raw OAuth from Pi (got the extra-usage 400 on 2026-10-18) and the browser entry against `/v1/code/sessions` (undocumented API, Claude Code's token used outside Claude Code; see docs/research/ccr-browser-sdk.md).
+Anthropic's [legal page](https://code.claude.com/docs/en/legal-and-compliance) sets the envelope: the Claude Code binary must run unmodified, developers may not collect, store or intermediate Claude.ai credentials or session tokens, and plan limits "assume ordinary, individual usage of Claude Code and the Agent SDK". Raw OAuth from Pi, the Agent SDK browser entry against `/v1/code/sessions`, a Claude Code port to DOs, and cloud sessions all fail that envelope or can't be driven from a DO (docs/research/ccr-browser-sdk.md).
 
-- The DO stays the ACP agent and the source of truth. For a session whose model is `claude-subscription`, it asks acp-mux to run one turn, using an extension frame (`_dorbs/runTurn`) on the WebSocket it already has.
-- acp-mux runs the Agent SDK's `query()` for that turn under the user's own `claude` login:
-  - `tools: []` turns off every built-in tool, so no file ever lands on the machine.
-  - The only MCP server is the DO's workspace tools over HTTP (`mcpServers: {dorbs: {type: "http"}}`), scoped by a short-lived per-turn token.
-  - `sessionStore` mirrors the transcript into the DO, and `resume` continues it, so any machine of the same user can take the next turn.
-  - SDK messages stream back to the DO, which maps them to ACP `session/update` through a second table next to the Pi one.
-- The Claude Code process lives for one turn. An idle thread costs nothing anywhere.
-- Each user runs turns on their own machine with their own login. Nobody shares a subscription.
-- Limit: a subscription thread runs only while its user's T3 environment is online. API-key threads (pi-durable, including the Max plan's API credits through a Console key) run entirely in DOs.
+- Subscription threads run in T3's own Claude provider on the user's machine, as today. A turn runner in acp-mux would save almost nothing over that, so it isn't built.
+- Bulk parallel threads use API keys with pi-durable in DOs. That's where the DO design pays off.
+- Local Claude threads can still use the shared type-check service and Executor over MCP.
 
 ### Session robustness (Unit 5)
 
