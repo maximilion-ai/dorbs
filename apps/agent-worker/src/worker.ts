@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 
 import type { WorkerEnv } from "../alchemy.run.ts";
-import { makeAcpConnection } from "./AcpConnection.ts";
+import { makeAcpSession } from "./AcpSession.ts";
 import * as ModelProvider from "./ModelProvider.ts";
 
 declare global {
@@ -16,7 +16,8 @@ declare global {
   }
 }
 
-export class AcpConnection extends makeAcpConnection((env) => ModelProvider.layer(env.AI)) {}
+export { AcpConnection } from "./AcpConnection.ts";
+export class AcpSession extends makeAcpSession((env) => ModelProvider.layer(env.AI)) {}
 
 const AgentToken = Config.Redacted("AGENT_TOKEN");
 const encoder = new TextEncoder();

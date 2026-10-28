@@ -15,6 +15,8 @@ const decodeAction = Schema.decodeUnknownSync(Schema.fromJsonString(Action));
 const blobs = new Map<string, string>();
 const log: string[] = [];
 const actions: Action[] = [];
+/** While set, POST /actions waits until GET /__release. */
+let held: PromiseWithResolvers<void> | undefined;
 
 /** The files of test/fixture's one commit. */
 const FIXTURE = {
@@ -66,6 +68,15 @@ export const typecheckDouble = async (request: Request): Promise<Response> => {
   if (url.host !== "typecheck.test") return new Response("Tests have no network", { status: 502 });
   if (url.pathname === "/__log") return json(log);
   if (url.pathname === "/__actions") return json(actions);
+  if (url.pathname === "/__hold") {
+    held = Promise.withResolvers();
+    return json(true);
+  }
+  if (url.pathname === "/__release") {
+    held?.resolve();
+    held = undefined;
+    return json(true);
+  }
   if (request.headers.get("authorization") !== `Bearer ${TOKEN}`) {
     return new Response("Unauthorized", { status: 401 });
   }
@@ -78,6 +89,7 @@ export const typecheckDouble = async (request: Request): Promise<Response> => {
     return new Response(null, { status: 204 });
   }
   if (request.method === "POST" && url.pathname === "/actions") {
+    await held?.promise;
     const action = decodeAction(await request.text());
     actions.push(action);
     const missing = [...new Set(action.files.map((file) => file.sha256))].filter(

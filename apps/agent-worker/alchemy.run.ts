@@ -4,13 +4,14 @@ import * as Secrets from "alchemy/Secrets";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 
-import type { AcpConnection } from "./src/worker.ts";
+import type { AcpConnection, AcpSession } from "./src/worker.ts";
 
 export const Worker = Cloudflare.Worker("AgentWorker", {
   main: "./src/worker.ts",
   compatibility: { date: "2026-10-01", flags: ["nodejs_compat"] },
   env: {
     AcpConnection: Cloudflare.DurableObject<AcpConnection>("AcpConnection"),
+    AcpSession: Cloudflare.DurableObject<AcpSession>("AcpSession"),
     AGENT_TOKEN: Config.Redacted("AGENT_TOKEN"),
     TYPECHECK_URL: Config.String("TYPECHECK_URL"),
     TYPECHECK_TOKEN: Config.Redacted("TYPECHECK_TOKEN"),

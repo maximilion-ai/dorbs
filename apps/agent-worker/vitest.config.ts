@@ -10,7 +10,10 @@ export default defineConfig({
       miniflare: {
         compatibilityDate: "2026-10-01",
         compatibilityFlags: ["nodejs_compat"],
-        durableObjects: { AcpConnection: { className: "AcpConnection", useSQLite: true } },
+        durableObjects: {
+          AcpConnection: { className: "AcpConnection", useSQLite: true },
+          AcpSession: { className: "AcpSession", useSQLite: true },
+        },
         bindings: {
           AGENT_TOKEN: "agent-token",
           TYPECHECK_URL: "http://typecheck.test",

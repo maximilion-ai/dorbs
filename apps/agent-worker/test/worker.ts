@@ -1,4 +1,4 @@
-export { AcpConnection, default } from "../src/worker.ts";
+export { AcpConnection, AcpSession, default } from "../src/worker.ts";
 
 declare global {
   namespace Cloudflare {

@@ -6,7 +6,7 @@ import * as Schema from "effect/Schema";
 
 type RequestId = JsonRpcRequest["id"];
 
-/** Where one ACP session's prompt stands. A session with no entry is Idle. */
+/** Where one ACP session's prompt stands. */
 export type Turn = Data.TaggedEnum<{
   Idle: {};
   Prompting: { readonly requestId: RequestId; readonly abort: AbortController };

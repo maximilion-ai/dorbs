@@ -57,13 +57,20 @@ export const connect = async (connection: string = crypto.randomUUID()) => {
     return result.sessionId;
   };
 
+  /** Loads a session; `replay` is every update that arrived between the request and its response. */
+  const load = async (id: number, sessionId: string) => {
+    const from = frames.length;
+    const response = await request(id, "session/load", { sessionId, cwd: CWD, mcpServers: [] });
+    return { response, replay: updates(frames.slice(from, frames.indexOf(response))) };
+  };
+
   const close = (code: number, reason: string): Promise<number> =>
     new Promise((resolve) => {
       ws.addEventListener("close", (event) => resolve(event.code));
       ws.close(code, reason);
     });
 
-  return { connection, messages, frames, until, send, sendLine, request, newSession, close };
+  return { connection, messages, frames, until, send, sendLine, request, newSession, load, close };
 };
 
 /** The session/update payloads in the order they arrived. */

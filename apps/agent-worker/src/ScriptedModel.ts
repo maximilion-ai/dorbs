@@ -14,7 +14,10 @@ export const NEW_FILE = "export const fresh = true;\n";
 const E2E_HELLO = 'export const n: number = "x";\n';
 const E2E_PACKAGE = '{ "name": "dorbs-e2e", "private": true, "type": "module" }\n';
 
-type Step = (signal: AbortSignal | undefined) => AssistantMessage | Promise<AssistantMessage>;
+type Step = (
+  signal: AbortSignal | undefined,
+  messages: ReadonlyArray<Message>,
+) => AssistantMessage | Promise<AssistantMessage>;
 
 const callTool =
   (name: string, args: ToolCall["arguments"], id: string): Step =>
@@ -32,6 +35,24 @@ const untilAborted: Step = (signal) =>
       resolve(fauxAssistantMessage([], { stopReason: "aborted" })),
     ),
   );
+
+const userText = (message: Message | undefined): string => {
+  if (message?.role !== "user") return "";
+  return typeof message.content === "string"
+    ? message.content
+    : message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
+};
+
+/** Says every prompt in the transcript, so a test sees the context the model was given. */
+const recall: Step = (_signal, messages) =>
+  fauxAssistantMessage([
+    fauxText(
+      `Prompts so far: ${messages
+        .filter((message) => message.role === "user")
+        .map(userText)
+        .join(" | ")}.`,
+    ),
+  ]);
 
 /** Each prompt the tests send picks a script; each model request plays the next step of it. */
 const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
@@ -61,6 +82,7 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
     say("Checked."),
   ],
   "typecheck only": [callTool("typecheck", {}, "call-typecheck"), say("Checked.")],
+  "read hello": [callTool("read_file", { path: "src/hello.ts" }, "call-read"), recall],
   "wait for cancel": [callTool("list_files", {}, "call-list"), untilAborted],
   e2e: [
     callTool("clone_repo", { repo: "dorbs/e2e" }, "call-clone"),
@@ -70,13 +92,6 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
     callTool("typecheck", {}, "call-typecheck-package"),
     say("n is a string."),
   ],
-};
-
-const userText = (message: Message | undefined): string => {
-  if (message?.role !== "user") return "";
-  return typeof message.content === "string"
-    ? message.content
-    : message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
 };
 
 const nextStep = (messages: ReadonlyArray<Message>): Step => {
@@ -92,7 +107,7 @@ export const scriptedModel = () => {
   // The faux queue drops each response it plays, so the one factory re-queues itself.
   const respond: FauxResponseFactory = (context, options) => {
     faux.appendResponses([respond]);
-    return nextStep(context.messages)(options?.signal);
+    return nextStep(context.messages)(options?.signal, context.messages);
   };
   faux.setResponses([respond]);
   return { provider: faux.provider, model: faux.getModel() };

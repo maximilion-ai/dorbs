@@ -1,177 +1,138 @@
-import { Workspace } from "@cloudflare/computer";
-import { createGitClient } from "@cloudflare/computer/git";
-import { createModels } from "@earendil-works/pi-ai/models";
-import { createRegistry, Harness } from "@earendil-works/pi-durable";
-import { PiHarness } from "agents/harness/pi";
-import { Lifecycle } from "agents/lifecycle";
+import * as Acp from "@dorbs/protocol/acp";
+import { decodeFrame, type JsonRpcFrame } from "@dorbs/protocol/jsonrpc";
 import { DurableObject } from "cloudflare:workers";
-import type * as Config from "effect/Config";
-import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
-import * as Layer from "effect/Layer";
-import * as ManagedRuntime from "effect/ManagedRuntime";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
-import { makeAgent, type AgentHost, type Emit, type SessionRecord } from "./agent.ts";
-import { ModelProvider, type ModelUnavailable } from "./ModelProvider.ts";
-import * as Repos from "./Repos.ts";
-import { registerTools, WORKSPACE_ROOT, type ToolHost } from "./tools.ts";
-import { RunOutcome } from "./Turn.ts";
-import * as Typecheck from "./Typecheck.ts";
-import { NOTHING_SENT, toSessionUpdates } from "./updates.ts";
+import {
+  ConnectionId,
+  ErrorCode,
+  invalidParams,
+  nameOf,
+  responseFrame,
+  RpcError,
+  toMessage,
+} from "./rpc.ts";
 
-export type ModelLayer = (
-  env: Cloudflare.Env,
-) => Layer.Layer<ModelProvider, Config.ConfigError | ModelUnavailable>;
+// Advertises loadSession, which replays a session's history; nothing else T3 would act on beyond prompting.
+const INITIALIZE: Acp.InitializeResponse = {
+  protocolVersion: 1,
+  agentInfo: { name: "dorbs", version: "0.1.0" },
+  agentCapabilities: {
+    loadSession: true,
+    promptCapabilities: { image: false, audio: false, embeddedContext: false },
+  },
+  authMethods: [],
+};
 
-const SYSTEM_PROMPT =
-  "You are a coding agent working in a TypeScript workspace. Every path is relative to the workspace root. " +
-  "Run the typecheck tool after you change code.";
-
-const sessionKey = (sessionId: string) => `acp/session/${sessionId}`;
-const CLONE_KEY = "workspace/clone";
-
-const outcomeOf = (status: "done" | "unanswered", reason: string | undefined): RunOutcome =>
-  status === "done"
-    ? RunOutcome.Answered()
-    : reason === "aborted"
-      ? RunOutcome.Aborted()
-      : RunOutcome.Failed({ reason: reason ?? "unanswered" });
+const encodeInitialize = Schema.encodeEffect(Acp.InitializeResponse);
+const decodeNewSession = Schema.decodeUnknownEffect(Acp.NewSessionRequest);
+const encodeNewSession = Schema.encodeEffect(Acp.NewSessionResponse);
+const sessionOf = Schema.decodeUnknownOption(Schema.Struct({ sessionId: Acp.SessionId }));
 
 /**
- * One ACP connection: a hibernatable WebSocket carrying JSON-RPC lines, one Pi harness over this
- * object's SQLite, and one Computer workspace that all of the connection's sessions share.
+ * One acp-mux connection: a hibernatable WebSocket carrying JSON-RPC lines. It answers `initialize`, creates
+ * sessions on `session/new`, and hands every frame that names a session to that session's AcpSession, which
+ * answers through `deliver`.
  */
-export const makeAcpConnection = (modelLayer: ModelLayer) =>
-  class AcpConnection extends DurableObject {
-    readonly runtime = ManagedRuntime.make(
-      Layer.mergeAll(modelLayer(this.env), Typecheck.layer, Repos.layer).pipe(
-        Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(this.env))),
-      ),
-    );
+export class AcpConnection extends DurableObject {
+  readonly connection = ConnectionId.make(nameOf(this.ctx));
 
-    readonly workspace = new Workspace({ storage: this.ctx.storage, git: createGitClient() });
+  #inbox = Promise.resolve();
 
-    readonly toolHost: ToolHost = {
-      workspace: this.workspace,
-      repos: () => this.runtime.runPromise(Effect.service(Repos.Repos)),
-      clone: () => this.ctx.storage.kv.get<Typecheck.Clone>(CLONE_KEY),
-      saveClone: (clone) => this.ctx.storage.kv.put(CLONE_KEY, clone),
-      typecheck: (clone, change) =>
-        this.runtime.runPromise(
-          Effect.flatMap(Effect.service(Typecheck.Typecheck), (typecheck) =>
-            typecheck.check(clone, change),
-          ),
-        ),
+  override async fetch(request: Request): Promise<Response> {
+    if (request.headers.get("Upgrade") !== "websocket") {
+      return new Response("Expected a WebSocket upgrade", { status: 426 });
+    }
+    const { 0: client, 1: server } = new WebSocketPair();
+    this.ctx.acceptWebSocket(server);
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    const line = typeof message === "string" ? message : new TextDecoder().decode(message);
+    const send = (frame: JsonRpcFrame) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(toMessage(frame));
     };
+    // A session takes each frame before the next is read, so a cancel never overtakes its prompt.
+    const handled = this.#inbox.then(() => Effect.runPromise(this.handle(line, send)));
+    this.#inbox = handled.catch((error: unknown) => console.error("Dropped a frame", error));
+    await handled;
+  }
 
-    readonly registry = (() => {
-      const registry = createRegistry();
-      registry.install({
-        name: "dorbs",
-        tools: registerTools(this.toolHost),
-        sections: [{ key: "agent", render: () => SYSTEM_PROMPT, tag: false }],
-      });
-      return registry;
-    })();
+  // Sessions keep running their prompts after the client hangs up; a later session/load replays them.
+  override async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
+    // workerd leaves the close handshake to us; 1005 and 1006 are reserved and cannot be sent back.
+    ws.close(code === 1005 || code === 1006 ? 1000 : code, reason);
+  }
 
-    readonly harness = new PiHarness({
-      harness: async ({ storage, context, onWake }) => {
-        const { provider } = await this.runtime.runPromise(Effect.service(ModelProvider));
-        const models = createModels();
-        models.setProvider(provider);
-        await this.workspace.fs.mkdir(WORKSPACE_ROOT, { recursive: true });
-        return Harness.open(storage, { models, registry: this.registry, onWake }, context);
-      },
-    });
-
-    readonly lifecycle = Lifecycle.install(this).use(this.harness);
-
-    readonly agent = makeAgent({
-      newSessionId: () => crypto.randomUUID(),
-      loadSession: (sessionId) => this.ctx.storage.kv.get<SessionRecord>(sessionKey(sessionId)),
-      saveSession: (sessionId, record) => this.ctx.storage.kv.put(sessionKey(sessionId), record),
-      run: (sessionId, record, prompt, signal, emit) =>
-        this.run(sessionId, record, prompt, signal, emit),
-    } satisfies AgentHost);
-
-    override async fetch(request: Request): Promise<Response> {
-      if (request.headers.get("Upgrade") !== "websocket") {
-        return new Response("Expected a WebSocket upgrade", { status: 426 });
-      }
-      const { 0: client, 1: server } = new WebSocketPair();
-      this.ctx.acceptWebSocket(server);
-      return new Response(null, { status: 101, webSocket: client });
+  /** Sends one message from a session to this connection's client, if the client is still there. */
+  deliver(message: string): void {
+    for (const ws of this.ctx.getWebSockets()) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(message);
     }
+  }
 
-    override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
-      const line = typeof message === "string" ? message : new TextDecoder().decode(message);
-      // One message carries one line without its terminator; acp-mux appends the newline on the socket.
-      const send = (line: string) => {
-        if (ws.readyState === WebSocket.OPEN) ws.send(line.replace(/\n$/u, ""));
-      };
-      await Effect.runPromise(this.agent.handle(line, send));
-    }
+  private readonly requests = new Map<
+    string,
+    (params: unknown) => Effect.Effect<unknown, RpcError>
+  >([
+    ["initialize", () => encodeInitialize(INITIALIZE).pipe(Effect.orDie)],
+    [
+      "session/new",
+      (params) =>
+        decodeNewSession(params).pipe(
+          Effect.mapError(invalidParams),
+          Effect.flatMap(({ cwd }) => {
+            const sessionId = crypto.randomUUID();
+            return Effect.promise(() =>
+              this.env.AcpSession.getByName(sessionId).open(this.connection, cwd),
+            ).pipe(Effect.as({ sessionId }));
+          }),
+          Effect.flatMap((response) => encodeNewSession(response).pipe(Effect.orDie)),
+        ),
+    ],
+  ]);
 
-    override async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
-      this.agent.cancelAll();
-      // workerd leaves the close handshake to us; 1005 and 1006 are reserved and cannot be sent back.
-      ws.close(code === 1005 || code === 1006 ? 1000 : code, reason);
+  private route(frame: JsonRpcFrame, send: (frame: JsonRpcFrame) => void): Effect.Effect<void> {
+    // A response: no session sends requests yet.
+    if (!("method" in frame)) return Effect.void;
+    const scoped = sessionOf(frame.params);
+    if (Option.isSome(scoped)) {
+      return Effect.promise(() =>
+        this.env.AcpSession.getByName(scoped.value.sessionId).receive(this.connection, frame),
+      );
     }
+    if (!("id" in frame)) return Effect.void;
+    const request =
+      this.requests.get(frame.method) ??
+      (() =>
+        Effect.fail(
+          new RpcError({
+            code: ErrorCode.methodNotFound,
+            reason: `Unknown method ${frame.method}`,
+          }),
+        ));
+    return Effect.result(request(frame.params)).pipe(
+      Effect.map((outcome) => send(responseFrame(frame.id, outcome))),
+    );
+  }
 
-    private async piSession(sessionId: string, record: SessionRecord): Promise<string> {
-      if (record.piSession !== undefined) return record.piSession;
-      const { model } = await this.runtime.runPromise(Effect.service(ModelProvider));
-      const session = await this.harness.sessions.create();
-      await session.setModel(model);
-      this.ctx.storage.kv.put(sessionKey(sessionId), { ...record, piSession: session.id });
-      return session.id;
-    }
-
-    private async run(
-      sessionId: string,
-      record: SessionRecord,
-      prompt: string,
-      signal: AbortSignal,
-      emit: Emit,
-    ): Promise<RunOutcome> {
-      const pi = this.harness.session(await this.piSession(sessionId, record));
-      const operationId = crypto.randomUUID();
-      const settled = Promise.withResolvers<RunOutcome>();
-      const stream = await pi.events();
-      let sent = NOTHING_SENT;
-      // The turn ends on the event that settles the submission, so every update of the run is sent before the reply.
-      stream.start(async (events) => {
-        for (const event of events) {
-          const [next, updates] = toSessionUpdates(sent, event, record.cwd);
-          sent = next;
-          for (const update of updates) emit(update);
-          if (event.type === "submission" && event.record.requestId === operationId) {
-            const { status } = event.record;
-            if (status === "done" || status === "unanswered") {
-              settled.resolve(outcomeOf(status, event.record.reason));
-            }
-          }
-        }
-      });
-      const abort = () => {
-        pi.abort().catch((error: unknown) => console.error("Pi abort failed", error));
-      };
-      signal.addEventListener("abort", abort);
-      try {
-        if (signal.aborted) return RunOutcome.Aborted();
-        await pi.submit(prompt, { operationId, whenBusy: "reject" });
-        if (signal.aborted) abort();
-        return await Promise.race([
-          settled.promise,
-          stream.closed.then((end) => RunOutcome.Failed({ reason: `event stream ${end.reason}` })),
-        ]);
-      } catch (error) {
-        return RunOutcome.Failed({
-          reason: error instanceof Error ? error.message : String(error),
-        });
-      } finally {
-        signal.removeEventListener("abort", abort);
-        await stream.stop();
-      }
-    }
-  };
+  private handle(line: string, send: (frame: JsonRpcFrame) => void) {
+    return decodeFrame(line).pipe(
+      Effect.matchEffect({
+        onFailure: (error) =>
+          Effect.sync(() =>
+            send({
+              jsonrpc: "2.0",
+              id: null,
+              error: { code: ErrorCode.parse, message: error.message },
+            }),
+          ),
+        onSuccess: (frame) => this.route(frame, send),
+      }),
+      Effect.withSpan("AcpConnection.handle"),
+    );
+  }
+}
