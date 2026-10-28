@@ -354,18 +354,45 @@ const run = async () => {
   await waitForOutput(mux, /acp-mux listening on/u, 15_000);
   ok(`acp-mux listens on ${socketPath}`);
 
-  const nc = NodeChildProcess.spawn("/usr/bin/nc", ["-U", socketPath], {
-    cwd: CWD,
-    shell: false,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  const ncExited = new Promise<number | null>((resolve) => nc.once("exit", resolve));
-  const client = acpClient(nc);
+  /** Starts nc the way T3 Code launches the Local ACP command, and initializes ACP over it. */
+  const startNc = async () => {
+    const nc = NodeChildProcess.spawn("/usr/bin/nc", ["-U", socketPath], {
+      cwd: CWD,
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const exited = new Promise<number | null>((resolve) => nc.once("exit", resolve));
+    const client = acpClient(nc);
+    client.sendLine(T3_INITIALIZE_LINE);
+    const initialized = await client.next((frame) => frame.id === 1073741824, 30_000, "initialize");
+    NodeAssert.deepEqual(
+      {
+        protocolVersion: initialized.result?.protocolVersion,
+        loadSession: initialized.result?.agentCapabilities?.loadSession,
+      },
+      { protocolVersion: 1, loadSession: true },
+      JSON.stringify(initialized),
+    );
+    ok("initialize answers protocolVersion 1 with loadSession");
+    return { nc, exited, client };
+  };
 
-  client.sendLine(T3_INITIALIZE_LINE);
-  const initialized = await client.next((frame) => frame.id === 1073741824, 30_000, "initialize");
-  NodeAssert.equal(initialized.result?.protocolVersion, 1, JSON.stringify(initialized));
-  ok("initialize answers protocolVersion 1");
+  const stopNc = async ({ nc, exited }: Awaited<ReturnType<typeof startNc>>) => {
+    nc.stdin.end();
+    const code = await within(3_000, "nc to exit on stdin EOF", exited).catch(() => {
+      // T3 Code ends a thread's command by killing it.
+      nc.kill("SIGTERM");
+      return within(3_000, "nc to exit on SIGTERM", exited);
+    });
+    ok(`nc exited (${code === null ? "signal" : `code ${code}`})`);
+    await until(5_000, "acp-mux to close its WebSocket", () =>
+      muxConnectionsTo(mux.proc.pid ?? 0, workerPort) === 0 ? true : undefined,
+    );
+    ok("acp-mux closed its WebSocket to the Worker");
+  };
+
+  const firstNc = await startNc();
+  const { client } = firstNc;
 
   const created = await client.request(2, "session/new", { cwd: CWD, mcpServers: [] }, 15_000);
   const sessionId: unknown = created.result?.sessionId;
@@ -462,8 +489,65 @@ const run = async () => {
   NodeAssert.deepEqual(first.result, { stopReason: "end_turn" }, JSON.stringify(first));
   ok("first prompt resolves with stopReason end_turn");
 
-  const long = client.request(4, "session/prompt", prompt(sessionId, "wait for cancel"), 30_000);
-  await client.next(
+  // T3 Code ends a thread's command by killing it, as on its 30-minute idle unload.
+  firstNc.nc.kill("SIGTERM");
+  await within(3_000, "nc to exit on SIGTERM", firstNc.exited);
+  await until(5_000, "acp-mux to close its WebSocket", () =>
+    muxConnectionsTo(mux.proc.pid ?? 0, workerPort) === 0 ? true : undefined,
+  );
+  ok("killed nc after the first turn; acp-mux closed its WebSocket");
+
+  const secondNc = await startNc();
+  const reloaded = secondNc.client;
+  const load = { sessionId, cwd: CWD, mcpServers: [] };
+  const loaded = await reloaded.request(2, "session/load", load, 15_000);
+  NodeAssert.deepEqual(loaded.result, {}, JSON.stringify(loaded));
+  const replayed = reloaded.frames
+    .slice(0, reloaded.frames.indexOf(loaded))
+    .filter((frame) => frame.method === "session/update" && frame.params?.sessionId === sessionId)
+    .map((frame) => frame.params.update);
+  NodeAssert.deepEqual(
+    replayed.find((u) => u.sessionUpdate === "tool_call_update" && u.toolCallId === "call-hello")
+      ?.content,
+    helloDone.content,
+    "the replay carries the first turn's diff of src/hello.ts",
+  );
+  NodeAssert.deepEqual(
+    [replayed.at(0), replayed.at(-1)],
+    [
+      { sessionUpdate: "user_message_chunk", content: { type: "text", text: "e2e" } },
+      {
+        sessionUpdate: "session_info_update",
+        _meta: { "dorbs/turnEnded": { stopReason: "end_turn" } },
+      },
+    ],
+  );
+  NodeAssert.equal(
+    replayed.length,
+    updates.length + 2,
+    "the replay is the first turn's updates, its prompt and its end",
+  );
+  ok(
+    `session/load on a new nc replays ${replayed.length} updates, the src/hello.ts diff included, then answers`,
+  );
+
+  const read = await reloaded.request(3, "session/prompt", prompt(sessionId, "read hello"), 30_000);
+  NodeAssert.deepEqual(read.result, { stopReason: "end_turn" }, JSON.stringify(read));
+  const readUpdates = reloaded.updates(sessionId).slice(replayed.length);
+  NodeAssert.deepEqual(
+    readUpdates.find((u) => u.sessionUpdate === "tool_call_update" && u.toolCallId === "call-read")
+      ?.content,
+    [{ type: "content", content: { type: "text", text: HELLO } }],
+  );
+  ok(`a prompt on the loaded session reads src/hello.ts: ${JSON.stringify(HELLO)}`);
+  NodeAssert.deepEqual(readUpdates.at(-1), {
+    sessionUpdate: "agent_message_chunk",
+    content: { type: "text", text: "Prompts so far: e2e | read hello." },
+  });
+  ok("the model saw the first turn's prompt in the same Pi transcript");
+
+  const long = reloaded.request(4, "session/prompt", prompt(sessionId, "wait for cancel"), 30_000);
+  await reloaded.next(
     (f) =>
       f.params?.update?.sessionUpdate === "tool_call_update" &&
       f.params.update.toolCallId === "call-list",
@@ -471,27 +555,17 @@ const run = async () => {
     "the long prompt to reach its model wait",
   );
   const cancelledAt = performance.now();
-  client.send({ method: "session/cancel", params: { sessionId } });
+  reloaded.send({ method: "session/cancel", params: { sessionId } });
   const cancelled = await within(5_000, "cancelled prompt to resolve", long);
   const cancelMs = Math.round(performance.now() - cancelledAt);
   NodeAssert.deepEqual(cancelled.result, { stopReason: "cancelled" }, JSON.stringify(cancelled));
   ok(`session/cancel resolves the second prompt with cancelled in ${cancelMs} ms`);
 
-  const third = await client.request(5, "session/prompt", prompt(sessionId, "anything"), 30_000);
+  const third = await reloaded.request(5, "session/prompt", prompt(sessionId, "anything"), 30_000);
   NodeAssert.deepEqual(third.result, { stopReason: "end_turn" }, JSON.stringify(third));
   ok("third prompt after cancel resolves with end_turn");
 
-  nc.stdin.end();
-  const ncCode = await within(3_000, "nc to exit on stdin EOF", ncExited).catch(() => {
-    // T3 Code ends a thread's command by killing it.
-    nc.kill("SIGTERM");
-    return within(3_000, "nc to exit on SIGTERM", ncExited);
-  });
-  ok(`nc exited (${ncCode === null ? "signal" : `code ${ncCode}`})`);
-  await until(5_000, "acp-mux to close its WebSocket", () =>
-    muxConnectionsTo(mux.proc.pid ?? 0, workerPort) === 0 ? true : undefined,
-  );
-  ok("acp-mux closed its WebSocket to the Worker");
+  await stopNc(secondNc);
 
   const survivors = await stopAll();
   NodeAssert.deepEqual(survivors, [], "process groups that outlived SIGTERM");
