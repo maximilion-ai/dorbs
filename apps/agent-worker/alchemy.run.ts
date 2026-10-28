@@ -1,0 +1,36 @@
+import * as Cloudflare from "@alchemy.run/cloudflare";
+import * as Alchemy from "alchemy";
+import * as Secrets from "alchemy/Secrets";
+import * as Config from "effect/Config";
+import * as Effect from "effect/Effect";
+
+import type { AcpConnection } from "./src/worker.ts";
+
+export const Worker = Cloudflare.Worker("AgentWorker", {
+  main: "./src/worker.ts",
+  compatibility: { date: "2026-10-01", flags: ["nodejs_compat"] },
+  env: {
+    AcpConnection: Cloudflare.DurableObject<AcpConnection>("AcpConnection"),
+    AGENT_TOKEN: Config.Redacted("AGENT_TOKEN"),
+    TYPECHECK_URL: Config.String("TYPECHECK_URL"),
+    TYPECHECK_TOKEN: Config.Redacted("TYPECHECK_TOKEN"),
+    MODEL_PROVIDER: Config.String("MODEL_PROVIDER"),
+    MODEL_ID: Config.String("MODEL_ID"),
+    OPENROUTER_API_KEY: Config.Redacted("OPENROUTER_API_KEY"),
+  },
+  dev: { port: 8787 },
+});
+
+export type WorkerEnv = Cloudflare.InferEnv<typeof Worker>;
+
+export default Alchemy.Stack(
+  "AgentWorker",
+  {
+    providers: Cloudflare.providers(),
+    state: Alchemy.localState(),
+    secrets: [Secrets.DotEnv(), Secrets.ProcessEnv()],
+  },
+  Effect.gen(function* () {
+    return { url: (yield* Worker).url };
+  }),
+);
