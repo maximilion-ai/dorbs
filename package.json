@@ -3,12 +3,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "vp fmt --check && vp lint --deny-warnings --report-unused-disable-directives && vp run -r typecheck && vp run -r test && knip",
+    "check": "pnpm fmt:check && pnpm lint && pnpm typecheck && pnpm test && pnpm knip",
     "fmt": "vp fmt",
+    "fmt:check": "vp fmt --check",
     "knip": "knip",
     "lint": "vp lint --deny-warnings --report-unused-disable-directives",
     "test": "vp run -r test",
-    "typecheck": "vp run -r typecheck"
+    "typecheck": "vp run -r typecheck",
+    "verify-gates": "bash scripts/verify-gates.sh"
   },
   "devDependencies": {
     "@types/node": "catalog:",
