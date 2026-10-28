@@ -93,7 +93,7 @@ All MCP traffic flows from the agent to T3 on the same stdio stream (`packages/e
 
 **Don't advertise:**
 
-- **`loadSession` / `sessionCapabilities.resume`.** T3 would call `session/load` and quarantine replayed history for up to 90 s (`RT:80`, `RT:2163-2190`), (`AD:565-576`).
+- **`sessionCapabilities.resume`.** `loadSession` covers reconnects; see §8. Advertise `loadSession` only while replay works.
 - **`sessionCapabilities.fork`, `list`, `delete`, `close`.** They enable UI paths (`REG/probe.ts:267-272`).
 - **`authMethods`.** Keep the list empty. A non-`agent` method can't run headless (`RT:2126-2134`), and a `-32000` error makes T3 report "authentication failed" (`REG/probe.ts:283-285`).
 - **Client fs/terminal.** T3 sends `false`; never call `fs/*` or `terminal/*`.
@@ -104,3 +104,11 @@ All MCP traffic flows from the agent to T3 on the same stdio stream (`packages/e
 - **Dependencies.** The only runtime dependency is `effect` (`package.json`, catalog `effect: 4.0.5`, `pnpm-workspace.yaml:70`). It has no `@t3tools/*` imports. The package is private, with TS-source exports: `./schema`, `./schema-v1`, `./agent`, `./client`, `./rpc`, `./protocol`, `./errors`, `./compat`.
 - **v1 schemas are reusable.** `schema-v1.gen.ts` is a self-contained file of `effect/Schema` codecs that imports only `effect/Schema` (line 1). Vendor it to validate v1 frames in the DO.
 - **The agent helper speaks v2 only.** `AcpAgent` is built on `AgentRpcs`, which uses the v2 `schema.gen.ts` codecs (`agent.ts:13,220,278`, `rpc.ts:31-107`). It needs an `effect/Stdio` (`agent.ts:554`). A hand-rolled NDJSON dispatcher over the v1 schemas is less work than adapting it.
+
+## 8. `session/load` (advertised since Unit 5)
+
+- **When.** T3 calls `session/load` when it respawns a thread's command and `loadSession` is `true` (`RT:2163-2177`, `AD:6620-6643`). Params are `{sessionId, cwd, mcpServers}` (`RT:2167-2172`).
+- **Replay.** While the load runs, T3 drops every `session/update` for the loading session (`RT:1693-1735`). Updates marked `_meta.isReplay: true` are dropped at any time (`runtimeModel.ts:1211-1214`). So replay never renders twice; T3 keeps its own transcript.
+- **End.** T3 takes the load response, or a 2 s gap after the last replayed update, whichever comes first (`RT:81`, `runtimeModel.ts:1261-1275`). The whole load has a 90 s limit (`RT:80`).
+- **Unknown session.** Answer JSON-RPC `-32002` (ACP `resource_not_found`, `schema-v1.gen.ts:1399`). T3 then starts a fresh runtime with `session/new` and reports the failure for the old session (`AD:6593-6616`, `AD:6633-6638`).
+- **Turn end.** v1 has no update that ends a turn. This agent keeps each turn's end in the history as `session_info_update` with `_meta["dorbs/turnEnded"]`. T3 turns a live `session_info_update` into a `SessionInfoUpdated` event with only the fields it knows (`runtimeModel.ts:1557-1568`).

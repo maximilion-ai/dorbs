@@ -1,6 +1,6 @@
 # Build plan: isolate-backed T3 threads
 
-T3 Code launches `/usr/bin/nc -U <socket>` as a Local ACP command. `acp-mux` relays each socket connection to the agent Worker over one WebSocket. A Durable Object is the ACP agent. Type checks go to one shared service.
+T3 Code launches `/usr/bin/nc -U <socket>` as a Local ACP command. `acp-mux` relays each socket connection to the agent Worker over one WebSocket. Durable Objects are the ACP agent: one per connection that routes frames, and one per ACP session that does the work. Type checks go to one shared service.
 
 Research behind every choice: `docs/research/t3-conventions.md`, `docs/research/acp-contract.md`, `docs/research/platform-apis.md`. Decisions: `docs/decisions.tsv`.
 
@@ -9,17 +9,17 @@ Research behind every choice: `docs/research/t3-conventions.md`, `docs/research/
 **`packages/protocol`** (Effect Schema, shared by all apps)
 
 - `JsonRpcFrame`: union of `Request {id, method, params}`, `Notification {method, params}`, `Response {id, result} | {id, error}`. Parsed once at each wire boundary.
-- ACP v1 subset, vendored from T3's `packages/effect-acp` v1 schemas (MIT, commit `125b619`): `initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/update`, `session/request_permission`.
+- ACP v1 subset, vendored from T3's `packages/effect-acp` v1 schemas (MIT, commit `125b619`): `initialize`, `session/new`, `session/load`, `session/prompt`, `session/cancel`, `session/update`, `session/request_permission`.
 - Type-check API with branded `Sha256` and `RelativePath`:
   - `CheckRequest {lockfile: Sha256, files: ReadonlyArray<{path: RelativePath, sha256: Sha256}>}`
   - `CheckResponse = MissingBlobs {sha256s} | CheckResult {diagnostics, durationMs}`
   - `Diagnostic {tool: "tsrs" | "oxlint", path, line, column, code, message, severity}`
 
-**`apps/agent-worker`** (Worker + one Durable Object per ACP connection)
+**`apps/agent-worker`** (Worker + one `AcpConnection` DO per connection + one `AcpSession` DO per ACP session)
 
-- The Worker routes `GET /acp?connection=<id>` to the `AcpConnection` DO named `<id>`.
-- A DO holds a session state machine: `Idle | Prompting {requestId, abort} | Cancelling {requestId}`. `session/cancel` always resolves the open prompt with `stopReason: "cancelled"`.
-- The Computer workspace is the DO's files. Pi runs the agent loop. Tools are workspace read/write/edit/list/grep, isolate shell, git commit/push, and `typecheck`.
+- The Worker routes `GET /acp?connection=<id>` to the `AcpConnection` DO named `<id>`. It holds the WebSocket, answers `initialize`, creates an `AcpSession` on `session/new`, and hands every frame with a `sessionId` to the `AcpSession` of that name.
+- An `AcpSession` holds the turn state machine: `Idle | Prompting {requestId, abort} | Cancelling {requestId}`. `session/cancel` always resolves the open prompt with `stopReason: "cancelled"`.
+- The Computer workspace is the session DO's files. Pi runs the agent loop. Tools are workspace read/write/edit/list/grep, isolate shell, git commit/push, and `typecheck`.
 - Pi events map to `session/update` through one pure table: text to `agent_message_chunk`, tool start to `tool_call`, a file write to `tool_call_update` with `diff` content under the T3 cwd.
 
 **`apps/acp-mux`** (Node daemon, a dumb pipe)
@@ -40,7 +40,7 @@ Research behind every choice: `docs/research/t3-conventions.md`, `docs/research/
 
 ## Out of scope for this run
 
-Deploys, MCP over ACP (`mcpCapabilities.acp`), Executor injection, `session/load`, CI and preview-browser verification. Each is a follow-up once the end-to-end gate holds.
+Deploys, MCP over ACP (`mcpCapabilities.acp`), Executor injection, CI and preview-browser verification. Each is a follow-up once the end-to-end gate holds.
 
 ## Principle: compute efficiency
 
@@ -78,3 +78,21 @@ Compliance rule: a Claude plan is used only through the Claude Agent SDK or `cla
 ### Session robustness (Unit 5)
 
 One DO per ACP session instead of per connection, plus `session/load`. A reconnect, or T3's 30-minute idle unload, then reattaches to the same pi-durable session instead of starting over.
+
+- **Objects.** `AcpSession`, named by sessionId, owns the turn, the Pi session, the workspace, the cloned-repo record, the attached connection id and the history. `AcpConnection` stays thin and keeps no state beyond its WebSocket.
+- **Delivery.** A session sends every frame by name: `AcpConnection.getByName(id).deliver(message)`, in order through one outbox. No callback stubs, so either object can hibernate or restart between frames. A response goes to the connection that sent the request. Updates go to the attached connection.
+- **Attach.** `session/new` and `session/load` attach the connection that sent them, replacing the one before. Other frames from a connection that is not attached get `-32600`.
+- **History.** Every `session/update` the session sends, plus each prompt as `user_message_chunk` and each turn's end as `session_info_update` with `_meta["dorbs/turnEnded"] = {stopReason} | {error}`, in one SQLite table. ACP v1 has no update that ends a turn, so the end is a `_meta` extension.
+- **Load.** Attach, replay the history as `session/update` notifications, then answer `{}`. An unknown session answers `-32002 Unknown session <id>`. A second load replays the same history again.
+- **Dropped connection.** The turn runs on. Its later updates go to the history and to whoever attaches. When it ends, the end goes to the history, and to the attached connection as the `turnEnded` notification if that connection did not send the prompt.
+- **Order.** A session takes each frame and returns before a prompt's turn ends; the connection hands frames on one at a time, so a cancel never overtakes its prompt.
+- **Unit 4.** A DO-initiated frame such as `_dorbs/runTurn` goes out through the same `deliver`. acp-mux's response comes back to the `AcpConnection`, which today drops responses; Unit 4 routes them to the session that sent the request.
+
+How T3 sees a reconnect (T3 `125b619`):
+
+1. nc exits. T3 marks the open turn failed with `transport_error` and respawns nc on the next turn.
+2. T3 sends `initialize`, sees `loadSession: true`, and sends `session/load` with the thread's stored sessionId.
+3. T3 drops every `session/update` for the loading session while the load runs, so the replay never shows twice in the thread.
+4. T3 sends the user's next prompt. The model sees the earlier turns, including any that finished after the drop, and the workspace keeps every file. Updates of a turn that finished while nc was gone show in T3 only through the model's next answer.
+5. If that earlier turn still runs, the new prompt gets `-32600 Prompt <id> is still running in this session`.
+6. If the session is unknown, T3 starts a fresh runtime with `session/new` and reports the load failure for the old session.
