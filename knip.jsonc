@@ -11,6 +11,10 @@
       "includeEntryExports": true,
       "entry": ["scripts/vendor-acp-v1.ts"],
     },
+    "apps/typecheck": {
+      // The service spawns the oxlint binary by name; nothing imports it.
+      "ignoreDependencies": ["oxlint"],
+    },
     "packages/oxlint-plugin": {
       // oxlint loads index.ts by path from vite.config.ts and reads its default export.
       "includeEntryExports": false,
