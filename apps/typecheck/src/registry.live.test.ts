@@ -1,9 +1,9 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
-import { RelativePath } from "@dorbs/protocol/typecheck";
+import { RelativePath, ToolName } from "@dorbs/protocol/typecheck";
 
-import { TestServer, TSCONFIG, checkProject } from "./testServer.ts";
+import { TestServer, TSCONFIG, checkChange } from "./testServer.ts";
 
 const ZOD_PACKAGE = `{
   "name": "fixture",
@@ -51,14 +51,10 @@ it.live.skipIf(process.env["TYPECHECK_OFFLINE"] === "1")(
   "reports a type error that only exists through an installed dependency",
   () =>
     Effect.gen(function* () {
-      const response = yield* checkProject(ZOD_LOCKFILE, {
-        "package.json": ZOD_PACKAGE,
-        "tsconfig.json": TSCONFIG,
-        "src/index.ts": SOURCE,
-      });
-      assert.deepStrictEqual(response._tag === "CheckResult" && response.diagnostics, [
+      const response = yield* checkChange("zod", { files: { "src/index.ts": SOURCE } });
+      assert.deepStrictEqual(response._tag === "ActionResult" && response.diagnostics, [
         {
-          tool: "tsrs",
+          tool: ToolName.make("tsrs"),
           path: RelativePath.make("src/index.ts"),
           line: 5,
           column: 45,
@@ -67,6 +63,17 @@ it.live.skipIf(process.env["TYPECHECK_OFFLINE"] === "1")(
           severity: "error",
         },
       ]);
-    }).pipe(Effect.provide(TestServer)),
+    }).pipe(
+      Effect.provide(
+        TestServer({
+          zod: {
+            "package.json": ZOD_PACKAGE,
+            "pnpm-lock.yaml": ZOD_LOCKFILE,
+            "tsconfig.json": TSCONFIG,
+            "src/index.ts": "export {};\n",
+          },
+        }),
+      ),
+    ),
   { timeout: 60_000 },
 );

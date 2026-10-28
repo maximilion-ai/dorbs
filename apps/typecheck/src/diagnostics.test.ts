@@ -1,6 +1,6 @@
 import { assert, it } from "@effect/vitest";
 
-import { RelativePath } from "@dorbs/protocol/typecheck";
+import { RelativePath, ToolName } from "@dorbs/protocol/typecheck";
 
 import { parseTsrs } from "./diagnostics.ts";
 
@@ -15,7 +15,7 @@ it("keeps indented lines with their message and pins config errors to tsconfig.j
   ].join("\n");
   assert.deepStrictEqual(parseTsrs(output), [
     {
-      tool: "tsrs",
+      tool: ToolName.make("tsrs"),
       path: RelativePath.make("src/b.ts"),
       line: 1,
       column: 14,
@@ -25,7 +25,7 @@ it("keeps indented lines with their message and pins config errors to tsconfig.j
       severity: "error",
     },
     {
-      tool: "tsrs",
+      tool: ToolName.make("tsrs"),
       path: RelativePath.make("tsconfig.json"),
       line: 1,
       column: 1,
@@ -34,7 +34,7 @@ it("keeps indented lines with their message and pins config errors to tsconfig.j
       severity: "error",
     },
     {
-      tool: "tsrs",
+      tool: ToolName.make("tsrs"),
       path: RelativePath.make("tsconfig.json"),
       line: 1,
       column: 1,

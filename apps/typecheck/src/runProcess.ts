@@ -16,9 +16,10 @@ export const runProcess = Effect.fn("runProcess")(function* (
   cwd: string,
   command: string,
   args: ReadonlyArray<string>,
+  env: Record<string, string> = {},
 ) {
   const handle = yield* spawner.spawn(
-    ChildProcess.make(command, args, { cwd, env: TOOL_ENV, extendEnv: false }),
+    ChildProcess.make(command, args, { cwd, env: { ...TOOL_ENV, ...env }, extendEnv: false }),
   );
   const [stdout, stderr, exitCode] = yield* Effect.all(
     [

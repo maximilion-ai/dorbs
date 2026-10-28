@@ -1,76 +1,65 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as Ref from "effect/Ref";
 
-import { RelativePath, Sha256 } from "@dorbs/protocol/typecheck";
+import { type Diagnostic, RelativePath, Sha256, ToolName } from "@dorbs/protocol/typecheck";
 
 import {
-  EMPTY_LOCKFILE,
   EMPTY_PACKAGE,
+  Fixtures,
+  LogLines,
+  PRIVATE_TOKEN,
   SpawnLog,
   TestServer,
   TOKEN,
   TSCONFIG,
-  checkProject,
+  checkChange,
   postCheck,
+  postCheckRaw,
   upload,
 } from "./testServer.ts";
 
-const project = (source: string) => ({
+// The root tsconfig extends a file whose name the protected table does not know.
+const FIXTURE = {
   "package.json": EMPTY_PACKAGE,
-  "tsconfig.json": TSCONFIG,
-  "src/a.ts": source,
+  "tsconfig.json": '{ "extends": "./config/strict", "include": ["src"] }\n',
+  "config/strict.json": TSCONFIG,
+  "src/a.ts": "export const a = 1;\n",
+  "src/bad.ts": 'export const n: number = "x";\n',
+  // A committed oxlint config still does not apply: its plugin would run as code in the service.
+  ".oxlintrc.json": '{ "jsPlugins": ["./plugin.cjs"], "rules": { "no-debugger": "off" } }\n',
+  "plugin.cjs": 'throw new Error("the service loaded a project oxlint plugin");\n',
+};
+
+const Server = TestServer({ fixture: FIXTURE });
+
+const BAD_TS: Diagnostic = {
+  tool: ToolName.make("tsrs"),
+  path: RelativePath.make("src/bad.ts"),
+  line: 1,
+  column: 14,
+  code: "TS2322",
+  message: "Type 'string' is not assignable to type 'number'.",
+  severity: "error",
+};
+
+const spawned = Effect.gen(function* () {
+  return yield* Ref.get(yield* SpawnLog);
 });
 
-it.live("answers MissingBlobs with exactly the unknown lockfile and file hashes", () =>
+it.live("checks the commit's tree with the changed files laid over it", () =>
   Effect.gen(function* () {
-    yield* upload("export const a = 1;\n");
-    const response = yield* postCheck(EMPTY_LOCKFILE, {
-      "tsconfig.json": TSCONFIG,
-      "src/a.ts": "export const a = 1;\n",
+    const response = yield* checkChange("fixture", {
+      files: { "src/a.ts": "debugger;\nexport const a = 1;\n" },
     });
-    assert.deepStrictEqual(response, {
-      _tag: "MissingBlobs",
-      sha256s: [
-        Sha256.make("17c814b167307942d3609c7b9d916ceddb85839573ab39baa114e30edb132a1a"),
-        Sha256.make("68acba1fdd044961e944f6feef2bfe34303055f8ed206c41d19c0870033e8772"),
-      ],
-    });
-  }).pipe(Effect.provide(TestServer)),
-);
-
-it.live("reports a planted type error from tsrs with its project path and position", () =>
-  Effect.gen(function* () {
-    const response = yield* checkProject(
-      EMPTY_LOCKFILE,
-      project('const n: number = "x";\nexport { n };\n'),
-    );
-    assert.strictEqual(response._tag, "CheckResult");
-    if (response._tag !== "CheckResult") return;
+    assert.strictEqual(response._tag, "ActionResult");
+    if (response._tag !== "ActionResult") return;
     assert.deepStrictEqual(response.diagnostics, [
+      BAD_TS,
       {
-        tool: "tsrs",
-        path: RelativePath.make("src/a.ts"),
-        line: 1,
-        column: 7,
-        code: "TS2322",
-        message: "Type 'string' is not assignable to type 'number'.",
-        severity: "error",
-      },
-    ]);
-    assert.isAbove(response.durationMs, 0);
-  }).pipe(Effect.provide(TestServer)),
-);
-
-it.live("reports an oxlint finding with tool oxlint", () =>
-  Effect.gen(function* () {
-    const response = yield* checkProject(EMPTY_LOCKFILE, project("debugger;\nexport {};\n"));
-    assert.deepStrictEqual(response._tag === "CheckResult" && response.diagnostics, [
-      {
-        tool: "oxlint",
+        tool: ToolName.make("oxlint"),
         path: RelativePath.make("src/a.ts"),
         line: 1,
         column: 1,
@@ -79,26 +68,203 @@ it.live("reports an oxlint finding with tool oxlint", () =>
         severity: "warning",
       },
     ]);
-  }).pipe(Effect.provide(TestServer)),
+    assert.isAbove(response.durationMs, 0);
+  }).pipe(Effect.provide(Server)),
 );
 
-it.live("ignores the project's oxlint configs, so their jsPlugins never run", () =>
+it.live("drops the diagnostics of a file the client deleted", () =>
   Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const marker = `${yield* fs.makeTempDirectoryScoped()}/plugin-ran`;
-    const plugin = `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "");\nmodule.exports = { meta: { name: "p" }, rules: {} };\n`;
-    const response = yield* checkProject(EMPTY_LOCKFILE, {
-      ...project("debugger;\nexport {};\n"),
-      "plugin.cjs": plugin,
-      ".oxlintrc.json": '{ "jsPlugins": ["./plugin.cjs"], "rules": { "no-debugger": "off" } }',
-      "src/.oxlintrc.json": '{ "jsPlugins": ["../plugin.cjs"] }',
+    const response = yield* checkChange("fixture", { deleted: ["src/bad.ts"] });
+    assert.deepStrictEqual(response._tag === "ActionResult" && response.diagnostics, []);
+    const kept = yield* checkChange("fixture", {});
+    assert.deepStrictEqual(kept._tag === "ActionResult" && kept.diagnostics, [BAD_TS]);
+  }).pipe(Effect.provide(Server)),
+);
+
+it.live("answers MissingBlobs with exactly the unknown file hashes", () =>
+  Effect.gen(function* () {
+    yield* upload("export const a = 1;\n");
+    const response = yield* postCheck("fixture", {
+      files: { "src/a.ts": "export const a = 1;\n", "src/b.ts": "export const b = 2;\n" },
+    });
+    assert.deepStrictEqual(response, {
+      _tag: "MissingBlobs",
+      sha256s: [Sha256.make("b5d546753d33709dff508a6f2c2e547f432267fbb05b68d3da74fa5f7bda9f7a")],
+    });
+  }).pipe(Effect.provide(Server)),
+);
+
+it.live("answers an identical action from the action cache without running a tool", () =>
+  Effect.gen(function* () {
+    const change = { files: { "src/c.ts": 'export const c: number = "c";\n' } };
+    const first = yield* checkChange("fixture", change);
+    const ranBefore = (yield* spawned).length;
+    const second = yield* checkChange("fixture", change);
+    const C_TS = { ...BAD_TS, path: RelativePath.make("src/c.ts") };
+    assert.deepStrictEqual(
+      [first, second].map((response) =>
+        response._tag === "ActionResult"
+          ? {
+              diagnostics: response.diagnostics,
+              outputs: response.outputs,
+              cached: response.cached,
+            }
+          : response,
+      ),
+      [
+        { diagnostics: [BAD_TS, C_TS], outputs: [], cached: false },
+        { diagnostics: [BAD_TS, C_TS], outputs: [], cached: true },
+      ],
+    );
+    assert.deepStrictEqual(
+      (yield* spawned).slice(ranBefore),
+      [],
+      "the second action spawned nothing",
+    );
+    assert.isAbove(ranBefore, 0);
+  }).pipe(Effect.provide(Server)),
+);
+
+it.live("rejects a toolchain the service does not run, before any work", () =>
+  Effect.gen(function* () {
+    const response = yield* postCheck("fixture", { toolchain: "node20-tsc5.4" });
+    assert.deepStrictEqual(response, { _tag: "Rejected", reason: { _tag: "UnknownToolchain" } });
+    assert.deepStrictEqual(yield* spawned, []);
+  }).pipe(Effect.provide(Server)),
+);
+
+it.live("keeps a client write inside its check when the commit has a symlink", () =>
+  Effect.gen(function* () {
+    // src/root points at the tree root, so src/root/src/a.ts would be the shared checkout's src/a.ts.
+    const poisoned = yield* postCheckRaw("linked", {
+      files: { "src/root/src/a.ts": 'export const a: number = "poisoned";\n' },
+    });
+    yield* upload('export const a: number = "poisoned";\n');
+    const retried = yield* postCheckRaw("linked", {
+      files: { "src/root/src/a.ts": 'export const a: number = "poisoned";\n' },
+    });
+    const clean = yield* checkChange("linked", { files: { "src/b.ts": "export const b = 2;\n" } });
+    assert.deepStrictEqual(
+      [poisoned.status, retried.status, clean._tag === "ActionResult" && clean.diagnostics],
+      [200, 500, []],
+    );
+  }).pipe(
+    Effect.provide(
+      TestServer({
+        linked: {
+          "package.json": EMPTY_PACKAGE,
+          "tsconfig.json": TSCONFIG,
+          "src/a.ts": "export const a = 1;\n",
+          "src/root": { symlink: ".." },
+        },
+      }),
+    ),
+  ),
+);
+
+it.live("rejects an unregistered repo before any work", () =>
+  Effect.gen(function* () {
+    const response = yield* postCheck("fixture", {
+      repo: "test/unregistered",
+      files: { "src/a.ts": "never uploaded" },
+    });
+    assert.deepStrictEqual(response, { _tag: "Rejected", reason: { _tag: "UnknownRepo" } });
+    assert.deepStrictEqual(yield* spawned, []);
+  }).pipe(Effect.provide(Server)),
+);
+
+it.live("rejects changed or deleted dependency and config files before any work", () =>
+  Effect.gen(function* () {
+    const response = yield* postCheck("fixture", {
+      files: { "package.json": "{}", "src/a.ts": "never uploaded", "src/node_modules/x.ts": "" },
+      deleted: ["tsconfig.json", "src/bad.ts"],
+    });
+    assert.deepStrictEqual(response, {
+      _tag: "Rejected",
+      reason: {
+        _tag: "ProtectedPaths",
+        paths: [
+          RelativePath.make("package.json"),
+          RelativePath.make("src/node_modules/x.ts"),
+          RelativePath.make("tsconfig.json"),
+        ],
+      },
+    });
+    assert.deepStrictEqual(yield* spawned, []);
+  }).pipe(Effect.provide(Server)),
+);
+
+it.live("rejects a change to a file the commit's tsconfig extends, whatever its name", () =>
+  Effect.gen(function* () {
+    const response = yield* checkChange("fixture", {
+      files: { "config/strict.json": "{}", "config/strict": "{}", "src/a.ts": "export {};\n" },
+    });
+    assert.deepStrictEqual(response, {
+      _tag: "Rejected",
+      reason: {
+        _tag: "ProtectedPaths",
+        paths: [RelativePath.make("config/strict.json"), RelativePath.make("config/strict")],
+      },
     });
     assert.deepStrictEqual(
-      response._tag === "CheckResult" && response.diagnostics.map((d) => `${d.path} ${d.code}`),
-      ["src/a.ts eslint(no-debugger)"],
+      (yield* spawned).filter((line) => !line.startsWith("git ")),
+      [],
+      "no install and no tool ran",
     );
-    assert.isFalse(yield* fs.exists(marker));
-  }).pipe(Effect.provide(TestServer)),
+  }).pipe(Effect.provide(Server)),
+);
+
+it.live("rejects a commit the repo does not have", () =>
+  Effect.gen(function* () {
+    const response = yield* postCheck("fixture", {
+      commit: "0000000000000000000000000000000000000001",
+    });
+    assert.deepStrictEqual(response, { _tag: "Rejected", reason: { _tag: "UnknownCommit" } });
+  }).pipe(Effect.provide(Server)),
+);
+
+it.live("fetches and installs once for two concurrent checks of one commit", () =>
+  Effect.gen(function* () {
+    const responses = yield* Effect.all(
+      [
+        checkChange("fixture", { deleted: ["src/bad.ts"] }),
+        checkChange("fixture", { files: { "src/c.ts": "export const c = 3;\n" } }),
+      ],
+      { concurrency: "unbounded" },
+    );
+    assert.deepStrictEqual(
+      responses.map((response) => response._tag === "ActionResult" && response.diagnostics),
+      [[], [BAD_TS]],
+    );
+    const commands = (yield* spawned).map((line) => line.split(" ").slice(0, 2).join(" "));
+    assert.deepStrictEqual(
+      [
+        commands.filter((command) => command === "git fetch").length,
+        commands.filter((command) => command === "pnpm install").length,
+      ],
+      [1, 1],
+    );
+  }).pipe(Effect.provide(Server)),
+);
+
+it.live("sends a repo's token only in its Authorization header, never in output or logs", () =>
+  Effect.gen(function* () {
+    const response = yield* postCheckRaw("fixture", {
+      repo: "test/private",
+      commit: "0000000000000000000000000000000000000001",
+    });
+    const body = yield* response.text;
+    const { privateAuthorizations } = yield* Fixtures;
+    const header = `Basic ${Buffer.from(`x-access-token:${PRIVATE_TOKEN}`).toString("base64")}`;
+    assert.deepStrictEqual(
+      { status: response.status, authorizations: [...new Set(privateAuthorizations)] },
+      { status: 502, authorizations: [header] },
+    );
+    assert.match(body, /^git fetch from test\/private failed:\n.*terminal prompts disabled/su);
+    const surfaces = [body, ...(yield* spawned), ...(yield* LogLines)].join("\n");
+    assert.notInclude(surfaces, PRIVATE_TOKEN);
+    assert.notInclude(surfaces, header.slice("Basic ".length));
+  }).pipe(Effect.provide(Server)),
 );
 
 it.live("rejects a blob whose content does not match its hash and does not store it", () =>
@@ -116,15 +282,9 @@ it.live("rejects a blob whose content does not match its hash and does not store
       yield* response.text,
       `Blob content hashes to 3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d, not ${hashOfA}`,
     );
-    const check = yield* postCheck(EMPTY_LOCKFILE, { "src/a.ts": "a" });
-    assert.deepStrictEqual(check, {
-      _tag: "MissingBlobs",
-      sha256s: [
-        Sha256.make("17c814b167307942d3609c7b9d916ceddb85839573ab39baa114e30edb132a1a"),
-        hashOfA,
-      ],
-    });
-  }).pipe(Effect.provide(TestServer)),
+    const check = yield* postCheck("fixture", { files: { "src/a.ts": "a" } });
+    assert.deepStrictEqual(check, { _tag: "MissingBlobs", sha256s: [hashOfA] });
+  }).pipe(Effect.provide(Server)),
 );
 
 it.live("answers 401 on every route without the right bearer token", () =>
@@ -134,7 +294,7 @@ it.live("answers 401 on every route without the right bearer token", () =>
       "/blobs/ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
     ).pipe(HttpClientRequest.bodyText("a"));
     const check = HttpClientRequest.post("/check").pipe(
-      HttpClientRequest.bodyText('{"lockfile":"x","files":[]}', "application/json"),
+      HttpClientRequest.bodyText('{"repo":"test/fixture"}', "application/json"),
     );
     const statuses = yield* Effect.forEach(
       [
@@ -147,23 +307,5 @@ it.live("answers 401 on every route without the right bearer token", () =>
       (request) => client.execute(request).pipe(Effect.map((response) => response.status)),
     );
     assert.deepStrictEqual(statuses, [401, 401, 401, 401, 401]);
-  }).pipe(Effect.provide(TestServer)),
-);
-
-it.live("runs one install for two concurrent checks on a new lockfile", () =>
-  Effect.gen(function* () {
-    const files = project("export const a = 1;\n");
-    const responses = yield* Effect.all(
-      [checkProject(EMPTY_LOCKFILE, files), checkProject(EMPTY_LOCKFILE, files)],
-      { concurrency: "unbounded" },
-    );
-    assert.deepStrictEqual(
-      responses.map((response) => response._tag === "CheckResult" && response.diagnostics),
-      [[], []],
-    );
-    const installs = (yield* Ref.get(yield* SpawnLog)).filter((line) =>
-      line.startsWith("pnpm install"),
-    );
-    assert.strictEqual(installs.length, 1);
-  }).pipe(Effect.provide(TestServer)),
+  }).pipe(Effect.provide(Server)),
 );

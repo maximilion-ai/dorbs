@@ -1,12 +1,14 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-import { type Diagnostic, RelativePath } from "@dorbs/protocol/typecheck";
+import { type Diagnostic, RelativePath, ToolName } from "@dorbs/protocol/typecheck";
 
 const LOCATED = /^(.+)\((\d+),(\d+)\): (error|warning) (TS\d+): (.*)$/;
 const UNLOCATED = /^(error|warning) (TS\d+): (.*)$/;
 const isRelativePath = Schema.is(RelativePath);
 const CONFIG_PATH = RelativePath.make("tsconfig.json");
+const TSRS = ToolName.make("tsrs");
+const OXLINT = ToolName.make("oxlint");
 
 // Errors with no file, or in a file outside the project, point at the tsconfig, so a failing check
 // never comes back empty. Outside text is withheld: a tsconfig can pull in any readable file.
@@ -16,7 +18,7 @@ const tsrsDiagnostic = (line: string): Diagnostic | undefined => {
     const [, path = "", row = "", column = "", severity, code = "", message = ""] = located;
     const inProject = isRelativePath(path);
     return {
-      tool: "tsrs",
+      tool: TSRS,
       path: inProject ? path : CONFIG_PATH,
       line: inProject ? Number(row) : 1,
       column: inProject ? Number(column) : 1,
@@ -29,7 +31,7 @@ const tsrsDiagnostic = (line: string): Diagnostic | undefined => {
   if (!unlocated) return undefined;
   const [, severity, code = "", message = ""] = unlocated;
   return {
-    tool: "tsrs",
+    tool: TSRS,
     path: CONFIG_PATH,
     line: 1,
     column: 1,
@@ -73,7 +75,7 @@ const decodeOxlintOutput = Schema.decodeEffect(Schema.fromJsonString(OxlintOutpu
 export const parseOxlint = Effect.fn("parseOxlint")(function* (output: string) {
   const { diagnostics } = yield* decodeOxlintOutput(output);
   return diagnostics.map((diagnostic): Diagnostic => ({
-    tool: "oxlint",
+    tool: OXLINT,
     path: diagnostic.filename,
     line: Math.max(1, diagnostic.labels[0]?.span.line ?? 1),
     column: Math.max(1, diagnostic.labels[0]?.span.column ?? 1),

@@ -1,21 +1,19 @@
 import * as NodeCrypto from "node:crypto";
 
 import * as Context from "effect/Context";
-import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
-import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
-import { type CheckRequest, Sha256 } from "@dorbs/protocol/typecheck";
+import { Sha256 } from "@dorbs/protocol/typecheck";
 
-import { BlobStore } from "./BlobStore.ts";
+import type { Checkout } from "./Checkouts.ts";
 import { runProcess } from "./runProcess.ts";
 import { ServiceConfig } from "./ServiceConfig.ts";
+import * as SingleFlight from "./SingleFlight.ts";
 
 export class InstallFailed extends Schema.TaggedError<InstallFailed>()("InstallFailed", {
   lockfile: Sha256,
@@ -26,52 +24,52 @@ export class InstallFailed extends Schema.TaggedError<InstallFailed>()("InstallF
   }
 }
 
-// A failed install leaves no entry, so the next check on that lockfile retries it.
-type InstallState =
-  | { readonly _tag: "Installing"; readonly done: Deferred.Deferred<string, InstallFailed> }
-  | { readonly _tag: "Ready"; readonly dir: string };
-
 export class Installs extends Context.Service<
   Installs,
   {
-    /** Returns the directory holding node_modules for the request's lockfile. */
-    readonly ensure: (request: CheckRequest) => Effect.Effect<string, InstallFailed>;
+    /** Returns the directory holding node_modules for the checkout's lockfile. */
+    readonly ensure: (checkout: Checkout) => Effect.Effect<string, InstallFailed>;
   }
 >()("dorbs/typecheck/Installs") {}
 
-// pnpm-workspace.yaml is not copied: it carries pnpm settings a client must not control.
-export const isManifest = (path: string) =>
-  path === "package.json" || path.endsWith("/package.json");
+// The root files pnpm reads besides the manifests; a commit without a lockfile installs an empty one.
+// No .npmrc: registry and pnpmfile settings there would steer the shared install.
+const ROOT_INPUTS = ["pnpm-lock.yaml", "pnpm-workspace.yaml"];
 
 const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const blobs = yield* BlobStore;
   const { dataDir } = yield* ServiceConfig;
-  const scope = yield* Effect.scope;
   const root = path.join(dataDir, "installs");
   const storeDir = path.join(dataDir, "pnpm-store");
   yield* fs.makeDirectory(root, { recursive: true });
-  const states = yield* Ref.make(new Map<Sha256, InstallState>());
+  const once = yield* SingleFlight.make<string, InstallFailed>();
 
-  const install = Effect.fn("Installs.install")(function* (request: CheckRequest) {
-    const dir = path.join(root, request.lockfile);
+  const install = Effect.fn("Installs.install")(function* (checkout: Checkout) {
+    const dir = path.join(root, checkout.lockfile);
     if (yield* fs.exists(dir).pipe(Effect.orDie)) return dir;
     const staging = path.join(root, `.staging-${NodeCrypto.randomUUID()}`);
     yield* Effect.gen(function* () {
       yield* fs.makeDirectory(staging);
-      yield* fs.copyFile(blobs.pathOf(request.lockfile), path.join(staging, "pnpm-lock.yaml"));
-      for (const file of request.files.filter((file) => isManifest(file.path))) {
-        const target = path.join(staging, file.path);
-        yield* fs.makeDirectory(path.dirname(target), { recursive: true });
-        yield* fs.copyFile(blobs.pathOf(file.sha256), target);
+      yield* fs.writeFileString(path.join(staging, "pnpm-lock.yaml"), "");
+      const inputs = [
+        ...ROOT_INPUTS,
+        ...checkout.packages.map((dir) => path.join(dir, "package.json")),
+      ];
+      for (const input of inputs) {
+        const source = path.join(checkout.dir, input);
+        if (!(yield* fs.exists(source))) continue;
+        yield* fs.makeDirectory(path.dirname(path.join(staging, input)), { recursive: true });
+        yield* fs.copyFile(source, path.join(staging, input));
       }
     }).pipe(Effect.orDie);
     const result = yield* runProcess(spawner, staging, "pnpm", [
       "install",
       "--frozen-lockfile",
       "--ignore-scripts",
+      // A pnpmfile's hooks would run as code in the service.
+      "--ignore-pnpmfile",
       "--store-dir",
       storeDir,
     ]).pipe(
@@ -83,7 +81,7 @@ const make = Effect.gen(function* () {
     if (result.exitCode !== 0) {
       yield* fs.remove(staging, { recursive: true }).pipe(Effect.orDie);
       return yield* new InstallFailed({
-        lockfile: request.lockfile,
+        lockfile: checkout.lockfile,
         output: `${result.stdout}${result.stderr}`.slice(-4000),
       });
     }
@@ -91,32 +89,8 @@ const make = Effect.gen(function* () {
     return dir;
   });
 
-  const settle = (lockfile: Sha256, exit: Exit.Exit<string, InstallFailed>) =>
-    Ref.update(states, (map) => {
-      const next = new Map(map);
-      if (Exit.isSuccess(exit)) next.set(lockfile, { _tag: "Ready", dir: exit.value });
-      else next.delete(lockfile);
-      return next;
-    });
-
-  const ensure: Installs["Service"]["ensure"] = Effect.fn("Installs.ensure")(function* (request) {
-    const done = yield* Deferred.make<string, InstallFailed>();
-    const existing = yield* Ref.modify(states, (map) => {
-      const state = map.get(request.lockfile);
-      if (state) return [state, map];
-      return [undefined, new Map(map).set(request.lockfile, { _tag: "Installing", done })];
-    });
-    if (existing?._tag === "Ready") return existing.dir;
-    if (existing?._tag === "Installing") return yield* Deferred.await(existing.done);
-    // Forked into the service scope so a client hanging up does not cancel an install others await.
-    yield* install(request).pipe(
-      Effect.onExit((exit) =>
-        settle(request.lockfile, exit).pipe(Effect.andThen(Deferred.done(done, exit))),
-      ),
-      Effect.forkIn(scope),
-    );
-    return yield* Deferred.await(done);
-  });
+  const ensure: Installs["Service"]["ensure"] = (checkout) =>
+    once(checkout.lockfile, install(checkout));
 
   return Installs.of({ ensure });
 });

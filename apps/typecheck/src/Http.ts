@@ -8,15 +8,17 @@ import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 
-import { CheckRequest, CheckResponse, Sha256 } from "@dorbs/protocol/typecheck";
+import { Action, ActionResponse, Sha256 } from "@dorbs/protocol/typecheck";
 
+import * as ActionCache from "./ActionCache.ts";
 import * as BlobStore from "./BlobStore.ts";
 import * as Checker from "./Checker.ts";
+import * as Checkouts from "./Checkouts.ts";
 import * as Installs from "./Installs.ts";
 import * as ServiceConfig from "./ServiceConfig.ts";
 
 const BlobParams = Schema.Struct({ sha256: Sha256 });
-const encodeCheckResponse = HttpServerResponse.schemaJson(CheckResponse);
+const encodeActionResponse = HttpServerResponse.schemaJson(ActionResponse);
 
 const digest = (value: string) => NodeCrypto.createHash("sha256").update(value).digest();
 
@@ -57,16 +59,18 @@ const routes = HttpRouter.use(
 
     yield* router.add(
       "POST",
-      "/check",
+      "/actions",
       Effect.gen(function* () {
-        const request = yield* HttpServerRequest.schemaBodyJson(CheckRequest);
-        return yield* encodeCheckResponse(yield* checker.check(request)).pipe(Effect.orDie);
+        const action = yield* HttpServerRequest.schemaBodyJson(Action);
+        return yield* encodeActionResponse(yield* checker.run(action)).pipe(Effect.orDie);
       }).pipe(
         Effect.catchTags({
           SchemaError: (error) =>
             Effect.succeed(HttpServerResponse.text(error.message, { status: 400 })),
           InstallFailed: (error) =>
             Effect.succeed(HttpServerResponse.text(error.message, { status: 422 })),
+          FetchFailed: (error) =>
+            Effect.succeed(HttpServerResponse.text(error.message, { status: 502 })),
         }),
       ),
     );
@@ -77,7 +81,7 @@ const routes = HttpRouter.use(
 export const layer = routes.pipe(
   Layer.provide(
     Checker.layer.pipe(
-      Layer.provideMerge(Installs.layer),
+      Layer.provideMerge(Layer.mergeAll(ActionCache.layer, Checkouts.layer, Installs.layer)),
       Layer.provideMerge(BlobStore.layer),
       Layer.provideMerge(ServiceConfig.layer),
     ),
