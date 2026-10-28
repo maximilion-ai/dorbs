@@ -55,35 +55,36 @@ const agentEndpoint = (agentUrl: URL, connection: string) => {
   return endpoint.href;
 };
 
-const relay = Effect.fn("AcpMux.relay")(
-  function* (client: Socket.Socket, agentUrl: URL, agentToken: Redacted.Redacted) {
-    const connection = NodeCrypto.randomUUID();
-    yield* Effect.annotateLogsScoped({ connection });
-    const agent = yield* Socket.makeWebSocket(agentEndpoint(agentUrl, connection), {
-      headers: { authorization: `Bearer ${Redacted.value(agentToken)}` },
-    });
-    // The agent writer waits for the WebSocket to open, so lines read before then queue in order.
-    const toAgent = yield* agent.writer;
-    const toClient = yield* client.writer;
-    const upstream = Socket.toStream(client).pipe(
-      Stream.decodeText,
-      Stream.splitLines,
-      Stream.runForEach(toAgent.write),
+const relay = Effect.fn("AcpMux.relay")(function* (
+  client: Socket.Socket,
+  agentUrl: URL,
+  agentToken: Redacted.Redacted,
+) {
+  const connection = NodeCrypto.randomUUID();
+  const agent = yield* Socket.makeWebSocket(agentEndpoint(agentUrl, connection), {
+    headers: { authorization: `Bearer ${Redacted.value(agentToken)}` },
+  });
+  // The agent writer waits for the WebSocket to open, so lines read before then queue in order.
+  const toAgent = yield* agent.writer;
+  const toClient = yield* client.writer;
+  const upstream = Socket.toStream(client).pipe(
+    Stream.decodeText,
+    Stream.splitLines,
+    Stream.runForEach(toAgent.write),
+  );
+  const downstream = Effect.gen(function* () {
+    const { pull } = yield* agent.reader;
+    return yield* pull.pipe(
+      Effect.flatMap((messages) => toClient.writeAll(Arr.flatMap(messages, (m) => [m, "\n"]))),
+      Effect.forever,
     );
-    const downstream = Effect.gen(function* () {
-      const { pull } = yield* agent.reader;
-      return yield* pull.pipe(
-        Effect.flatMap((messages) => toClient.writeAll(Arr.flatMap(messages, (m) => [m, "\n"]))),
-        Effect.forever,
-      );
-    });
-    return yield* Effect.raceFirst(upstream, downstream);
-  },
-  Effect.scoped,
-  Effect.catchTags({
-    SocketError: (error) => Effect.logInfo(`connection closed: ${error.message}`),
-  }),
-);
+  });
+  return yield* Effect.raceFirst(upstream, downstream).pipe(
+    Effect.catchTags({
+      SocketError: (error) => Effect.logInfo(`connection ${connection} closed: ${error.message}`),
+    }),
+  );
+}, Effect.scoped);
 
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
