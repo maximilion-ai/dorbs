@@ -8,12 +8,12 @@ import {
   type Message,
   type ToolCall,
 } from "@earendil-works/pi-ai";
-import * as Layer from "effect/Layer";
-
-import { ModelProvider } from "../src/ModelProvider.ts";
-
 export const HELLO = "export const hello = (name: string): string => `Hello, ${name}!`;\n";
 export const COUNT = 'export const count: number = "three";\n';
+const E2E_HELLO = 'export const n: number = "x";\n';
+const E2E_TSCONFIG =
+  '{ "compilerOptions": { "strict": true, "noEmit": true }, "include": ["src"] }\n';
+const E2E_PACKAGE = '{ "name": "dorbs-e2e", "private": true }\n';
 
 type Step = (signal: AbortSignal | undefined) => AssistantMessage | Promise<AssistantMessage>;
 
@@ -46,6 +46,13 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
     say("count is a string."),
   ],
   "wait for cancel": [callTool("list_files", {}, "call-list"), untilAborted],
+  e2e: [
+    callTool("write_file", { path: "tsconfig.json", content: E2E_TSCONFIG }, "call-tsconfig"),
+    callTool("write_file", { path: "package.json", content: E2E_PACKAGE }, "call-package"),
+    callTool("write_file", { path: "src/hello.ts", content: E2E_HELLO }, "call-hello"),
+    callTool("typecheck", {}, "call-typecheck"),
+    say("n is a string."),
+  ],
 };
 
 const userText = (message: Message | undefined): string => {
@@ -63,7 +70,7 @@ const nextStep = (messages: ReadonlyArray<Message>): Step => {
 };
 
 /** A fake model that answers from SCRIPTS, keyed by the prompt text. */
-export const layer = Layer.sync(ModelProvider, () => {
+export const scriptedModel = () => {
   const faux = fauxProvider();
   // The faux queue drops each response it plays, so the one factory re-queues itself.
   const respond: FauxResponseFactory = (context, options) => {
@@ -72,4 +79,4 @@ export const layer = Layer.sync(ModelProvider, () => {
   };
   faux.setResponses([respond]);
   return { provider: faux.provider, model: faux.getModel() };
-});
+};

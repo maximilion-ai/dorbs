@@ -8,6 +8,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
+import { scriptedModel } from "./ScriptedModel.ts";
+
 export class ModelUnavailable extends Schema.TaggedError<ModelUnavailable>()("ModelUnavailable", {
   provider: Schema.String,
   reason: Schema.String,
@@ -24,13 +26,15 @@ export class ModelProvider extends Context.Service<
 >()("dorbs/agent-worker/ModelProvider") {}
 
 const ModelConfig = Config.all({
-  provider: Config.Literals(["openrouter", "workers-ai"], "MODEL_PROVIDER"),
+  provider: Config.Literals(["openrouter", "workers-ai", "scripted"], "MODEL_PROVIDER"),
   id: Config.NonEmptyString("MODEL_ID"),
+  dev: Config.Boolean("ALCHEMY_DEV").pipe(Config.withDefault(false)),
 });
 
 /**
  * Reads MODEL_PROVIDER and MODEL_ID. OpenRouter reads its OPENROUTER_API_KEY secret from the environment
- * itself; Workers AI needs the Worker's `AI` binding.
+ * itself; Workers AI needs the Worker's `AI` binding. The scripted model runs only under `alchemy dev`,
+ * which sets ALCHEMY_DEV, so a deployed Worker cannot answer from a script.
  */
 export const layer = (ai: Ai | undefined) =>
   Layer.effect(
@@ -39,6 +43,15 @@ export const layer = (ai: Ai | undefined) =>
       const config = yield* ModelConfig;
       if (config.provider === "openrouter") {
         return { provider: openrouterProvider(), model: { provider: "openrouter", id: config.id } };
+      }
+      if (config.provider === "scripted") {
+        if (!config.dev) {
+          return yield* new ModelUnavailable({
+            provider: config.provider,
+            reason: "only under alchemy dev (ALCHEMY_DEV=true)",
+          });
+        }
+        return scriptedModel();
       }
       if (ai === undefined) {
         return yield* new ModelUnavailable({ provider: config.provider, reason: "no AI binding" });

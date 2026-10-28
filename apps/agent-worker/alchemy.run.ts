@@ -17,6 +17,7 @@ export const Worker = Cloudflare.Worker("AgentWorker", {
     MODEL_PROVIDER: Config.String("MODEL_PROVIDER"),
     MODEL_ID: Config.String("MODEL_ID"),
     OPENROUTER_API_KEY: Config.Redacted("OPENROUTER_API_KEY"),
+    ALCHEMY_DEV: Alchemy.ALCHEMY_DEV,
   },
   dev: { port: 8787 },
 });

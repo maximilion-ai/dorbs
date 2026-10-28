@@ -1,7 +1,4 @@
-import { makeAcpConnection } from "../src/AcpConnection.ts";
-import * as ScriptedModel from "./ScriptedModel.ts";
-
-export { default } from "../src/worker.ts";
+export { AcpConnection, default } from "../src/worker.ts";
 
 declare global {
   namespace Cloudflare {
@@ -10,5 +7,3 @@ declare global {
     }
   }
 }
-
-export class AcpConnection extends makeAcpConnection(() => ScriptedModel.layer) {}

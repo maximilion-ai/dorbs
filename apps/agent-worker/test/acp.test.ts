@@ -3,7 +3,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 
 import { connect, open, updates } from "./client.ts";
-import { COUNT, HELLO } from "./ScriptedModel.ts";
+import { COUNT, HELLO } from "../src/ScriptedModel.ts";
 import type { AcpConnection } from "./worker.ts";
 
 // Captured from T3 Code 125b619: effect-acp's AcpClient.initialize with provider-acp's client capabilities.
