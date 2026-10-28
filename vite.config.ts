@@ -25,6 +25,8 @@ export default defineConfig({
     rules: {
       "eslint/no-control-regex": "off",
       "eslint/no-shadow": "off",
+      // Effect discriminates unions on `_tag`.
+      "eslint/no-underscore-dangle": "off",
       "eslint/no-unused-vars": [
         "error",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_", caughtErrorsIgnorePattern: "^_" },
@@ -45,6 +47,13 @@ export default defineConfig({
       "dorbs/prefer-effect-fn": "error",
       "dorbs/require-suppression-reason": "error",
     },
+    overrides: [
+      {
+        // ACP's open enums are `"known" | string` on purpose, so editors suggest the known values.
+        files: ["packages/protocol/src/acp.ts"],
+        rules: { "typescript/no-redundant-type-constituents": "off" },
+      },
+    ],
     options: {
       reportUnusedDisableDirectives: "error",
       typeAware: true,

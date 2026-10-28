@@ -7,6 +7,10 @@
     "packages/*": {
       "includeEntryExports": true,
     },
+    "packages/protocol": {
+      "includeEntryExports": true,
+      "entry": ["scripts/vendor-acp-v1.ts"],
+    },
     "packages/oxlint-plugin": {
       // oxlint loads index.ts by path from vite.config.ts and reads its default export.
       "includeEntryExports": false,
