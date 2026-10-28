@@ -36,9 +36,17 @@ export const FileChange = Schema.Struct({
 });
 export type FileChange = typeof FileChange.Type;
 
+/** A call's arguments as tool events carry them, before any schema narrows them. */
+type Args = Readonly<Record<string, unknown>>;
+
+const arg = (args: Args, key: string): string | undefined =>
+  typeof args[key] === "string" ? args[key] : undefined;
+
 type Row<P extends TSchema> = {
   readonly name: string;
   readonly kind: ToolKind;
+  /** T3's label for a call. For execute tools, T3 shows a backticked command as the shell line. */
+  readonly title: (args: Args) => string;
   readonly description: string;
   readonly parameters: P;
   /** Whether Pi may run an eviction-interrupted call again. */
@@ -49,6 +57,7 @@ type Row<P extends TSchema> = {
 const row = <P extends TSchema>(tool: Row<P>) => ({
   name: tool.name,
   kind: tool.kind,
+  title: tool.title,
   register: (host: ToolHost): ToolRegistration<P> => ({
     name: tool.name,
     description: tool.description,
@@ -61,7 +70,12 @@ const row = <P extends TSchema>(tool: Row<P>) => ({
 const decodePath = Schema.decodeUnknownSync(RelativePath);
 const decodeCommit = Schema.decodeUnknownSync(CommitSha);
 
-const absolute = (path: string): string => `${WORKSPACE_ROOT}/${decodePath(path)}`;
+// Models often write ./src/a.ts, and . for the workspace root.
+const absolute = (path: string): string =>
+  `${WORKSPACE_ROOT}/${decodePath(path.replace(/^(\.\/)+/u, ""))}`;
+
+const directory = (path: string | undefined): string =>
+  path === undefined || path === "." || path === "./" ? WORKSPACE_ROOT : absolute(path);
 
 const relative = (path: string): string => path.slice(WORKSPACE_ROOT.length + 1);
 
@@ -134,6 +148,7 @@ const Path = Type.String({ description: "Path relative to the workspace root, su
 const TOOLS = [
   row({
     name: "read_file",
+    title: (args) => `read_file ${arg(args, "path")}`,
     kind: "read",
     description: "Read a UTF-8 text file from the workspace.",
     parameters: Type.Object({ path: Path }),
@@ -143,6 +158,7 @@ const TOOLS = [
   }),
   row({
     name: "write_file",
+    title: (args) => `write_file ${arg(args, "path")}`,
     kind: "edit",
     description: "Create or replace a whole file in the workspace.",
     parameters: Type.Object({ path: Path, content: Type.String() }),
@@ -151,6 +167,7 @@ const TOOLS = [
   }),
   row({
     name: "edit_file",
+    title: (args) => `edit_file ${arg(args, "path")}`,
     kind: "edit",
     description: "Replace the one occurrence of oldText with newText in a workspace file.",
     parameters: Type.Object({ path: Path, oldText: Type.String(), newText: Type.String() }),
@@ -167,32 +184,30 @@ const TOOLS = [
   }),
   row({
     name: "list_files",
+    title: (args) => ["list_files", arg(args, "path")].filter(Boolean).join(" "),
     kind: "search",
     description: "List the files under a workspace directory, or the whole workspace.",
     parameters: Type.Object({ path: Type.Optional(Path) }),
     replay: "safe",
     run: async ({ path }, { workspace }) => {
-      const entries = await workspace.fs.find(
-        path === undefined ? WORKSPACE_ROOT : absolute(path),
-        "**/*",
-        NOT_GIT,
-      );
+      const entries = await workspace.fs.find(directory(path), "**/*", NOT_GIT);
       const files = entries.filter((entry) => entry.type === "file").map((e) => relative(e.path));
       return text(files.length === 0 ? "No files." : files.join("\n"));
     },
   }),
   row({
     name: "grep",
+    title: (args) => ["grep", arg(args, "pattern"), arg(args, "path")].filter(Boolean).join(" "),
     kind: "search",
     description: "Search workspace files for a regular expression.",
     parameters: Type.Object({ pattern: Type.String(), path: Type.Optional(Path) }),
     replay: "safe",
     run: async ({ pattern, path }, { workspace }) => {
-      const matches = await workspace.fs.grep(
-        pattern,
-        path === undefined ? WORKSPACE_ROOT : absolute(path),
-        { regex: true, limit: 200, ...NOT_GIT },
-      );
+      const matches = await workspace.fs.grep(pattern, directory(path), {
+        regex: true,
+        limit: 200,
+        ...NOT_GIT,
+      });
       return text(
         matches.length === 0
           ? "No matches."
@@ -202,7 +217,8 @@ const TOOLS = [
   }),
   row({
     name: "clone_repo",
-    kind: "fetch",
+    title: (args) => `\`git clone ${arg(args, "repo")}\``,
+    kind: "execute",
     description:
       "Clone a registered repo into the workspace root. Type checks run against the cloned commit.",
     parameters: Type.Object({ repo: Type.String({ description: "Repo id, such as owner/name" }) }),
@@ -232,6 +248,7 @@ const TOOLS = [
   }),
   row({
     name: "typecheck",
+    title: () => "`typecheck`",
     kind: "execute",
     description: "Type-check and lint the cloned repo with your changes, using tsrs and oxlint.",
     parameters: Type.Object({}),
@@ -252,8 +269,16 @@ const TOOLS = [
   }),
 ];
 
-export const toolKind = (name: string): ToolKind =>
-  TOOLS.find((tool) => tool.name === name)?.kind ?? "other";
+/** How the client shows a call of tool `name`: its title and ACP kind. */
+export const toolPresentation = (
+  name: string,
+  args: Args,
+): { readonly title: string; readonly kind: ToolKind } => {
+  const tool = TOOLS.find((candidate) => candidate.name === name);
+  return tool === undefined
+    ? { title: name, kind: "other" }
+    : { title: tool.title(args), kind: tool.kind };
+};
 
 export const registerTools = (host: ToolHost): ToolRegistration[] =>
   TOOLS.map((tool) => tool.register(host));

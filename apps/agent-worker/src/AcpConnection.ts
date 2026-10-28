@@ -29,6 +29,16 @@ const INITIALIZE: Acp.InitializeResponse = {
 const encodeInitialize = Schema.encodeEffect(Acp.InitializeResponse);
 const decodeNewSession = Schema.decodeUnknownEffect(Acp.NewSessionRequest);
 const encodeNewSession = Schema.encodeEffect(Acp.NewSessionResponse);
+
+/** T3 fills its model picker from a select option in the model category; a deployment runs one model. */
+const modelOption = (modelId: string): Acp.SessionConfigOption => ({
+  id: "model",
+  name: "Model",
+  category: "model",
+  type: "select",
+  currentValue: modelId,
+  options: [{ value: modelId, name: modelId }],
+});
 const sessionOf = Schema.decodeUnknownOption(Schema.Struct({ sessionId: Acp.SessionId }));
 
 /**
@@ -88,7 +98,7 @@ export class AcpConnection extends DurableObject {
             const sessionId = crypto.randomUUID();
             return Effect.promise(() =>
               this.env.AcpSession.getByName(sessionId).open(this.connection, cwd),
-            ).pipe(Effect.as({ sessionId }));
+            ).pipe(Effect.as({ sessionId, configOptions: [modelOption(this.env.MODEL_ID)] }));
           }),
           Effect.flatMap((response) => encodeNewSession(response).pipe(Effect.orDie)),
         ),

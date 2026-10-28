@@ -3,7 +3,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentEvent } from "@earendil-works/pi-durable";
 import * as Schema from "effect/Schema";
 
-import { FileChange, toolKind } from "./tools.ts";
+import { FileChange, toolPresentation } from "./tools.ts";
 
 /** Characters already sent of each text or thinking block in the in-flight assistant message, by index. */
 export type Sent = ReadonlyMap<number, number>;
@@ -91,8 +91,7 @@ export const toSessionUpdates = (sent: Sent, event: AgentEvent, cwd: string): Ma
           {
             sessionUpdate: "tool_call",
             toolCallId: event.toolCallId,
-            title: path === undefined ? event.toolName : `${event.toolName} ${path}`,
-            kind: toolKind(event.toolName),
+            ...toolPresentation(event.toolName, event.args),
             status: "in_progress",
             rawInput: event.args,
             ...(path === undefined ? {} : { locations: [{ path: underCwd(cwd, path) }] }),

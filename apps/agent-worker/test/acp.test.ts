@@ -123,6 +123,21 @@ it("sends each frame as a WebSocket message without a line terminator, which acp
   );
 });
 
+it("offers the deployment's one model in session/new, where T3 fills its model picker", async () => {
+  const client = await connect();
+  const response = await client.request(2, "session/new", { cwd: "/tmp/project", mcpServers: [] });
+  assert.deepStrictEqual(response.result.configOptions, [
+    {
+      id: "model",
+      name: "Model",
+      category: "model",
+      type: "select",
+      currentValue: "scripted",
+      options: [{ value: "scripted", name: "scripted" }],
+    },
+  ]);
+});
+
 it("creates a session without opening Pi", async () => {
   const client = await connect();
   const sessionId = await client.newSession();
@@ -143,6 +158,17 @@ it("writes src/hello.ts and reports the write as a diff under the client cwd", a
     instance.workspace.fs.readFile("/workspace/src/hello.ts", "utf8"),
   );
   assert.strictEqual(written, HELLO);
+});
+
+it("takes ./ paths and . for the workspace root, as models write them", async () => {
+  const client = await connect();
+  const sessionId = await client.newSession();
+  const response = await client.request(2, "session/prompt", prompt(sessionId, "list root"));
+  assert.deepStrictEqual(response.result, { stopReason: "end_turn" });
+  const listed = toolResult(updates(client.frames), "call-list-root");
+  assert.deepStrictEqual(listed?.content, [
+    { type: "content", content: { type: "text", text: "src/hello.ts" } },
+  ]);
 });
 
 it("uploads the blobs the typecheck service lacks and reports its diagnostics", async () => {
@@ -360,7 +386,7 @@ it("runs a prompt on after its connection drops, and the next load replays how i
     assert.deepStrictEqual(attached.replay.at(-1), {
       sessionUpdate: "tool_call",
       toolCallId: "call-typecheck",
-      title: "typecheck",
+      title: "`typecheck`",
       kind: "execute",
       status: "in_progress",
       rawInput: {},

@@ -83,6 +83,11 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
   ],
   "typecheck only": [callTool("typecheck", {}, "call-typecheck"), say("Checked.")],
   "read hello": [callTool("read_file", { path: "src/hello.ts" }, "call-read"), recall],
+  "list root": [
+    callTool("write_file", { path: "./src/hello.ts", content: HELLO }, "call-hello"),
+    callTool("list_files", { path: "." }, "call-list-root"),
+    say("Listed."),
+  ],
   "wait for cancel": [callTool("list_files", {}, "call-list"), untilAborted],
   e2e: [
     callTool("clone_repo", { repo: "dorbs/e2e" }, "call-clone"),
