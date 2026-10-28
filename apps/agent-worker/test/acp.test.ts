@@ -3,7 +3,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 
 import { connect, open, updates } from "./client.ts";
-import { COUNT, HELLO } from "../src/ScriptedModel.ts";
+import { COUNT, HELLO, NEW_FILE } from "../src/ScriptedModel.ts";
 import type { AcpConnection } from "./worker.ts";
 
 // Captured from T3 Code 125b619: effect-acp's AcpClient.initialize with provider-acp's client capabilities.
@@ -21,6 +21,26 @@ const inObject = <R>(
 ) =>
   runInDurableObject(env.AcpConnection.getByName(connection), (instance: AcpConnection, state) =>
     fn(instance, state),
+  );
+
+const double = async <A>(url: string): Promise<A> => (await fetch(url)).json();
+
+/** The typecheck double's request log and actions, from this point on. */
+const recordSince = async () => {
+  const [log, actions] = await Promise.all([
+    double<string[]>("http://typecheck.test/__log"),
+    double<unknown[]>("http://typecheck.test/__actions"),
+  ]);
+  return {
+    log: async () => (await double<string[]>("http://typecheck.test/__log")).slice(log.length),
+    actions: async () =>
+      (await double<unknown[]>("http://typecheck.test/__actions")).slice(actions.length),
+  };
+};
+
+const toolResult = (frames: ReturnType<typeof updates>, toolCallId: string) =>
+  frames.find(
+    (update) => update.sessionUpdate === "tool_call_update" && update.toolCallId === toolCallId,
   );
 
 const sha256 = async (text: string) =>
@@ -113,15 +133,12 @@ it("writes src/hello.ts and reports the write as a diff under the client cwd", a
 });
 
 it("uploads the blobs the typecheck service lacks and reports its diagnostics", async () => {
+  const record = await recordSince();
   const client = await connect();
   const sessionId = await client.newSession();
   const response = await client.request(2, "session/prompt", prompt(sessionId, "typecheck"));
   assert.deepStrictEqual(response.result, { stopReason: "end_turn" });
-  const result = updates(client.frames).find(
-    (update) =>
-      update.sessionUpdate === "tool_call_update" && update.toolCallId === "call-typecheck",
-  );
-  assert.deepStrictEqual(result, {
+  assert.deepStrictEqual(toolResult(updates(client.frames), "call-typecheck"), {
     sessionUpdate: "tool_call_update",
     toolCallId: "call-typecheck",
     status: "completed",
@@ -135,15 +152,99 @@ it("uploads the blobs the typecheck service lacks and reports its diagnostics", 
       },
     ],
   });
-  const log: string[] = await (await fetch("http://typecheck.test/__log")).json();
-  const uploads = [
-    `PUT /blobs/${await sha256("")}`,
+  const log = (await record.log()).filter((line) => !line.startsWith("git "));
+  assert.deepStrictEqual(log, [
+    "POST /actions",
     `PUT /blobs/${await sha256(COUNT)}`,
-  ].toSorted();
-  assert.deepStrictEqual(
-    [log[0], ...log.slice(1, -1).toSorted(), log.at(-1)],
-    ["POST /check", ...uploads, "POST /check"],
+    "POST /actions",
+  ]);
+});
+
+it("refuses to clone a repo that is not registered", async () => {
+  const record = await recordSince();
+  const client = await connect();
+  const sessionId = await client.newSession();
+  const response = await client.request(
+    2,
+    "session/prompt",
+    prompt(sessionId, "clone unregistered"),
   );
+  assert.deepStrictEqual(response.result, { stopReason: "end_turn" });
+  assert.deepStrictEqual(toolResult(updates(client.frames), "call-clone"), {
+    sessionUpdate: "tool_call_update",
+    toolCallId: "call-clone",
+    status: "failed",
+    content: [
+      {
+        type: "content",
+        content: {
+          type: "text",
+          text: "<harness>\n[error] evil/repo is not a registered repo. Registered: test/fixture\n</harness>",
+        },
+      },
+    ],
+  });
+  assert.deepStrictEqual(await record.log(), []);
+});
+
+it("sends only the files changed since the cloned commit, and the deleted ones", async () => {
+  const commit = await double<string>("http://git.test/__commit");
+  const client = await connect();
+  const sessionId = await client.newSession();
+  const cloned = await client.request(2, "session/prompt", prompt(sessionId, "clone"));
+  assert.deepStrictEqual(cloned.result, { stopReason: "end_turn" });
+  assert.deepStrictEqual(toolResult(updates(client.frames), "call-clone")?.content, [
+    {
+      type: "content",
+      content: {
+        type: "text",
+        text: `Cloned test/fixture at ${commit} into the workspace root. Paths are relative to the repo root.`,
+      },
+    },
+  ]);
+  await inObject(client.connection, (instance) =>
+    instance.workspace.fs.rm("/workspace/src/old.ts"),
+  );
+  const record = await recordSince();
+  const checked = await client.request(
+    3,
+    "session/prompt",
+    prompt(sessionId, "change and typecheck"),
+  );
+  assert.deepStrictEqual(checked.result, { stopReason: "end_turn" });
+  const action = {
+    kind: "check",
+    toolchain: "node26-tsrs0.20-oxlint1.89",
+    repo: "test/fixture",
+    commit,
+    files: [
+      { path: "src/index.ts", sha256: await sha256("export const greeting = 'hello';\n") },
+      { path: "src/new.ts", sha256: await sha256(NEW_FILE) },
+    ],
+    deleted: ["src/old.ts"],
+  };
+  assert.deepStrictEqual(await record.actions(), [action, action], "MissingBlobs, then the retry");
+  assert.deepStrictEqual(toolResult(updates(client.frames), "call-typecheck")?.content, [
+    { type: "content", content: { type: "text", text: "No diagnostics." } },
+  ]);
+});
+
+it("says so instead of calling the service when no repo is cloned", async () => {
+  const record = await recordSince();
+  const client = await connect();
+  const sessionId = await client.newSession();
+  const response = await client.request(2, "session/prompt", prompt(sessionId, "typecheck only"));
+  assert.deepStrictEqual(response.result, { stopReason: "end_turn" });
+  assert.deepStrictEqual(toolResult(updates(client.frames), "call-typecheck")?.content, [
+    {
+      type: "content",
+      content: {
+        type: "text",
+        text: "No repo is cloned, so there is nothing to check. Call clone_repo first.",
+      },
+    },
+  ]);
+  assert.deepStrictEqual(await record.log(), []);
 });
 
 it("resolves a cancelled prompt with cancelled and takes the next prompt", async () => {

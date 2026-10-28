@@ -1,14 +1,33 @@
-// Runs in the vitest process as the Worker's outbound fetch, standing in for the typecheck service.
+// Runs in the vitest process as the Worker's outbound fetch: the typecheck service at typecheck.test
+// and the registered repo test/fixture at git.test.
 
-import { CheckRequest } from "@dorbs/protocol/typecheck";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
+import { Action } from "@dorbs/protocol/typecheck";
 import * as Schema from "effect/Schema";
 
+import { makeRepo, serveGit } from "../../../scripts/gitFixture.ts";
+
 const TOKEN = "typecheck-token";
-const decodeCheckRequest = Schema.decodeUnknownSync(Schema.fromJsonString(CheckRequest));
+const decodeAction = Schema.decodeUnknownSync(Schema.fromJsonString(Action));
 const blobs = new Map<string, string>();
 const log: string[] = [];
+const actions: Action[] = [];
 
-type Request = { url: string; method: string; headers: Headers; text(): Promise<string> };
+/** The files of test/fixture's one commit. */
+const FIXTURE = {
+  "package.json": '{ "name": "fixture", "private": true }\n',
+  "tsconfig.json": '{ "compilerOptions": { "strict": true }, "include": ["src"] }\n',
+  "src/index.ts": "export const greeting = 'hi';\n",
+  "src/old.ts": "export const old = 1;\n",
+};
+
+const gitRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "dorbs-agent-git-"));
+process.once("exit", () => NodeFS.rmSync(gitRoot, { recursive: true, force: true }));
+const fixtureCommit = makeRepo(NodePath.join(gitRoot, "fixture.git"), FIXTURE);
+const git = serveGit(gitRoot);
 
 const sha256 = async (text: string): Promise<string> =>
   Array.from(
@@ -40,8 +59,13 @@ const diagnose = (path: string, content: string) =>
 
 export const typecheckDouble = async (request: Request): Promise<Response> => {
   const url = new URL(request.url);
+  if (url.host === "git.test") {
+    log.push(`git ${url.pathname}`);
+    return url.pathname === "/__commit" ? json(fixtureCommit) : git(request);
+  }
   if (url.host !== "typecheck.test") return new Response("Tests have no network", { status: 502 });
   if (url.pathname === "/__log") return json(log);
+  if (url.pathname === "/__actions") return json(actions);
   if (request.headers.get("authorization") !== `Bearer ${TOKEN}`) {
     return new Response("Unauthorized", { status: 401 });
   }
@@ -53,15 +77,21 @@ export const typecheckDouble = async (request: Request): Promise<Response> => {
     blobs.set(blob, body);
     return new Response(null, { status: 204 });
   }
-  if (request.method === "POST" && url.pathname === "/check") {
-    const check = decodeCheckRequest(await request.text());
-    const wanted = [check.lockfile, ...check.files.map((file) => file.sha256)];
-    const missing = [...new Set(wanted.filter((sha) => !blobs.has(sha)))];
+  if (request.method === "POST" && url.pathname === "/actions") {
+    const action = decodeAction(await request.text());
+    actions.push(action);
+    const missing = [...new Set(action.files.map((file) => file.sha256))].filter(
+      (sha) => !blobs.has(sha),
+    );
     if (missing.length > 0) return json({ _tag: "MissingBlobs", sha256s: missing });
     return json({
-      _tag: "CheckResult",
-      diagnostics: check.files.flatMap((file) => diagnose(file.path, blobs.get(file.sha256) ?? "")),
+      _tag: "ActionResult",
+      diagnostics: action.files.flatMap((file) =>
+        diagnose(file.path, blobs.get(file.sha256) ?? ""),
+      ),
+      outputs: [],
       durationMs: 1,
+      cached: false,
     });
   }
   return new Response("Not found", { status: 404 });

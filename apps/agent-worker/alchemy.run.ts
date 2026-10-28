@@ -14,6 +14,7 @@ export const Worker = Cloudflare.Worker("AgentWorker", {
     AGENT_TOKEN: Config.Redacted("AGENT_TOKEN"),
     TYPECHECK_URL: Config.String("TYPECHECK_URL"),
     TYPECHECK_TOKEN: Config.Redacted("TYPECHECK_TOKEN"),
+    REPOS: Config.String("REPOS"),
     MODEL_PROVIDER: Config.String("MODEL_PROVIDER"),
     MODEL_ID: Config.String("MODEL_ID"),
     OPENROUTER_API_KEY: Config.Redacted("OPENROUTER_API_KEY"),

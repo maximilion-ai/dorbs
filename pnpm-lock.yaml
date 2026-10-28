@@ -194,6 +194,9 @@ catalogs:
     '@oxlint/plugins':
       specifier: 1.89.0
       version: 1.89.0
+    '@platformatic/vfs':
+      specifier: 0.5.0
+      version: 0.5.0
     '@types/node':
       specifier: 26.6.5
       version: 26.6.5
@@ -264,7 +267,7 @@ importers:
     dependencies:
       '@cloudflare/computer':
         specifier: 'catalog:'
-        version: 0.8.0(@cloudflare/workers-types@5.20261027.1)(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1)(zod@4.6.6)
+        version: 0.8.0(@cloudflare/workers-types@5.20261027.1)(@platformatic/vfs@0.5.0)(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1)(zod@4.6.6)
       '@dorbs/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -277,6 +280,9 @@ importers:
       '@earendil-works/pi-durable':
         specifier: 'catalog:'
         version: 1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@smithy/signature-v4@5.7.4)(supports-color@10.2.2)(undici@8.12.3)(ws@8.22.0)(zod@4.6.6)
+      '@platformatic/vfs':
+        specifier: 'catalog:'
+        version: 0.5.0
       agents:
         specifier: 'catalog:'
         version: 0.31.0(@babel/core@8.0.9)(@babel/runtime@7.29.10)(@earendil-works/chord@1.4.0)(@earendil-works/pi-ai@1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@smithy/signature-v4@5.7.4)(supports-color@10.2.2)(undici@8.12.3)(ws@8.22.0)(zod@4.6.6))(@earendil-works/pi-durable@1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@smithy/signature-v4@5.7.4)(supports-color@10.2.2)(undici@8.12.3)(ws@8.22.0)(zod@4.6.6))(@modelcontextprotocol/client@2.3.1)(@types/node@26.6.5)(jiti@2.7.0)(rolldown@1.2.13)(zod@4.6.6)
@@ -1754,6 +1760,10 @@ packages:
   '@oxlint/plugins@1.89.0':
     resolution: {integrity: sha512-TJBBNl4KIxbxrSk7gsqlz6iM1kxidfyTizEzfWqXvijF2Ou8/Da58GvjemBVmCmaUamwRij+JwsVc0kpBFuqfg==}
     engines: {node: ^12.22.0 || ^14.17.0 || >=16.0.0}
+
+  '@platformatic/vfs@0.5.0':
+    resolution: {integrity: sha512-U/yG5a2IELJxAtwkgGmhZJnLCHRzyxNyWWbaDKMbCyjB0kuPxU9fvIZCxf7Kv7jz7I7IXlyuY7gXkXGMdLHhPw==}
+    engines: {node: '>= 22'}
 
   '@polka/url@1.0.0-next.29':
     resolution: {integrity: sha512-wwQAWhWSuHaag8c4q/KN/vCoeOJYshAIvMQwD4GpSb3OiZklFfvAgmj0VCBBImRpuF/aFgIRzllXlVX93Jevww==}
@@ -3782,12 +3792,13 @@ snapshots:
 
   '@cfworker/json-schema@4.1.1': {}
 
-  '@cloudflare/computer@0.8.0(@cloudflare/workers-types@5.20261027.1)(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1)(zod@4.6.6)':
+  '@cloudflare/computer@0.8.0(@cloudflare/workers-types@5.20261027.1)(@platformatic/vfs@0.5.0)(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1)(zod@4.6.6)':
     dependencies:
       capnweb: 0.10.0
       vite: '@voidzero-dev/vite-plus-core@1.4.0(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1)'
     optionalDependencies:
       '@cloudflare/workers-types': 5.20261027.1
+      '@platformatic/vfs': 0.5.0
       zod: 4.6.6
     transitivePeerDependencies:
       - '@arethetypeswrong/core'
@@ -4500,6 +4511,8 @@ snapshots:
     optional: true
 
   '@oxlint/plugins@1.89.0': {}
+
+  '@platformatic/vfs@0.5.0': {}
 
   '@polka/url@1.0.0-next.29': {}
 

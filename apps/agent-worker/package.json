@@ -13,6 +13,7 @@
     "@earendil-works/chord": "catalog:",
     "@earendil-works/pi-ai": "catalog:",
     "@earendil-works/pi-durable": "catalog:",
+    "@platformatic/vfs": "catalog:",
     "agents": "catalog:",
     "effect": "catalog:",
     "zod": "catalog:"

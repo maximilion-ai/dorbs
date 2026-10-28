@@ -14,6 +14,8 @@ catalog:
   "@earendil-works/pi-durable": 1.4.0
   "@effect/platform-node": 4.0.6
   "@effect/vitest": 4.0.6
+  # @cloudflare/computer/git imports it at runtime to give isomorphic-git a filesystem.
+  "@platformatic/vfs": 0.5.0
   # Must match the oxlint that vite-plus bundles, which loads our JS plugin.
   "@oxlint/plugins": 1.89.0
   "@types/node": 26.6.5

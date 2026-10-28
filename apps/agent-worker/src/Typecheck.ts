@@ -1,9 +1,14 @@
 import {
-  CheckResponse,
+  ActionResponse,
+  isProtectedPath,
   Sha256,
-  type CheckRequest,
-  type CheckResult,
+  ToolchainId,
+  type Action,
+  type ActionResult,
+  type CommitSha,
+  type Rejected,
   type RelativePath,
+  type RepoId,
 } from "@dorbs/protocol/typecheck";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
@@ -13,6 +18,15 @@ import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 
 export type WorkspaceFile = { readonly path: RelativePath; readonly content: string };
+
+/** The repo and commit a workspace was cloned from. */
+export type Clone = { readonly repo: RepoId; readonly commit: CommitSha };
+
+/** How a workspace differs from the commit it was cloned from. */
+export type Change = {
+  readonly files: ReadonlyArray<WorkspaceFile>;
+  readonly deleted: ReadonlyArray<RelativePath>;
+};
 
 export class TypecheckFailed extends Schema.TaggedError<TypecheckFailed>()("TypecheckFailed", {
   reason: Schema.String,
@@ -27,19 +41,21 @@ export class Typecheck extends Context.Service<
   Typecheck,
   {
     readonly check: (
-      files: ReadonlyArray<WorkspaceFile>,
-    ) => Effect.Effect<CheckResult, TypecheckFailed>;
+      clone: Clone,
+      change: Change,
+    ) => Effect.Effect<ActionResult | Rejected, TypecheckFailed>;
   }
 >()("dorbs/agent-worker/Typecheck") {}
-
-const LOCKFILE = "pnpm-lock.yaml";
 
 const TypecheckConfig = Config.all({
   url: Config.URL("TYPECHECK_URL"),
   token: Config.Redacted("TYPECHECK_TOKEN"),
 });
 
-const decodeCheckResponse = Schema.decodeUnknownEffect(CheckResponse);
+const decodeActionResponse = Schema.decodeUnknownEffect(ActionResponse);
+
+// The one toolchain the typecheck service runs today.
+const TOOLCHAIN = ToolchainId.make("node26-tsrs0.20-oxlint1.89");
 const toSha256 = Schema.decodeSync(Sha256);
 
 const sha256 = (text: string) =>
@@ -71,26 +87,37 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const post = (request: CheckRequest) =>
-    send("POST", "/check", JSON.stringify(request), "application/json").pipe(
+  const post = (action: Action) =>
+    send("POST", "/actions", JSON.stringify(action), "application/json").pipe(
       Effect.flatMap((response) =>
         Effect.tryPromise({
           try: () => response.json(),
-          catch: (cause) => new TypecheckFailed({ reason: "POST /check sent invalid JSON", cause }),
+          catch: (cause) =>
+            new TypecheckFailed({ reason: "POST /actions sent invalid JSON", cause }),
         }),
       ),
       Effect.flatMap((json) =>
-        decodeCheckResponse(json).pipe(
+        decodeActionResponse(json).pipe(
           Effect.mapError(
-            (cause) => new TypecheckFailed({ reason: "POST /check sent an unknown shape", cause }),
+            (cause) =>
+              new TypecheckFailed({ reason: "POST /actions sent an unknown shape", cause }),
           ),
         ),
       ),
     );
 
-  const check = Effect.fn("Typecheck.check")(function* (files: ReadonlyArray<WorkspaceFile>) {
+  const check = Effect.fn("Typecheck.check")(function* (clone: Clone, change: Change) {
+    // The service would refuse these too; answering here skips the round trip.
+    const touched = [...change.files.map((file) => file.path), ...change.deleted];
+    const protectedPaths = touched.filter(isProtectedPath);
+    if (protectedPaths.length > 0) {
+      return {
+        _tag: "Rejected",
+        reason: { _tag: "ProtectedPaths", paths: protectedPaths },
+      } satisfies Rejected;
+    }
     const blobs = new Map<Sha256, string>();
-    const hashed = yield* Effect.forEach(files, (file) =>
+    const hashed = yield* Effect.forEach(change.files, (file) =>
       sha256(file.content).pipe(
         Effect.map((sha) => {
           blobs.set(sha, file.content);
@@ -98,14 +125,17 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
-    // The service installs dependencies per lockfile hash; a workspace without one shares the empty lockfile's.
-    const lockText = files.find((file) => file.path === LOCKFILE)?.content ?? "";
-    const lockfile = yield* sha256(lockText);
-    blobs.set(lockfile, lockText);
-    const request: CheckRequest = { lockfile, files: hashed };
+    const action: Action = {
+      kind: "check",
+      toolchain: TOOLCHAIN,
+      repo: clone.repo,
+      commit: clone.commit,
+      files: hashed,
+      deleted: change.deleted,
+    };
 
-    const first = yield* post(request);
-    if (first._tag === "CheckResult") return first;
+    const first = yield* post(action);
+    if (first._tag !== "MissingBlobs") return first;
     yield* Effect.forEach(
       first.sha256s,
       (sha) => {
@@ -116,8 +146,8 @@ const make = Effect.gen(function* () {
       },
       { concurrency: 8, discard: true },
     );
-    const second = yield* post(request);
-    if (second._tag === "CheckResult") return second;
+    const second = yield* post(action);
+    if (second._tag !== "MissingBlobs") return second;
     return yield* new TypecheckFailed({
       reason: `blobs still missing after upload: ${second.sha256s.join(", ")}`,
     });

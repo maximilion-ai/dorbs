@@ -1,4 +1,5 @@
 import { Workspace } from "@cloudflare/computer";
+import { createGitClient } from "@cloudflare/computer/git";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { PiHarness } from "agents/harness/pi";
@@ -12,6 +13,7 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 
 import { makeAgent, type AgentHost, type Emit, type SessionRecord } from "./agent.ts";
 import { ModelProvider, type ModelUnavailable } from "./ModelProvider.ts";
+import * as Repos from "./Repos.ts";
 import { registerTools, WORKSPACE_ROOT, type ToolHost } from "./tools.ts";
 import { RunOutcome } from "./Turn.ts";
 import * as Typecheck from "./Typecheck.ts";
@@ -26,6 +28,7 @@ const SYSTEM_PROMPT =
   "Run the typecheck tool after you change code.";
 
 const sessionKey = (sessionId: string) => `acp/session/${sessionId}`;
+const CLONE_KEY = "workspace/clone";
 
 const outcomeOf = (status: "done" | "unanswered", reason: string | undefined): RunOutcome =>
   status === "done"
@@ -41,19 +44,22 @@ const outcomeOf = (status: "done" | "unanswered", reason: string | undefined): R
 export const makeAcpConnection = (modelLayer: ModelLayer) =>
   class AcpConnection extends DurableObject {
     readonly runtime = ManagedRuntime.make(
-      Layer.mergeAll(modelLayer(this.env), Typecheck.layer).pipe(
+      Layer.mergeAll(modelLayer(this.env), Typecheck.layer, Repos.layer).pipe(
         Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(this.env))),
       ),
     );
 
-    readonly workspace = new Workspace({ storage: this.ctx.storage });
+    readonly workspace = new Workspace({ storage: this.ctx.storage, git: createGitClient() });
 
     readonly toolHost: ToolHost = {
       workspace: this.workspace,
-      typecheck: (files) =>
+      repos: () => this.runtime.runPromise(Effect.service(Repos.Repos)),
+      clone: () => this.ctx.storage.kv.get<Typecheck.Clone>(CLONE_KEY),
+      saveClone: (clone) => this.ctx.storage.kv.put(CLONE_KEY, clone),
+      typecheck: (clone, change) =>
         this.runtime.runPromise(
           Effect.flatMap(Effect.service(Typecheck.Typecheck), (typecheck) =>
-            typecheck.check(files),
+            typecheck.check(clone, change),
           ),
         ),
     };

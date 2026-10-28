@@ -1,18 +1,31 @@
 import type { Workspace } from "@cloudflare/computer";
 import type { ToolKind } from "@dorbs/protocol/acp";
-import { RelativePath, type CheckResult, type Diagnostic } from "@dorbs/protocol/typecheck";
+import {
+  CommitSha,
+  RelativePath,
+  type ActionResult,
+  type Diagnostic,
+  type Rejected,
+  type RepoId,
+} from "@dorbs/protocol/typecheck";
 import { Type, type Static, type TSchema } from "@earendil-works/pi-ai";
 import type { ToolExecutionResult, ToolRegistration } from "@earendil-works/pi-durable";
+import * as Match from "effect/Match";
 import * as Schema from "effect/Schema";
 
-import type { WorkspaceFile } from "./Typecheck.ts";
+import type { Change, Clone } from "./Typecheck.ts";
 
 export const WORKSPACE_ROOT = "/workspace";
 
 /** What a tool reaches through the connection that runs it. */
 export type ToolHost = {
   readonly workspace: Workspace;
-  readonly typecheck: (files: ReadonlyArray<WorkspaceFile>) => Promise<CheckResult>;
+  /** The repos clone_repo may clone: their urls by id. */
+  readonly repos: () => Promise<ReadonlyMap<RepoId, string>>;
+  /** The repo the workspace was cloned from, once clone_repo has run. */
+  readonly clone: () => Clone | undefined;
+  readonly saveClone: (clone: Clone) => void;
+  readonly typecheck: (clone: Clone, change: Change) => Promise<ActionResult | Rejected>;
 };
 
 /** A write's before and after, sent as the tool result's `details` and shown to the client as a diff. */
@@ -46,6 +59,7 @@ const row = <P extends TSchema>(tool: Row<P>) => ({
 });
 
 const decodePath = Schema.decodeUnknownSync(RelativePath);
+const decodeCommit = Schema.decodeUnknownSync(CommitSha);
 
 const absolute = (path: string): string => `${WORKSPACE_ROOT}/${decodePath(path)}`;
 
@@ -80,17 +94,36 @@ const write = async (
   return { ...text(`${oldText === undefined ? "Created" : "Updated"} ${path}`), details: change };
 };
 
-const workspaceFiles = async (workspace: Workspace): Promise<ReadonlyArray<WorkspaceFile>> => {
-  const entries = await workspace.fs.find(WORKSPACE_ROOT, "**/*");
-  return Promise.all(
+// The clone keeps its git directory in the workspace; no tool lists or searches it.
+const NOT_GIT = { exclude: [".git"] };
+
+/** The workspace's files that differ from `commit`, new ones included, and those deleted since. */
+const changesSince = async (workspace: Workspace, commit: CommitSha): Promise<Change> => {
+  const entries = await workspace.git.diffSummary({ dir: WORKSPACE_ROOT, ref: commit });
+  const files = await Promise.all(
     entries
-      .filter((entry) => entry.type === "file")
+      .filter((entry) => entry.status !== "D")
       .map(async (entry) => ({
-        path: decodePath(relative(entry.path)),
-        content: await workspace.fs.readFile(entry.path, "utf8"),
+        path: decodePath(entry.path),
+        content: await workspace.fs.readFile(absolute(entry.path), "utf8"),
       })),
   );
+  const deleted = entries.filter((entry) => entry.status === "D").map((e) => decodePath(e.path));
+  return { files, deleted };
 };
+
+const rejectionText = ({ reason }: Rejected, clone: Clone): string =>
+  Match.valueTags(reason, {
+    UnknownToolchain: () =>
+      "Not checked: the typecheck service does not run this agent's toolchain.",
+    UnknownRepo: () => `Not checked: the typecheck service does not have ${clone.repo} registered.`,
+    UnknownCommit: () =>
+      `Not checked: the typecheck service cannot fetch commit ${clone.commit} of ${clone.repo}.`,
+    ProtectedPaths: ({ paths }) =>
+      `Not checked: ${paths.join(", ")} changed. The check takes dependencies and config ` +
+      `from commit ${clone.commit}, so dependency and config changes must be pushed first. ` +
+      "Undo these changes to check the rest.",
+  });
 
 const formatDiagnostic = (d: Diagnostic): string =>
   `${d.path}:${d.line}:${d.column} ${d.severity} ${d.code} ${d.message} (${d.tool})`;
@@ -142,6 +175,7 @@ const TOOLS = [
       const entries = await workspace.fs.find(
         path === undefined ? WORKSPACE_ROOT : absolute(path),
         "**/*",
+        NOT_GIT,
       );
       const files = entries.filter((entry) => entry.type === "file").map((e) => relative(e.path));
       return text(files.length === 0 ? "No files." : files.join("\n"));
@@ -157,7 +191,7 @@ const TOOLS = [
       const matches = await workspace.fs.grep(
         pattern,
         path === undefined ? WORKSPACE_ROOT : absolute(path),
-        { regex: true, limit: 200 },
+        { regex: true, limit: 200, ...NOT_GIT },
       );
       return text(
         matches.length === 0
@@ -167,13 +201,48 @@ const TOOLS = [
     },
   }),
   row({
+    name: "clone_repo",
+    kind: "fetch",
+    description:
+      "Clone a registered repo into the workspace root. Type checks run against the cloned commit.",
+    parameters: Type.Object({ repo: Type.String({ description: "Repo id, such as owner/name" }) }),
+    replay: "safe",
+    run: async ({ repo }, host) => {
+      const repos = await host.repos();
+      const [id, url] = [...repos].find(([registered]) => registered === repo) ?? [];
+      if (id === undefined || url === undefined) {
+        throw new Error(
+          `${repo} is not a registered repo. Registered: ${[...repos.keys()].join(", ")}`,
+        );
+      }
+      const cloned = host.clone();
+      if (cloned !== undefined) {
+        if (cloned.repo !== id) throw new Error(`The workspace already holds ${cloned.repo}.`);
+        return text(`${id} is already cloned at ${cloned.commit} into the workspace root.`);
+      }
+      await host.workspace.git.clone({ url, dir: WORKSPACE_ROOT, depth: 1 });
+      const commit = decodeCommit(
+        await host.workspace.git.revParse({ dir: WORKSPACE_ROOT, ref: "HEAD" }),
+      );
+      host.saveClone({ repo: id, commit });
+      return text(
+        `Cloned ${id} at ${commit} into the workspace root. Paths are relative to the repo root.`,
+      );
+    },
+  }),
+  row({
     name: "typecheck",
     kind: "execute",
-    description: "Type-check and lint the workspace with tsrs and oxlint.",
+    description: "Type-check and lint the cloned repo with your changes, using tsrs and oxlint.",
     parameters: Type.Object({}),
     replay: "safe",
     run: async (_args, host) => {
-      const result = await host.typecheck(await workspaceFiles(host.workspace));
+      const clone = host.clone();
+      if (clone === undefined) {
+        return text("No repo is cloned, so there is nothing to check. Call clone_repo first.");
+      }
+      const result = await host.typecheck(clone, await changesSince(host.workspace, clone.commit));
+      if (result._tag === "Rejected") return text(rejectionText(result, clone));
       return text(
         result.diagnostics.length === 0
           ? "No diagnostics."

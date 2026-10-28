@@ -10,10 +10,9 @@ import {
 } from "@earendil-works/pi-ai";
 export const HELLO = "export const hello = (name: string): string => `Hello, ${name}!`;\n";
 export const COUNT = 'export const count: number = "three";\n';
+export const NEW_FILE = "export const fresh = true;\n";
 const E2E_HELLO = 'export const n: number = "x";\n';
-const E2E_TSCONFIG =
-  '{ "compilerOptions": { "strict": true, "noEmit": true }, "include": ["src"] }\n';
-const E2E_PACKAGE = '{ "name": "dorbs-e2e", "private": true }\n';
+const E2E_PACKAGE = '{ "name": "dorbs-e2e", "private": true, "type": "module" }\n';
 
 type Step = (signal: AbortSignal | undefined) => AssistantMessage | Promise<AssistantMessage>;
 
@@ -41,16 +40,34 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
     say("Wrote src/hello.ts."),
   ],
   typecheck: [
+    callTool("clone_repo", { repo: "test/fixture" }, "call-clone"),
     callTool("write_file", { path: "src/count.ts", content: COUNT }, "call-write"),
     callTool("typecheck", {}, "call-typecheck"),
     say("count is a string."),
   ],
+  clone: [callTool("clone_repo", { repo: "test/fixture" }, "call-clone"), say("Cloned.")],
+  "clone unregistered": [
+    callTool("clone_repo", { repo: "evil/repo" }, "call-clone"),
+    say("That repo is not registered."),
+  ],
+  "change and typecheck": [
+    callTool("write_file", { path: "src/new.ts", content: NEW_FILE }, "call-new"),
+    callTool(
+      "edit_file",
+      { path: "src/index.ts", oldText: "'hi'", newText: "'hello'" },
+      "call-edit",
+    ),
+    callTool("typecheck", {}, "call-typecheck"),
+    say("Checked."),
+  ],
+  "typecheck only": [callTool("typecheck", {}, "call-typecheck"), say("Checked.")],
   "wait for cancel": [callTool("list_files", {}, "call-list"), untilAborted],
   e2e: [
-    callTool("write_file", { path: "tsconfig.json", content: E2E_TSCONFIG }, "call-tsconfig"),
-    callTool("write_file", { path: "package.json", content: E2E_PACKAGE }, "call-package"),
+    callTool("clone_repo", { repo: "dorbs/e2e" }, "call-clone"),
     callTool("write_file", { path: "src/hello.ts", content: E2E_HELLO }, "call-hello"),
     callTool("typecheck", {}, "call-typecheck"),
+    callTool("write_file", { path: "package.json", content: E2E_PACKAGE }, "call-package"),
+    callTool("typecheck", {}, "call-typecheck-package"),
     say("n is a string."),
   ],
 };

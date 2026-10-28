@@ -15,6 +15,7 @@ export default defineConfig({
           AGENT_TOKEN: "agent-token",
           TYPECHECK_URL: "http://typecheck.test",
           TYPECHECK_TOKEN: "typecheck-token",
+          REPOS: JSON.stringify([{ id: "test/fixture", url: "http://git.test/fixture.git" }]),
           MODEL_PROVIDER: "scripted",
           MODEL_ID: "scripted",
           ALCHEMY_DEV: "true",
