@@ -179,6 +179,9 @@ catalogs:
     knip:
       specifier: 6.43.0
       version: 6.43.0
+    oxlint:
+      specifier: 1.89.0
+      version: 1.89.0
     tsrs:
       specifier: 0.20.0-ts7.1.0-beta
       version: 0.20.0-ts7.1.0-beta
@@ -220,6 +223,34 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 26.6.5
+      tsrs:
+        specifier: 'catalog:'
+        version: 0.20.0-ts7.1.0-beta
+      vite-plus:
+        specifier: 'catalog:'
+        version: 1.4.0(@types/node@26.6.5)(@vitest/ui@5.0.5)(jiti@2.7.0)(yaml@2.9.1)
+
+  apps/typecheck:
+    dependencies:
+      '@dorbs/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@effect/platform-node':
+        specifier: 'catalog:'
+        version: 4.0.6(effect@4.0.6)(redis@6.3.0)
+      effect:
+        specifier: 4.0.6
+        version: 4.0.6
+    devDependencies:
+      '@effect/vitest':
+        specifier: 'catalog:'
+        version: 4.0.6(effect@4.0.6)(vitest@5.0.5)
+      '@types/node':
+        specifier: 'catalog:'
+        version: 26.6.5
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.89.0(oxlint-tsgolint@7.0.2004)(vite-plus@1.4.0(@types/node@26.6.5)(@vitest/ui@5.0.5)(jiti@2.7.0)(yaml@2.9.1))
       tsrs:
         specifier: 'catalog:'
         version: 0.20.0-ts7.1.0-beta
