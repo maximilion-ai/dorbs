@@ -57,6 +57,16 @@ it("answers T3's initialize as an ACP v1 agent that advertises nothing beyond pr
   });
 });
 
+it("sends each frame as a WebSocket message without a line terminator, which acp-mux appends", async () => {
+  const client = await connect();
+  client.sendLine(T3_INITIALIZE_LINE);
+  await client.newSession();
+  assert.deepStrictEqual(
+    client.messages.map((message) => message.slice(-1)),
+    ["}", "}"],
+  );
+});
+
 it("creates a session without opening Pi", async () => {
   const client = await connect();
   const sessionId = await client.newSession();

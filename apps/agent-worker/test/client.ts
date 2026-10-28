@@ -23,9 +23,11 @@ export const connect = async (connection: string = crypto.randomUUID()) => {
   const ws = response.webSocket;
   if (ws === null) throw new Error(`Expected a WebSocket, got ${response.status}`);
   ws.accept();
+  const messages: string[] = [];
   const frames: Frame[] = [];
   const waiters = new Set<() => void>();
   ws.addEventListener("message", (event) => {
+    messages.push(String(event.data));
     frames.push(JSON.parse(String(event.data)));
     for (const wake of waiters) wake();
   });
@@ -61,7 +63,7 @@ export const connect = async (connection: string = crypto.randomUUID()) => {
       ws.close(code, reason);
     });
 
-  return { connection, frames, until, send, sendLine, request, newSession, close };
+  return { connection, messages, frames, until, send, sendLine, request, newSession, close };
 };
 
 /** The session/update payloads in the order they arrived. */

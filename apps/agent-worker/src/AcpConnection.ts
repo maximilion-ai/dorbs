@@ -99,8 +99,9 @@ export const makeAcpConnection = (modelLayer: ModelLayer) =>
 
     override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
       const line = typeof message === "string" ? message : new TextDecoder().decode(message);
-      const send = (frame: string) => {
-        if (ws.readyState === WebSocket.OPEN) ws.send(frame);
+      // One message carries one line without its terminator; acp-mux appends the newline on the socket.
+      const send = (line: string) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(line.replace(/\n$/u, ""));
       };
       await Effect.runPromise(this.agent.handle(line, send));
     }
