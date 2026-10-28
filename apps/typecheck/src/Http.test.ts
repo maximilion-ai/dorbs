@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as Ref from "effect/Ref";
@@ -78,6 +79,25 @@ it.live("reports an oxlint finding with tool oxlint", () =>
         severity: "warning",
       },
     ]);
+  }).pipe(Effect.provide(TestServer)),
+);
+
+it.live("ignores the project's oxlint configs, so their jsPlugins never run", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const marker = `${yield* fs.makeTempDirectoryScoped()}/plugin-ran`;
+    const plugin = `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "");\nmodule.exports = { meta: { name: "p" }, rules: {} };\n`;
+    const response = yield* checkProject(EMPTY_LOCKFILE, {
+      ...project("debugger;\nexport {};\n"),
+      "plugin.cjs": plugin,
+      ".oxlintrc.json": '{ "jsPlugins": ["./plugin.cjs"], "rules": { "no-debugger": "off" } }',
+      "src/.oxlintrc.json": '{ "jsPlugins": ["../plugin.cjs"] }',
+    });
+    assert.deepStrictEqual(
+      response._tag === "CheckResult" && response.diagnostics.map((d) => `${d.path} ${d.code}`),
+      ["src/a.ts eslint(no-debugger)"],
+    );
+    assert.isFalse(yield* fs.exists(marker));
   }).pipe(Effect.provide(TestServer)),
 );
 

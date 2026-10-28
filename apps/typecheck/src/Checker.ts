@@ -6,7 +6,6 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
-import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Semaphore from "effect/Semaphore";
 
@@ -31,8 +30,12 @@ const make = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const blobs = yield* BlobStore;
   const installs = yield* Installs;
-  const checksDir = path.join((yield* ServiceConfig).dataDir, "checks");
+  const { dataDir } = yield* ServiceConfig;
+  const checksDir = path.join(dataDir, "checks");
   yield* fs.makeDirectory(checksDir, { recursive: true });
+  // A client .oxlintrc.json could load jsPlugins, which run as code; only this config applies.
+  const oxlintConfig = path.join(dataDir, "oxlintrc.json");
+  yield* fs.writeFileString(oxlintConfig, "{}");
   const slots = yield* Semaphore.make(NodeOS.availableParallelism());
 
   const run = Effect.fn("Checker.run")(function* (
@@ -41,9 +44,7 @@ const make = Effect.gen(function* () {
     args: ReadonlyArray<string>,
     okExitCodes: ReadonlyArray<number>,
   ) {
-    const result = yield* runProcess(spawner, ChildProcess.make(command, args, { cwd })).pipe(
-      Effect.orDie,
-    );
+    const result = yield* runProcess(spawner, cwd, command, args).pipe(Effect.orDie);
     if (!okExitCodes.includes(result.exitCode)) {
       return yield* Effect.die(
         new Error(`${command} exited ${result.exitCode}: ${result.stderr}${result.stdout}`),
@@ -76,8 +77,21 @@ const make = Effect.gen(function* () {
     const [tsrs, oxlint] = yield* Effect.all(
       [
         run(dir, "tsrs", ["--noEmit", "-p", "tsconfig.json", "--pretty", "false"], [0, 1, 2]),
-        // oxlint skips node_modules only through a .gitignore, which a check dir lacks.
-        run(dir, "oxlint", ["--format", "json", "--ignore-pattern", "**/node_modules/**"], [0, 1]),
+        run(
+          dir,
+          "oxlint",
+          // oxlint skips node_modules only through a .gitignore, which a check dir lacks.
+          [
+            "--config",
+            oxlintConfig,
+            "--disable-nested-config",
+            "--format",
+            "json",
+            "--ignore-pattern",
+            "**/node_modules/**",
+          ],
+          [0, 1],
+        ),
       ],
       { concurrency: "unbounded" },
     );
