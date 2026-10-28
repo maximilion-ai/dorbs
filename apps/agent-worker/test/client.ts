@@ -55,7 +55,13 @@ export const connect = async (connection: string = crypto.randomUUID()) => {
     return result.sessionId;
   };
 
-  return { connection, frames, until, send, sendLine, request, newSession };
+  const close = (code: number, reason: string): Promise<number> =>
+    new Promise((resolve) => {
+      ws.addEventListener("close", (event) => resolve(event.code));
+      ws.close(code, reason);
+    });
+
+  return { connection, frames, until, send, sendLine, request, newSession, close };
 };
 
 /** The session/update payloads in the order they arrived. */

@@ -105,8 +105,10 @@ export const makeAcpConnection = (modelLayer: ModelLayer) =>
       await Effect.runPromise(this.agent.handle(line, send));
     }
 
-    override async webSocketClose(): Promise<void> {
+    override async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
       this.agent.cancelAll();
+      // workerd leaves the close handshake to us; 1005 and 1006 are reserved and cannot be sent back.
+      ws.close(code === 1005 || code === 1006 ? 1000 : code, reason);
     }
 
     private async piSession(sessionId: string, record: SessionRecord): Promise<string> {

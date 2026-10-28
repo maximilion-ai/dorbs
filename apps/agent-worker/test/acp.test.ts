@@ -161,3 +161,8 @@ it("rejects a second prompt while the first is running", async () => {
   client.send({ method: "session/cancel", params: { sessionId } });
   assert.deepStrictEqual((await first).result, { stopReason: "cancelled" });
 });
+
+it("answers the client's close, so acp-mux can tear down both sides", async () => {
+  const client = await connect();
+  assert.strictEqual(await client.close(1000, "client hung up"), 1000);
+});
