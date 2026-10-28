@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "check": "pnpm fmt:check && pnpm lint && pnpm typecheck && pnpm test && pnpm knip",
+    "e2e": "node scripts/e2e.ts",
     "fmt": "vp fmt",
     "fmt:check": "vp fmt --check",
     "knip": "knip",
