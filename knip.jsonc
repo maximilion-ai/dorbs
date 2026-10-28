@@ -15,6 +15,12 @@
       // The service spawns the oxlint binary by name; nothing imports it.
       "ignoreDependencies": ["oxlint"],
     },
+    "apps/agent-worker": {
+      // alchemy dev loads alchemy.run.ts and the vitest plugin loads test/worker.ts, both by path.
+      "entry": ["alchemy.run.ts", "src/worker.ts", "test/worker.ts"],
+      // cloudflare:workers and cloudflare:test are workerd built-ins, not packages.
+      "ignoreDependencies": ["cloudflare"],
+    },
     "packages/oxlint-plugin": {
       // oxlint loads index.ts by path from vite.config.ts and reads its default export.
       "includeEntryExports": false,
