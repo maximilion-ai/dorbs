@@ -10,12 +10,13 @@
     "knip": "knip",
     "lint": "vp lint --deny-warnings --report-unused-disable-directives",
     "test": "vp run -r test",
-    "typecheck": "vp run -r typecheck",
+    "typecheck": "vp run -r typecheck && tsrs --noEmit -p scripts",
     "verify-gates": "bash scripts/verify-gates.sh"
   },
   "devDependencies": {
     "@types/node": "catalog:",
     "knip": "catalog:",
+    "tsrs": "catalog:",
     "vite-plus": "catalog:"
   },
   "engines": {

@@ -60,6 +60,9 @@ for pkg in $(packages_with_script typecheck); do
   expect_failure "typecheck $pkg" "__gate_typecheck.ts(1,14): error TS2322" pnpm typecheck
 done
 
+plant scripts/__gate_typecheck.ts 'export const gate: number = "planted";'
+expect_failure "typecheck scripts" "__gate_typecheck.ts(1,14): error TS2322" pnpm typecheck
+
 for pkg in $(packages_with_script test); do
   plant "$pkg/__gate.test.ts" 'import { assert, it } from "@effect/vitest";
 

@@ -4,9 +4,12 @@ import * as NodeAssert from "node:assert/strict";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
+import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
+
+import { makeRepo, serveGit } from "./gitFixture.ts";
 
 const ROOT = NodePath.resolve(import.meta.dirname, "..");
 const WORKER_DIR = NodePath.join(ROOT, "apps/agent-worker");
@@ -14,6 +17,13 @@ const CWD = "/tmp/dorbs-e2e-project";
 const HELLO = 'export const n: number = "x";\n';
 const TYPECHECK_OUTPUT =
   "src/hello.ts:1:14 error TS2322 Type 'string' is not assignable to type 'number'. (tsrs)";
+const REPO = "dorbs/e2e";
+const FIXTURE = {
+  "package.json": '{ "name": "dorbs-e2e", "private": true }\n',
+  "tsconfig.json":
+    '{ "compilerOptions": { "strict": true, "noEmit": true }, "include": ["src"] }\n',
+  "src/index.ts": "export const greeting = 'hi';\n",
+};
 
 // Captured from T3 Code 125b619, as in packages/protocol/src/jsonrpc.test.ts.
 const T3_INITIALIZE_LINE =
@@ -35,6 +45,7 @@ type Child = {
 };
 
 const children: Child[] = [];
+const servers: NodeHttp.Server[] = [];
 const tempDirs: string[] = [];
 const stage = `e2e${NodeCrypto.randomBytes(4).toString("hex")}`;
 
@@ -237,6 +248,37 @@ const acpClient = (nc: NodeChildProcess.ChildProcessWithoutNullStreams) => {
   return { frames, next, sendLine, send, request, updates };
 };
 
+/** Serves the bare repos under `root` over git's smart HTTP on a free port. */
+const gitServer = async (root: string): Promise<number> => {
+  const handle = serveGit(root);
+  const server = NodeHttp.createServer((request, response) => {
+    void (async () => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(request.headers)) {
+        if (typeof value === "string") headers.set(name, value);
+      }
+      const answer = await handle(
+        new Request(`http://127.0.0.1${request.url ?? "/"}`, {
+          method: request.method ?? "GET",
+          headers,
+          ...(request.method === "POST" ? { body: Buffer.concat(chunks) } : {}),
+        }),
+      );
+      response.writeHead(answer.status, Object.fromEntries(answer.headers));
+      response.end(Buffer.from(await answer.arrayBuffer()));
+    })();
+  });
+  servers.push(server);
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      resolve(typeof address === "object" && address !== null ? address.port : 0);
+    });
+  });
+};
+
 const prompt = (sessionId: string, text: string) => ({
   sessionId,
   prompt: [{ type: "text", text }],
@@ -249,6 +291,12 @@ const run = async () => {
   const typecheckToken = NodeCrypto.randomBytes(16).toString("hex");
   const agentToken = NodeCrypto.randomBytes(16).toString("hex");
   const dataDir = tempDir("dorbs-e2e-data-");
+  const gitRoot = tempDir("dorbs-e2e-git-");
+  const commit = makeRepo(NodePath.join(gitRoot, "e2e.git"), FIXTURE);
+  const gitUrl = `http://127.0.0.1:${await gitServer(gitRoot)}/e2e.git`;
+  const reposFile = NodePath.join(gitRoot, "repos.json");
+  NodeFS.writeFileSync(reposFile, JSON.stringify([{ id: REPO, url: gitUrl }]));
+  ok(`${REPO} at ${commit} is served on ${gitUrl}`);
   const socketPath = NodePath.join(tempDir("dorbs-e2e-mux-"), "mux.sock");
   const createdCwd = !NodeFS.existsSync(CWD);
   NodeFS.mkdirSync(CWD, { recursive: true });
@@ -256,7 +304,12 @@ const run = async () => {
 
   const typecheck = start("typecheck", "pnpm", ["--filter", "@dorbs/typecheck", "start"], {
     cwd: ROOT,
-    env: { PORT: String(typecheckPort), DATA_DIR: dataDir, TYPECHECK_TOKEN: typecheckToken },
+    env: {
+      PORT: String(typecheckPort),
+      DATA_DIR: dataDir,
+      REPOS_FILE: reposFile,
+      TYPECHECK_TOKEN: typecheckToken,
+    },
   });
   await until(30_000, "typecheck to listen", async () => {
     if (typecheck.proc.exitCode !== null)
@@ -277,6 +330,7 @@ const run = async () => {
         TYPECHECK_TOKEN: typecheckToken,
         MODEL_PROVIDER: "scripted",
         MODEL_ID: "scripted",
+        REPOS: JSON.stringify([{ id: REPO, url: gitUrl }]),
         OPENROUTER_API_KEY: "unused-by-the-scripted-model",
       },
     },
@@ -323,6 +377,19 @@ const run = async () => {
 
   const first = await client.request(3, "session/prompt", prompt(sessionId, "e2e"), 120_000);
   const updates = client.updates(sessionId);
+  const toolText = (toolCallId: string) =>
+    updates.find((u) => u.sessionUpdate === "tool_call_update" && u.toolCallId === toolCallId)
+      ?.content;
+  NodeAssert.deepEqual(toolText("call-clone"), [
+    {
+      type: "content",
+      content: {
+        type: "text",
+        text: `Cloned ${REPO} at ${commit} into the workspace root. Paths are relative to the repo root.`,
+      },
+    },
+  ]);
+  ok(`clone_repo cloned ${REPO} at ${commit} over HTTP`);
   const helloCall = updates.find(
     (u) => u.sessionUpdate === "tool_call" && u.toolCallId === "call-hello",
   );
@@ -344,17 +411,48 @@ const run = async () => {
     { type: "diff", path: `${CWD}/src/hello.ts`, newText: HELLO },
   );
   ok(`tool_call_update diff ${CWD}/src/hello.ts with newText ${JSON.stringify(HELLO)}`);
-  const checked = updates.find(
-    (u) => u.sessionUpdate === "tool_call_update" && u.toolCallId === "call-typecheck",
+  NodeAssert.deepEqual(
+    NodeFS.readdirSync(NodePath.join(dataDir, "blobs")),
+    [sha256(HELLO)],
+    "the typecheck service received exactly the blob of src/hello.ts",
   );
-  NodeAssert.deepEqual(checked?.content, [
+  ok("the check carried only src/hello.ts, the one file changed since the commit");
+  NodeAssert.deepEqual(toolText("call-typecheck"), [
     { type: "content", content: { type: "text", text: TYPECHECK_OUTPUT } },
   ]);
-  NodeAssert.ok(
-    NodeFS.existsSync(NodePath.join(dataDir, "blobs", sha256(HELLO))),
-    "the typecheck service stored src/hello.ts",
-  );
   ok(`typecheck tool_call_update from the real service: ${TYPECHECK_OUTPUT}`);
+  const protectedOutput =
+    `Not checked: package.json changed. The check takes dependencies and config from commit ${commit}, ` +
+    "so dependency and config changes must be pushed first. Undo these changes to check the rest.";
+  NodeAssert.deepEqual(toolText("call-typecheck-package"), [
+    { type: "content", content: { type: "text", text: protectedOutput } },
+  ]);
+  ok("a package.json change gets the ProtectedPaths rejection text");
+  const repeated = await fetch(`http://127.0.0.1:${typecheckPort}/actions`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${typecheckToken}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      kind: "check",
+      toolchain: "node26-tsrs0.20-oxlint1.89",
+      repo: REPO,
+      commit,
+      files: [{ path: "src/hello.ts", sha256: sha256(HELLO) }],
+      deleted: [],
+    }),
+  }).then((response) => response.json());
+  NodeAssert.deepEqual(
+    { tag: repeated._tag, cached: repeated.cached, outputs: repeated.outputs },
+    { tag: "ActionResult", cached: true, outputs: [] },
+    JSON.stringify(repeated),
+  );
+  NodeAssert.deepEqual(
+    repeated.diagnostics.map(
+      (d: { path: string; line: number; column: number; code: string; tool: string }) =>
+        `${d.path}:${d.line}:${d.column} ${d.code} (${d.tool})`,
+    ),
+    ["src/hello.ts:1:14 TS2322 (tsrs)"],
+  );
+  ok("the agent's check, repeated as the same action, is served from the action cache");
   const message = updates
     .filter((u) => u.sessionUpdate === "agent_message_chunk")
     .map((u) => u.content.text)
@@ -402,6 +500,7 @@ const run = async () => {
 
 const cleanup = async () => {
   await stopAll();
+  for (const server of servers.splice(0)) server.close();
   removeStageState();
   for (const dir of tempDirs) NodeFS.rmSync(dir, { recursive: true, force: true });
 };

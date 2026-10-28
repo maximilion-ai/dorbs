@@ -240,6 +240,9 @@ importers:
       knip:
         specifier: 'catalog:'
         version: 6.43.0
+      tsrs:
+        specifier: 'catalog:'
+        version: 0.20.0-ts7.1.0-beta
       vite-plus:
         specifier: 'catalog:'
         version: 1.4.0(@types/node@26.6.5)(@vitest/ui@5.0.5)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1)
