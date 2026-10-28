@@ -20,16 +20,91 @@ export const RelativePath = Schema.String.pipe(
 );
 export type RelativePath = typeof RelativePath.Type;
 
-export const CheckRequest = Schema.Struct({
-  lockfile: Sha256,
-  files: Schema.Array(Schema.Struct({ path: RelativePath, sha256: Sha256 })),
+const isRepoName = (name: string): boolean =>
+  /^[a-z0-9._-]+$/.test(name) && name !== "." && name !== "..";
+
+// The service keeps a repo's cache under its id, so neither half may be `.` or `..`.
+export const RepoId = Schema.String.pipe(
+  Schema.check(
+    Schema.makeFilter(
+      (id: string) => {
+        const names = id.split("/");
+        return names.length === 2 && names.every(isRepoName);
+      },
+      { expected: "a repo id such as owner/name" },
+    ),
+  ),
+  Schema.brand("RepoId"),
+);
+export type RepoId = typeof RepoId.Type;
+
+export const CommitSha = Schema.String.pipe(
+  Schema.check(Schema.isPattern(/^[0-9a-f]{40}$/, { expected: "a full lowercase hex commit SHA" })),
+  Schema.brand("CommitSha"),
+);
+export type CommitSha = typeof CommitSha.Type;
+
+// Each decides what gets installed or how tsrs and oxlint run, so a check takes it from the commit.
+const PROTECTED_NAMES: ReadonlyArray<RegExp> = [
+  /^package\.json$/i,
+  /^pnpm-lock\.yaml$/i,
+  /^pnpm-workspace\.yaml$/i,
+  /^\.npmrc$/i,
+  /^tsconfig.*\.json$/i,
+  /^\.oxlintrc.*\.json$/i,
+  /^oxlint\.config\./i,
+];
+
+/**
+ * Whether a check must take this path from the registered commit rather than from the client.
+ * Matches the file name at any depth and ignores case, because macOS volumes do. Anything under
+ * node_modules is install output, which the client must not shadow either.
+ */
+export const isProtectedPath = (path: RelativePath): boolean => {
+  const names = path.toLowerCase().split("/");
+  return (
+    names.includes("node_modules") ||
+    PROTECTED_NAMES.some((pattern) => pattern.test(names.at(-1) ?? ""))
+  );
+};
+
+/** The kinds of action the service runs. */
+const ActionKind = Schema.Literals(["check"]);
+export type ActionKind = typeof ActionKind.Type;
+
+/** Names a pinned set of tools, such as node26-tsrs0.20-oxlint1.89. */
+export const ToolchainId = Schema.String.pipe(
+  Schema.check(Schema.isPattern(/^[a-z0-9][a-z0-9.-]*$/, { expected: "a toolchain id" })),
+  Schema.brand("ToolchainId"),
+);
+export type ToolchainId = typeof ToolchainId.Type;
+
+const FileDigest = Schema.Struct({ path: RelativePath, sha256: Sha256 });
+
+/**
+ * A pure function of its fields: `kind` run with `toolchain` over `commit` of `repo`, with the
+ * client's changes laid over it. The service caches each result under the action's digest.
+ */
+export const Action = Schema.Struct({
+  kind: ActionKind,
+  toolchain: ToolchainId,
+  repo: RepoId,
+  commit: CommitSha,
+  /** Files that differ from `commit`, new files included. */
+  files: Schema.Array(FileDigest),
+  /** Files of `commit` that the client deleted. */
+  deleted: Schema.Array(RelativePath),
 });
-export type CheckRequest = typeof CheckRequest.Type;
+export type Action = typeof Action.Type;
 
 const Position = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
 
+/** Names the tool that reported a diagnostic, such as tsrs or oxlint. */
+export const ToolName = Schema.NonEmptyString.pipe(Schema.brand("ToolName"));
+export type ToolName = typeof ToolName.Type;
+
 const Diagnostic = Schema.Struct({
-  tool: Schema.Literals(["tsrs", "oxlint"]),
+  tool: ToolName,
   path: RelativePath,
   line: Position,
   column: Position,
@@ -44,11 +119,26 @@ const MissingBlobs = Schema.TaggedStruct("MissingBlobs", {
 });
 export type MissingBlobs = typeof MissingBlobs.Type;
 
-const CheckResult = Schema.TaggedStruct("CheckResult", {
+export const ActionResult = Schema.TaggedStruct("ActionResult", {
   diagnostics: Schema.Array(Diagnostic),
+  /** Files the action wrote, by digest. A check writes none. */
+  outputs: Schema.Array(FileDigest),
   durationMs: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
+  /** Whether the service answered from its action cache instead of running the tools. */
+  cached: Schema.Boolean,
 });
-export type CheckResult = typeof CheckResult.Type;
+export type ActionResult = typeof ActionResult.Type;
 
-export const CheckResponse = Schema.Union([MissingBlobs, CheckResult]);
-export type CheckResponse = typeof CheckResponse.Type;
+const RejectReason = Schema.Union([
+  Schema.TaggedStruct("UnknownToolchain", {}),
+  Schema.TaggedStruct("UnknownRepo", {}),
+  Schema.TaggedStruct("UnknownCommit", {}),
+  Schema.TaggedStruct("ProtectedPaths", { paths: Schema.Array(RelativePath) }),
+]);
+export type RejectReason = typeof RejectReason.Type;
+
+const Rejected = Schema.TaggedStruct("Rejected", { reason: RejectReason });
+export type Rejected = typeof Rejected.Type;
+
+export const ActionResponse = Schema.Union([MissingBlobs, ActionResult, Rejected]);
+export type ActionResponse = typeof ActionResponse.Type;
