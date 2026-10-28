@@ -52,6 +52,7 @@ export class Fixtures extends Context.Service<
   {
     readonly commits: Readonly<Record<string, CommitSha>>;
     readonly privateAuthorizations: ReadonlyArray<string>;
+    readonly dataDir: string;
   }
 >()("dorbs/typecheck/test/Fixtures") {}
 
@@ -125,7 +126,11 @@ const FixtureConfig = (repos: Readonly<Record<string, Record<string, FixtureFile
             PRIVATE_TOKEN,
           }),
         ),
-        Layer.succeed(Fixtures, { commits, privateAuthorizations: refusing.authorizations }),
+        Layer.succeed(Fixtures, {
+          commits,
+          privateAuthorizations: refusing.authorizations,
+          dataDir: `${dir}/data`,
+        }),
       );
     }),
   );

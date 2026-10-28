@@ -10,7 +10,8 @@
   "dependencies": {
     "@dorbs/protocol": "workspace:*",
     "@effect/platform-node": "catalog:",
-    "effect": "catalog:"
+    "effect": "catalog:",
+    "yaml": "catalog:"
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",

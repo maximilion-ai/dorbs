@@ -218,6 +218,9 @@ catalogs:
     vite-plus:
       specifier: 1.4.0
       version: 1.4.0
+    yaml:
+      specifier: 2.9.1
+      version: 2.9.1
     zod:
       specifier: 4.6.6
       version: 4.6.6
@@ -329,6 +332,9 @@ importers:
       effect:
         specifier: 4.0.6
         version: 4.0.6
+      yaml:
+        specifier: 'catalog:'
+        version: 2.9.1
     devDependencies:
       '@effect/vitest':
         specifier: 'catalog:'

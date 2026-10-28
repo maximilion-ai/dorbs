@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as Ref from "effect/Ref";
@@ -156,6 +157,36 @@ it.live("keeps a client write inside its check when the commit has a symlink", (
           "tsconfig.json": TSCONFIG,
           "src/a.ts": "export const a = 1;\n",
           "src/root": { symlink: ".." },
+        },
+      }),
+    ),
+  ),
+);
+
+it.live("installs inside its own directory whatever the commit's pnpm-workspace.yaml says", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const response = yield* checkChange("workspace", {});
+    assert.deepStrictEqual(response._tag === "ActionResult" && response.diagnostics, []);
+    const { dataDir } = yield* Fixtures;
+    assert.deepStrictEqual(yield* fs.readDirectory(dataDir), [
+      "actions",
+      "blobs",
+      "checkouts",
+      "checks",
+      "git",
+      "installs",
+      "oxlintrc.json",
+      "pnpm-store",
+    ]);
+  }).pipe(
+    Effect.provide(
+      TestServer({
+        workspace: {
+          "package.json": EMPTY_PACKAGE,
+          "pnpm-workspace.yaml": 'packages: ["."]\nmodulesDir: ../../escaped\n',
+          "tsconfig.json": TSCONFIG,
+          "src/a.ts": "export const a = 1;\n",
         },
       }),
     ),

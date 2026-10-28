@@ -11,6 +11,7 @@ import * as Schema from "effect/Schema";
 import { Sha256 } from "@dorbs/protocol/typecheck";
 
 import type { Checkout } from "./Checkouts.ts";
+import { installWorkspace } from "./pnpmWorkspace.ts";
 import { runProcess } from "./runProcess.ts";
 import { ServiceConfig } from "./ServiceConfig.ts";
 import * as SingleFlight from "./SingleFlight.ts";
@@ -32,10 +33,6 @@ export class Installs extends Context.Service<
   }
 >()("dorbs/typecheck/Installs") {}
 
-// The root files pnpm reads besides the manifests; a commit without a lockfile installs an empty one.
-// No .npmrc: registry and pnpmfile settings there would steer the shared install.
-const ROOT_INPUTS = ["pnpm-lock.yaml", "pnpm-workspace.yaml"];
-
 const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -52,16 +49,21 @@ const make = Effect.gen(function* () {
     const staging = path.join(root, `.staging-${NodeCrypto.randomUUID()}`);
     yield* Effect.gen(function* () {
       yield* fs.makeDirectory(staging);
-      yield* fs.writeFileString(path.join(staging, "pnpm-lock.yaml"), "");
-      const inputs = [
-        ...ROOT_INPUTS,
-        ...checkout.packages.map((dir) => path.join(dir, "package.json")),
-      ];
-      for (const input of inputs) {
-        const source = path.join(checkout.dir, input);
-        if (!(yield* fs.exists(source))) continue;
-        yield* fs.makeDirectory(path.dirname(path.join(staging, input)), { recursive: true });
-        yield* fs.copyFile(source, path.join(staging, input));
+      // No .npmrc: its registry and pnpmfile settings would steer the shared install.
+      for (const manifest of checkout.packages.map((dir) => path.join(dir, "package.json"))) {
+        yield* fs.makeDirectory(path.dirname(path.join(staging, manifest)), { recursive: true });
+        yield* fs.copyFile(path.join(checkout.dir, manifest), path.join(staging, manifest));
+      }
+      const lockfile = path.join(checkout.dir, "pnpm-lock.yaml");
+      yield* (yield* fs.exists(lockfile))
+        ? fs.copyFile(lockfile, path.join(staging, "pnpm-lock.yaml"))
+        : fs.writeFileString(path.join(staging, "pnpm-lock.yaml"), "");
+      const workspace = path.join(checkout.dir, "pnpm-workspace.yaml");
+      if (yield* fs.exists(workspace)) {
+        yield* fs.writeFileString(
+          path.join(staging, "pnpm-workspace.yaml"),
+          installWorkspace(yield* fs.readFileString(workspace)),
+        );
       }
     }).pipe(Effect.orDie);
     const result = yield* runProcess(spawner, staging, "pnpm", [
