@@ -18,15 +18,20 @@ T3 always sends `protocolVersion: 2` (`RT:2042`). The request carries both the v
 Minimal v1 response:
 
 ```json
-{"protocolVersion":1,
- "agentInfo":{"name":"dorbs","version":"0.1.0"},
- "agentCapabilities":{"loadSession":false,
-   "promptCapabilities":{"image":false,"audio":false,"embeddedContext":false},
-   "mcpCapabilities":{"acp":true}},
- "authMethods":[]}
+{
+  "protocolVersion": 1,
+  "agentInfo": { "name": "dorbs", "version": "0.1.0" },
+  "agentCapabilities": {
+    "loadSession": false,
+    "promptCapabilities": { "image": false, "audio": false, "embeddedContext": false },
+    "mcpCapabilities": { "acp": true }
+  },
+  "authMethods": []
+}
 ```
 
 **Recommendation: pin v1.**
+
 - v1 `session/prompt` returns `{stopReason}` directly. In v2 the prompt response is only an ack. The turn ends when the agent sends a `state_update` `idle` notification (`CL:813-830`, `CL:1246-1270`).
 - In v2, any `capabilities.session` object makes T3 assume `loadSession`, `list`, `resume` and `close` (`CL:586-604`). The `mcp.acp` flag also lives under `session`, so MCP-over-ACP in v2 forces all four.
 - v1 is stable (schema-v1.21.0); v2 is alpha.3 (`packages/effect-acp/scripts/generate.ts:16-17`).
@@ -43,7 +48,7 @@ Minimal v1 response:
    - `plan` with `{entries:[{content,priority,status}]}`
    - `usage_update` with `{used,size,cost?}` (`runtimeModel.ts:1544`)
    - `available_commands_update`, `session_info_update`, `config_option_update`
-  
+
 4. **Response** `{stopReason, usage?}`. v1 values: `end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, `cancelled` (`schema-v1.gen.ts:1174`). Non-`cancelled` means completed (`AD:7618-7625`).
 5. **`session/cancel`** is a notification `{sessionId}`. By default T3 only sends it and keeps waiting for the prompt response (`RT:2318-2320`, `AD:1991`), with no timeout on that path. The agent must answer the open `session/prompt` with `stopReason:"cancelled"`, or the turn hangs.
 
@@ -51,12 +56,12 @@ Minimal v1 response:
 
 All MCP traffic flows from the agent to T3 on the same stdio stream (`packages/effect-acp/src/_generated/meta.gen.ts:32-40`, `AD:5909-5920`, `mcpOverAcpBridge.ts`):
 
-| Method | Kind | Params | Result |
-|---|---|---|---|
-| `mcp/connect` | request | `{serverId:"t3-code"}` | `{connectionId}` |
-| `mcp/message` | request | `{connectionId, method, params?}` | the raw MCP `result` |
-| `mcp/message` | notification (no id) | `{connectionId, method, params?}` | none |
-| `mcp/disconnect` | request | `{connectionId}` | `{}` |
+| Method           | Kind                 | Params                            | Result               |
+| ---------------- | -------------------- | --------------------------------- | -------------------- |
+| `mcp/connect`    | request              | `{serverId:"t3-code"}`            | `{connectionId}`     |
+| `mcp/message`    | request              | `{connectionId, method, params?}` | the raw MCP `result` |
+| `mcp/message`    | notification (no id) | `{connectionId, method, params?}` | none                 |
+| `mcp/disconnect` | request              | `{connectionId}`                  | `{}`                 |
 
 - **Server id.** Only `serverId` `t3-code` is accepted. Max 16 connections, 8 MiB per message (`mcpOverAcpBridge.ts:8-9`).
 - **Handshake:** `initialize`, `notifications/initialized`, then `tools/list`/`tools/call`, all via `mcp/message`.
@@ -77,6 +82,7 @@ All MCP traffic flows from the agent to T3 on the same stdio stream (`packages/e
 ## 6. Prototype checklist
 
 **Implement:**
+
 - `initialize` (v1 shape above)
 - `session/new`
 - `session/prompt`
@@ -86,6 +92,7 @@ All MCP traffic flows from the agent to T3 on the same stdio stream (`packages/e
 - `mcp/*` client calls; optional `session/request_permission`; `-32601` for unknown methods
 
 **Don't advertise:**
+
 - **`loadSession` / `sessionCapabilities.resume`.** T3 would call `session/load` and quarantine replayed history for up to 90 s (`RT:80`, `RT:2163-2190`), (`AD:565-576`).
 - **`sessionCapabilities.fork`, `list`, `delete`, `close`.** They enable UI paths (`REG/probe.ts:267-272`).
 - **`authMethods`.** Keep the list empty. A non-`agent` method can't run headless (`RT:2126-2134`), and a `-32000` error makes T3 report "authentication failed" (`REG/probe.ts:283-285`).

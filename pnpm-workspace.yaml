@@ -1,0 +1,28 @@
+packages:
+  - apps/*
+  - packages/*
+
+catalog:
+  "@effect/platform-node": 4.0.6
+  "@effect/vitest": 4.0.6
+  # Must match the oxlint that vite-plus bundles, which loads our JS plugin.
+  "@oxlint/plugins": 1.89.0
+  "@types/node": 26.6.5
+  # effect 4.0.7 is newer than pnpm's minimumReleaseAge allows.
+  effect: 4.0.6
+  knip: 6.43.0
+  tsrs: 0.20.0-ts7.1.0-beta
+  vite: npm:@voidzero-dev/vite-plus-core@1.4.0
+  vite-plus: 1.4.0
+  vitest: 5.0.5
+
+# One vite and one vitest across the tree, so @effect/vitest and
+# @cloudflare/vitest-plugin share the runner that vite-plus bundles.
+overrides:
+  effect: "catalog:"
+  vite: "catalog:"
+  vitest: "catalog:"
+
+peerDependencyRules:
+  allowedVersions:
+    vite: "*"

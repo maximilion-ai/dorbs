@@ -42,9 +42,14 @@ export type WorkerEnv = Cloudflare.InferEnv<typeof Worker>;
 
 export default Alchemy.Stack(
   "PlatformProbe",
-  { providers: Cloudflare.providers(), state: Alchemy.localState(),
-    secrets: [Secrets.DotEnv(), Secrets.ProcessEnv()] },
-  Effect.gen(function* () { return { url: (yield* Worker).url }; }),
+  {
+    providers: Cloudflare.providers(),
+    state: Alchemy.localState(),
+    secrets: [Secrets.DotEnv(), Secrets.ProcessEnv()],
+  },
+  Effect.gen(function* () {
+    return { url: (yield* Worker).url };
+  }),
 );
 ```
 
@@ -76,12 +81,12 @@ export default Alchemy.Stack(
 
 One DO did all of this: an Effect runtime, workspace write, git init and commit, a Pi run where the faux model called `write`, `git.diff`, and an isolate `exec` that imported `ws:git`.
 
-| Runner | Result |
-| --- | --- |
-| `wrangler dev` 4.154.0 | Pass. The diff contained `+two`, and the event list included `tool_execution_end`. |
-| `alchemy dev` | Pass, with no Cloudflare credentials (`env -i`, empty HOME). Alchemy created the Worker and R2 locally and kept state in `.alchemy/`. The `/secret` route saw the secret and `Bucket.put`. |
-| `@cloudflare/vitest-pool-workers` 0.23.0 | Fail. It is deprecated and renamed, and it pins wrangler 4.124.0, whose workerd rejects compat dates after 2026-08-22. |
-| `@cloudflare/vitest-plugin` 1.4.9 | Pass (1 test, 5 s). It failed as expected when I seeded a wrong assertion. |
+| Runner                                   | Result                                                                                                                                                                                     |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `wrangler dev` 4.154.0                   | Pass. The diff contained `+two`, and the event list included `tool_execution_end`.                                                                                                         |
+| `alchemy dev`                            | Pass, with no Cloudflare credentials (`env -i`, empty HOME). Alchemy created the Worker and R2 locally and kept state in `.alchemy/`. The `/secret` route saw the secret and `Bucket.put`. |
+| `@cloudflare/vitest-pool-workers` 0.23.0 | Fail. It is deprecated and renamed, and it pins wrangler 4.124.0, whose workerd rejects compat dates after 2026-08-22.                                                                     |
+| `@cloudflare/vitest-plugin` 1.4.9        | Pass (1 test, 5 s). It failed as expected when I seeded a wrong assertion.                                                                                                                 |
 
 ## 6. Recommendation for `apps/agent-worker`
 

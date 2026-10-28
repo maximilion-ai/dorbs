@@ -69,11 +69,13 @@ Source: T3 Code `main` @ 125b619 (2026-10-28). Paths relative to `/tmp/t3src/t3c
 **Adopt:** tsconfig base and Effect LS block. Catalog + `overrides`. Source subpath exports. The service module shape. `Schema.TaggedError`. `Effect.fn` spans. `it.effect` + TestClock. Knip. `check:changed`. tsc-rs via `typescript: npm:@tsc-rs/typescript` (presumably the tsrs you mean). Alchemy Worker/DO classes.
 
 **Adapt:**
+
 - Move the oxlint config into a standalone `.oxlintrc.json`.
 - Copy only the Effect and test rules above, with their tests, into our own `jsPlugins` package.
 - Use vitest directly. Then `@effect/vitest` needs no patch; T3's patch only exists for Vite+ (`pnpm-workspace.yaml:351-353,365`).
 
 **Skip:**
+
 - Vite+ and oxfmt. Biome overlaps oxfmt, so use Biome to format only, with its linter off.
 - React, mobile, and shadcn rules, and the remote task cache.
 - Type-aware oxlint, which T3 also keeps off.

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  // Exported types are part of the protocol contract before apps consume them.
+  "rules": { "types": "off", "nsTypes": "off" },
+  "workspaces": {
+    ".": {},
+    "packages/*": {
+      "includeEntryExports": true,
+    },
+    "packages/oxlint-plugin": {
+      // oxlint loads index.ts by path from vite.config.ts and reads its default export.
+      "includeEntryExports": false,
+    },
+  },
+}
