@@ -6,10 +6,13 @@ export const Sha256 = Schema.String.pipe(
 );
 export type Sha256 = typeof Sha256.Type;
 
-// Slash-separated segments, none empty, `.` or `..`, so a path cannot leave the project root.
+const isPathSegment = (segment: string): boolean =>
+  segment !== "" && segment !== "." && segment !== ".." && !/[\\\x00-\x1f\x7f]/.test(segment);
+
+// Checked per segment, not with one regex, so no character (a newline included) can hide a `..`.
 export const RelativePath = Schema.String.pipe(
   Schema.check(
-    Schema.isPattern(/^(?!\.\.?(?:\/|$))(?!.*\/\.\.?(?:\/|$))[^/\\\0]+(?:\/[^/\\\0]+)*$/, {
+    Schema.makeFilter((path: string) => path.split("/").every(isPathSegment), {
       expected: "a relative POSIX path without . or .. segments",
     }),
   ),

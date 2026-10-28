@@ -39,6 +39,8 @@ it.effect("rejects paths that escape the project root", () =>
     for (const path of [
       "/etc/passwd",
       "../a.ts",
+      "a\n/../b.ts",
+      "a\u0001b.ts",
       "src/../../a.ts",
       "src//a.ts",
       "./a.ts",
