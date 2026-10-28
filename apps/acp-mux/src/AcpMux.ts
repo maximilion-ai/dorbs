@@ -20,7 +20,7 @@ const MuxConfig = Config.schema(
   }),
 );
 
-export class SocketPathTaken extends Schema.TaggedError<SocketPathTaken>()("SocketPathTaken", {
+class SocketPathTaken extends Schema.TaggedError<SocketPathTaken>()("SocketPathTaken", {
   path: Schema.String,
   owner: Schema.Literals(["live daemon", "not a socket"]),
 }) {
