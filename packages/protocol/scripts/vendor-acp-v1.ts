@@ -9,6 +9,8 @@ const ROOTS = [
   "InitializeResponse",
   "NewSessionRequest",
   "NewSessionResponse",
+  "LoadSessionRequest",
+  "LoadSessionResponse",
   "PromptRequest",
   "PromptResponse",
   "CancelNotification",

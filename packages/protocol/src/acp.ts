@@ -1,6 +1,6 @@
 // Vendored from T3 Code (https://github.com/pingdotgg/t3code) packages/effect-acp/src/_generated/schema-v1.gen.ts
 // at commit 125b619, MIT (see THIRD_PARTY_LICENSES). Keeps only what these roots reach:
-// InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, CancelNotification, SessionNotification, RequestPermissionRequest, RequestPermissionResponse.
+// InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse, LoadSessionRequest, LoadSessionResponse, PromptRequest, PromptResponse, CancelNotification, SessionNotification, RequestPermissionRequest, RequestPermissionResponse.
 // Regenerate with `node packages/protocol/scripts/vendor-acp-v1.ts <t3code checkout> && pnpm fmt`.
 import * as Schema from "effect/Schema";
 
@@ -2763,6 +2763,45 @@ export const NewSessionRequest = Schema.Struct({
   identifier: "NewSessionRequest",
 });
 
+export type LoadSessionRequest = {
+  readonly mcpServers: ReadonlyArray<McpServer>;
+  readonly cwd: string;
+  readonly additionalDirectories?: ReadonlyArray<string>;
+  readonly sessionId: SessionId;
+  readonly _meta?: { readonly [x: string]: Schema.Json } | null;
+};
+
+export const LoadSessionRequest = Schema.Struct({
+  mcpServers: Schema.Array(McpServer).annotate({
+    description: "List of MCP servers to connect to for this session.",
+  }),
+  cwd: Schema.String.annotate({
+    description: "The working directory for this session. Must be an absolute path.",
+  }),
+  additionalDirectories: Schema.optionalKey(
+    Schema.Array(Schema.String).annotate({
+      description:
+        "Additional workspace roots to activate for this session. Each path must be absolute.\n\nWhen omitted or empty, no additional roots are activated. When non-empty,\nthis is the complete resulting additional-root list for the loaded\nsession. It may differ from any previously used or reported list as long as\nthe request `cwd` matches the session's `cwd`.",
+    }),
+  ),
+  sessionId: Schema.suspend((): Schema.Codec<SessionId> => SessionId).annotate({
+    description: "The ID of the session to load.",
+  }),
+  _meta: Schema.optionalKey(
+    Schema.Union([
+      Schema.Record(Schema.String, Schema.Json.annotate({ expected: "JSON value" })).annotate({
+        description:
+          "The _meta property is reserved by ACP to allow clients and agents to attach additional\nmetadata to their interactions. Implementations MUST NOT make assumptions about values at\nthese keys.\n\nSee protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/extensibility)",
+      }),
+      Schema.Null,
+    ]),
+  ),
+}).annotate({
+  description:
+    "Request parameters for loading an existing session.\n\nOnly available if the Agent supports the `loadSession` capability.\n\nSee protocol docs: [Loading Sessions](https://agentclientprotocol.com/protocol/session-setup#loading-sessions)",
+  identifier: "LoadSessionRequest",
+});
+
 export type ClientCapabilities = {
   readonly fs?: FileSystemCapabilities;
   readonly terminal?: boolean;
@@ -3747,6 +3786,41 @@ export const NewSessionResponse = Schema.Struct({
   description:
     "Response from creating a new session.\n\nSee protocol docs: [Creating a Session](https://agentclientprotocol.com/protocol/session-setup#creating-a-session)",
   identifier: "NewSessionResponse",
+});
+
+export type LoadSessionResponse = {
+  readonly modes?: SessionModeState | null;
+  readonly configOptions?: ReadonlyArray<SessionConfigOption> | null;
+  readonly _meta?: { readonly [x: string]: Schema.Json } | null;
+};
+
+export const LoadSessionResponse = Schema.Struct({
+  modes: Schema.optionalKey(
+    Schema.Union([SessionModeState, Schema.Null]).annotate({
+      description:
+        "Initial mode state if supported by the Agent\n\nSee protocol docs: [Session Modes](https://agentclientprotocol.com/protocol/session-modes)",
+    }),
+  ),
+  configOptions: Schema.optionalKey(
+    Schema.Union([
+      Schema.Array(SessionConfigOption).annotate({
+        description: "Initial session configuration options if supported by the Agent.",
+      }),
+      Schema.Null,
+    ]),
+  ),
+  _meta: Schema.optionalKey(
+    Schema.Union([
+      Schema.Record(Schema.String, Schema.Json.annotate({ expected: "JSON value" })).annotate({
+        description:
+          "The _meta property is reserved by ACP to allow clients and agents to attach additional\nmetadata to their interactions. Implementations MUST NOT make assumptions about values at\nthese keys.\n\nSee protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/extensibility)",
+      }),
+      Schema.Null,
+    ]),
+  ),
+}).annotate({
+  description: "Response from loading an existing session.",
+  identifier: "LoadSessionResponse",
 });
 
 export type InitializeResponse = {
