@@ -24,6 +24,9 @@ const callTool =
   () =>
     fauxAssistantMessage([fauxToolCall(name, args, { id })], { stopReason: "toolUse" });
 
+const git = (args: string, id: string): Step => callTool("git", { args }, id);
+const gh = (args: string, id: string): Step => callTool("gh", { args }, id);
+
 const say =
   (text: string): Step =>
   () =>
@@ -89,6 +92,47 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
     say("Listed."),
   ],
   "wait for cancel": [callTool("list_files", {}, "call-list"), untilAborted],
+  "git push": [
+    callTool("clone_repo", { repo: "test/fixture" }, "call-clone"),
+    callTool("write_file", { path: "src/hello.ts", content: HELLO }, "call-write"),
+    git("checkout -b dorbs/test", "call-checkout"),
+    git("add -A", "call-add"),
+    git("status", "call-status"),
+    git('commit -m "add hello"', "call-commit"),
+    git("push -u origin dorbs/test", "call-push"),
+    git("log --oneline -1", "call-log"),
+    say("Pushed dorbs/test."),
+  ],
+  "git refusals": [
+    callTool("clone_repo", { repo: "test/fixture" }, "call-clone"),
+    git("push", "call-push"),
+    git("push origin HEAD:main", "call-push-main"),
+    git("push --force origin dorbs/test", "call-force"),
+    git("push origin :dorbs/test", "call-delete"),
+    git("push upstream dorbs/test", "call-upstream"),
+    git("status | cat", "call-pipe"),
+    git("fetch origin", "call-fetch"),
+    git("-C /tmp push origin main", "call-global"),
+    say("Refused."),
+  ],
+  "gh pr": [
+    callTool("clone_repo", { repo: "test/github" }, "call-clone"),
+    callTool("write_file", { path: "src/hello.ts", content: HELLO }, "call-write"),
+    git("checkout -b dorbs/pr", "call-checkout"),
+    git("add -A", "call-add"),
+    git('commit -m "add hello"', "call-commit"),
+    git("push origin HEAD:dorbs/pr", "call-push"),
+    gh('pr create --title "Add hello" --body "Adds src/hello.ts."', "call-pr-create"),
+    gh("pr view", "call-pr-view"),
+    gh("pr create --title Again --body Again", "call-pr-again"),
+    gh("pr merge 1", "call-pr-merge"),
+    say("Opened a pull request."),
+  ],
+  "gh off github": [
+    callTool("clone_repo", { repo: "test/fixture" }, "call-clone"),
+    gh("pr view", "call-gh"),
+    say("gh is not configured."),
+  ],
   e2e: [
     callTool("clone_repo", { repo: "dorbs/e2e" }, "call-clone"),
     callTool("write_file", { path: "src/hello.ts", content: E2E_HELLO }, "call-hello"),

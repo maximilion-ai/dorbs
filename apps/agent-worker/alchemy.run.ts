@@ -3,6 +3,7 @@ import * as Alchemy from "alchemy";
 import * as Secrets from "alchemy/Secrets";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
+import * as Redacted from "effect/Redacted";
 
 import type { AcpConnection, AcpSession } from "./src/worker.ts";
 
@@ -19,6 +20,11 @@ export const Worker = Cloudflare.Worker("AgentWorker", {
     MODEL_PROVIDER: Config.String("MODEL_PROVIDER"),
     MODEL_ID: Config.String("MODEL_ID"),
     OPENROUTER_API_KEY: Config.Redacted("OPENROUTER_API_KEY"),
+    // Optional; an empty token means none, since an undefined default sends alchemy's env inference into a loop.
+    GITHUB_TOKEN: Config.Redacted("GITHUB_TOKEN").pipe(Config.withDefault(Redacted.make(""))),
+    GITHUB_API_URL: Config.String("GITHUB_API_URL").pipe(
+      Config.withDefault("https://api.github.com"),
+    ),
     ALCHEMY_DEV: Alchemy.ALCHEMY_DEV,
   },
   dev: { port: 8787 },

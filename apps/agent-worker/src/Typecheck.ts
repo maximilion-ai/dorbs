@@ -19,8 +19,8 @@ import * as Schema from "effect/Schema";
 
 export type WorkspaceFile = { readonly path: RelativePath; readonly content: string };
 
-/** The repo and commit a workspace was cloned from. */
-export type Clone = { readonly repo: RepoId; readonly commit: CommitSha };
+/** The repo and commit a workspace was cloned from, and the base branch checked out then. */
+export type Clone = { readonly repo: RepoId; readonly commit: CommitSha; readonly branch: string };
 
 /** How a workspace differs from the commit it was cloned from. */
 export type Change = {

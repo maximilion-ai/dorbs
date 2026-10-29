@@ -1,8 +1,13 @@
+import { CommitSha, RepoId } from "@dorbs/protocol/typecheck";
 import { assert, it } from "@effect/vitest";
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
+import * as ConfigProvider from "effect/ConfigProvider";
+import * as Effect from "effect/Effect";
 
 import { connect, open, updates } from "./client.ts";
+import { gh } from "../src/gh.ts";
+import * as GitHub from "../src/GitHub.ts";
 import { COUNT, HELLO, NEW_FILE } from "../src/ScriptedModel.ts";
 import type { AcpSession } from "./worker.ts";
 
@@ -218,7 +223,7 @@ it("refuses to clone a repo that is not registered", async () => {
         type: "content",
         content: {
           type: "text",
-          text: "<harness>\n[error] evil/repo is not a registered repo. Registered: test/fixture\n</harness>",
+          text: "<harness>\n[error] evil/repo is not a registered repo. Registered: test/fixture, test/github\n</harness>",
         },
       },
     ],
@@ -447,3 +452,188 @@ it("answers the client's close, so acp-mux can tear down both sides", async () =
   const client = await connect();
   assert.strictEqual(await client.close(1000, "client hung up"), 1000);
 });
+
+const toolText = (frames: ReturnType<typeof updates>, toolCallId: string): string =>
+  (toolResult(frames, toolCallId)?.content ?? [])
+    .map((item: { content: { text: string } }) => item.content.text)
+    .join("");
+
+const refOf = (repo: string, ref: string) =>
+  double<{ commit: string; files: Record<string, string> } | null>(
+    `http://git.test/__ref?${new URLSearchParams({ repo, ref }).toString()}`,
+  );
+
+it("commits on a new branch and pushes it to origin, as git on a command line", async () => {
+  const record = await recordSince();
+  const client = await connect();
+  const sessionId = await client.newSession();
+  const response = await client.request(2, "session/prompt", prompt(sessionId, "git push"));
+  assert.deepStrictEqual(response.result, { stopReason: "end_turn" });
+  const pushed = await refOf("fixture.git", "refs/heads/dorbs/test");
+  const commit = pushed?.commit ?? "";
+  const frames = updates(client.frames);
+  assert.deepStrictEqual(
+    ["call-checkout", "call-add", "call-status", "call-commit", "call-push", "call-log"].map((id) =>
+      toolText(frames, id),
+    ),
+    [
+      "(no output)",
+      "(no output)",
+      // Computer 0.8.0 marks a file just added with git add -A as modified in the worktree too.
+      "1 AM src/hello.ts",
+      `[${commit.slice(0, 7)}] add hello`,
+      `Pushed dorbs/test to origin at ${commit}`,
+      `${commit.slice(0, 7)} add hello`,
+    ],
+  );
+  assert.deepStrictEqual(toolResult(frames, "call-push")?.status, "completed");
+  assert.deepStrictEqual(Object.keys(pushed?.files ?? {}).toSorted(), [
+    "package.json",
+    "src/hello.ts",
+    "src/index.ts",
+    "src/old.ts",
+    "tsconfig.json",
+  ]);
+  assert.strictEqual(pushed?.files["src/hello.ts"], HELLO);
+  assert.deepStrictEqual(
+    (await record.log()).filter((line) => line.includes("with credentials")),
+    [],
+    "GITHUB_TOKEN goes to github.com remotes only",
+  );
+});
+
+it("refuses pushes to the base branch, force pushes, deletes, other remotes and shell operators", async () => {
+  const before = await refOf("fixture.git", "refs/heads/main");
+  const client = await connect();
+  const sessionId = await client.newSession();
+  const response = await client.request(2, "session/prompt", prompt(sessionId, "git refusals"));
+  assert.deepStrictEqual(response.result, { stopReason: "end_turn" });
+  const frames = updates(client.frames);
+  const protectedText =
+    "The base branch main is protected. Create a branch with git checkout -b <name>, commit, then push it.";
+  assert.deepStrictEqual(
+    [
+      "call-push",
+      "call-push-main",
+      "call-force",
+      "call-delete",
+      "call-upstream",
+      "call-pipe",
+      "call-fetch",
+      "call-global",
+    ].map((id) => toolText(frames, id)),
+    [
+      protectedText,
+      protectedText,
+      "Force pushes are not allowed. Commit on top of the remote branch and push again.",
+      "Deleting remote branches is not allowed.",
+      "Only origin takes pushes. It is test/fixture, which the agent cloned; other remotes are not available.",
+      "| is a shell operator. Run one command per call, with no shell operators.",
+      "git fetch is not available: the agent manages the network and remotes. Commit your work, then publish it with git push.",
+      "git runs in the repo root; global options such as -C are not supported. Pass the subcommand first.",
+    ],
+  );
+  assert.deepStrictEqual(await refOf("fixture.git", "refs/heads/main"), before);
+});
+
+it("pushes to github.com with GITHUB_TOKEN and opens a pull request with gh", async () => {
+  const requests = (await double<unknown[]>("http://github-api.test/__requests")).length;
+  const client = await connect();
+  const sessionId = await client.newSession();
+  const response = await client.request(2, "session/prompt", prompt(sessionId, "gh pr"));
+  assert.deepStrictEqual(response.result, { stopReason: "end_turn" });
+  const pushed = await refOf("test/github.git", "refs/heads/dorbs/pr");
+  assert.strictEqual(pushed?.files["src/hello.ts"], HELLO);
+  const frames = updates(client.frames);
+  assert.deepStrictEqual(
+    ["call-push", "call-pr-create", "call-pr-view", "call-pr-again", "call-pr-merge"].map((id) =>
+      toolText(frames, id),
+    ),
+    [
+      `Pushed dorbs/pr to origin at ${pushed?.commit}`,
+      "https://github.com/test/github/pull/1",
+      [
+        "title:\tAdd hello",
+        "state:\tOPEN",
+        "number:\t1",
+        "url:\thttps://github.com/test/github/pull/1",
+        "--",
+        "Adds src/hello.ts.",
+      ].join("\n"),
+      "HTTP 422: Validation Failed (A pull request already exists for test:dorbs/pr.)",
+      [
+        "gh pr merge 1 is not supported. Supported commands:",
+        "gh pr create --title <title> --body <body> [--base <branch>] [--head <branch>] [--draft]",
+        "gh pr view [<number>]",
+        "gh pr list [--state open|closed|all]",
+        "gh pr comment <number> --body <body>",
+        "gh issue view <number>",
+        "gh repo view",
+      ].join("\n"),
+    ],
+  );
+  assert.deepStrictEqual(
+    (await double<unknown[]>("http://github-api.test/__requests")).slice(requests),
+    [
+      {
+        method: "POST",
+        path: "/repos/test/github/pulls",
+        body: {
+          title: "Add hello",
+          body: "Adds src/hello.ts.",
+          head: "dorbs/pr",
+          base: "main",
+          draft: false,
+        },
+      },
+      {
+        method: "GET",
+        path: "/repos/test/github/pulls?head=test%3Adorbs%2Fpr&state=open",
+        body: null,
+      },
+      {
+        method: "POST",
+        path: "/repos/test/github/pulls",
+        body: { title: "Again", body: "Again", head: "dorbs/pr", base: "main", draft: false },
+      },
+    ],
+  );
+  const config = await inSession(sessionId, (instance) =>
+    instance.workspace.fs.readFile("/workspace/.git/config", "utf8"),
+  );
+  assert.include(config, "url = https://github.com/test/github.git");
+  assert.notInclude(config, "github-token");
+  assert.notInclude(JSON.stringify(client.frames), "github-token");
+});
+
+it("says gh is not configured for a repo that is not on github.com", async () => {
+  const client = await connect();
+  const sessionId = await client.newSession();
+  await client.request(2, "session/prompt", prompt(sessionId, "gh off github"));
+  assert.strictEqual(
+    toolText(updates(client.frames), "call-gh"),
+    "gh is not configured: test/fixture is not a github.com repo.",
+  );
+});
+
+it.effect("says gh is not configured when the Worker has no GITHUB_TOKEN", () =>
+  Effect.gen(function* () {
+    const { api } = yield* GitHub.GitHub;
+    const said = yield* Effect.promise(() =>
+      gh("pr view", {
+        clone: {
+          repo: RepoId.make("test/github"),
+          commit: CommitSha.make("0".repeat(40)),
+          branch: "main",
+        },
+        url: "https://github.com/test/github.git",
+        api,
+        currentBranch: async () => "dorbs/pr",
+      }),
+    );
+    assert.strictEqual(said, "gh is not configured: the agent has no GITHUB_TOKEN.");
+  }).pipe(
+    Effect.provide(GitHub.layer),
+    Effect.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({}))),
+  ),
+);

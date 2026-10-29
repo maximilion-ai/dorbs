@@ -12,6 +12,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 
+import * as GitHub from "./GitHub.ts";
 import { ModelProvider, type ModelUnavailable } from "./ModelProvider.ts";
 import * as Repos from "./Repos.ts";
 import { nameOf, type ConnectionId } from "./rpc.ts";
@@ -48,12 +49,16 @@ const outcomeOf = (status: "done" | "unanswered", reason: string | undefined): R
 export const makeAcpSession = (modelLayer: ModelLayer) =>
   class AcpSession extends DurableObject {
     readonly runtime = ManagedRuntime.make(
-      Layer.mergeAll(modelLayer(this.env), Typecheck.layer, Repos.layer).pipe(
+      Layer.mergeAll(modelLayer(this.env), Typecheck.layer, Repos.layer, GitHub.layer).pipe(
         Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(this.env))),
       ),
     );
 
-    readonly workspace = new Workspace({ storage: this.ctx.storage, git: createGitClient() });
+    readonly workspace = new Workspace({
+      storage: this.ctx.storage,
+      git: createGitClient(),
+      defaultGitIdentity: { name: "dorbs agent", email: "agent@dorbs.invalid" },
+    });
 
     readonly toolHost: ToolHost = {
       workspace: this.workspace,
@@ -66,6 +71,7 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
             typecheck.check(clone, change),
           ),
         ),
+      github: () => this.runtime.runPromise(Effect.service(GitHub.GitHub)),
     };
 
     readonly registry = (() => {

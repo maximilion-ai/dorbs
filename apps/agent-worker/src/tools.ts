@@ -13,6 +13,9 @@ import type { ToolExecutionResult, ToolRegistration } from "@earendil-works/pi-d
 import * as Match from "effect/Match";
 import * as Schema from "effect/Schema";
 
+import { gh } from "./gh.ts";
+import { git } from "./git.ts";
+import type { GitHub } from "./GitHub.ts";
 import type { Change, Clone } from "./Typecheck.ts";
 
 export const WORKSPACE_ROOT = "/workspace";
@@ -26,6 +29,7 @@ export type ToolHost = {
   readonly clone: () => Clone | undefined;
   readonly saveClone: (clone: Clone) => void;
   readonly typecheck: (clone: Clone, change: Change) => Promise<ActionResult | Rejected>;
+  readonly github: () => Promise<GitHub["Service"]>;
 };
 
 /** A write's before and after, sent as the tool result's `details` and shown to the client as a diff. */
@@ -142,9 +146,17 @@ const rejectionText = ({ reason }: Rejected, clone: Clone): string =>
 const formatDiagnostic = (d: Diagnostic): string =>
   `${d.path}:${d.line}:${d.column} ${d.severity} ${d.code} ${d.message} (${d.tool})`;
 
+const urlOf = async (host: ToolHost, clone: Clone): Promise<string | undefined> =>
+  (await host.repos()).get(clone.repo);
+
+const Args = (program: string, example: string) =>
+  Type.Object({
+    args: Type.String({ description: `Everything after ${program}, such as ${example}` }),
+  });
+
 const Path = Type.String({ description: "Path relative to the workspace root, such as src/a.ts" });
 
-/** Every tool the agent offers the model. Shell and git join as rows here. */
+/** Every tool the agent offers the model. Shell joins as a row here. */
 const TOOLS = [
   row({
     name: "read_file",
@@ -240,7 +252,9 @@ const TOOLS = [
       const commit = decodeCommit(
         await host.workspace.git.revParse({ dir: WORKSPACE_ROOT, ref: "HEAD" }),
       );
-      host.saveClone({ repo: id, commit });
+      const branch = await host.workspace.git.currentBranch({ dir: WORKSPACE_ROOT });
+      if (branch === undefined) throw new Error(`${id} cloned without a branch checked out.`);
+      host.saveClone({ repo: id, commit, branch });
       return text(
         `Cloned ${id} at ${commit} into the workspace root. Paths are relative to the repo root.`,
       );
@@ -265,6 +279,46 @@ const TOOLS = [
           ? "No diagnostics."
           : result.diagnostics.map(formatDiagnostic).join("\n"),
       );
+    },
+  }),
+  row({
+    name: "git",
+    title: (args) => `\`git ${arg(args, "args")}\``,
+    kind: "execute",
+    description:
+      "Run git in the cloned repo, one command per call, without shell operators. " +
+      "The base branch is protected: commit on a new branch and push it to origin. " +
+      "fetch, pull, clone, remote and config are not available.",
+    parameters: Args("git", 'status, commit -m "Add x" or push -u origin my-branch'),
+    replay: "unsafe",
+    run: async ({ args }, host) => {
+      const clone = host.clone();
+      if (clone === undefined) {
+        return text("No repo is cloned, so there is no git repository. Call clone_repo first.");
+      }
+      const [url, { onAuth }] = await Promise.all([urlOf(host, clone), host.github()]);
+      return text(
+        await git(args, { workspace: host.workspace, dir: WORKSPACE_ROOT, clone, url, onAuth }),
+      );
+    },
+  }),
+  row({
+    name: "gh",
+    title: (args) => `\`gh ${arg(args, "args")}\``,
+    kind: "execute",
+    description:
+      "Run the GitHub CLI on the cloned GitHub repo, one command per call. Supported: pr create, " +
+      "pr view, pr list, pr comment, issue view and repo view. Push your branch before gh pr create.",
+    parameters: Args("gh", 'pr create --title "Add x" --body "Adds x."'),
+    replay: "unsafe",
+    run: async ({ args }, host) => {
+      const clone = host.clone();
+      const [url, { api }] = await Promise.all([
+        clone === undefined ? undefined : urlOf(host, clone),
+        host.github(),
+      ]);
+      const currentBranch = () => host.workspace.git.currentBranch({ dir: WORKSPACE_ROOT });
+      return text(await gh(args, { clone, url, api, currentBranch }));
     },
   }),
 ];
