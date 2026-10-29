@@ -107,6 +107,8 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
     callTool("clone_repo", { repo: "test/fixture" }, "call-clone"),
     git("push", "call-push"),
     git("push origin HEAD:main", "call-push-main"),
+    git("push origin HEAD:heads/main", "call-push-heads"),
+    git("push origin HEAD:refs/tags/v1", "call-push-tag"),
     git("push --force origin dorbs/test", "call-force"),
     git("push origin :dorbs/test", "call-delete"),
     git("push upstream dorbs/test", "call-upstream"),

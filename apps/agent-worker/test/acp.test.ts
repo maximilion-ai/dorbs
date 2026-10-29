@@ -515,6 +515,8 @@ it("refuses pushes to the base branch, force pushes, deletes, other remotes and 
     [
       "call-push",
       "call-push-main",
+      "call-push-heads",
+      "call-push-tag",
       "call-force",
       "call-delete",
       "call-upstream",
@@ -525,6 +527,8 @@ it("refuses pushes to the base branch, force pushes, deletes, other remotes and 
     [
       protectedText,
       protectedText,
+      protectedText,
+      "Push to a branch name, such as git push origin HEAD:dorbs/my-change; refs/tags/v1 is not a branch.",
       "Force pushes are not allowed. Commit on top of the remote branch and push again.",
       "Deleting remote branches is not allowed.",
       "Only origin takes pushes. It is test/fixture, which the agent cloned; other remotes are not available.",

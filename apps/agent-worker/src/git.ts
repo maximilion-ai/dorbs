@@ -51,11 +51,15 @@ const push = async (args: ReadonlyArray<string>, context: GitContext): Promise<s
   }
   const current = await workspace.git.currentBranch({ dir });
   const [source = current, target = source] = (refspec ?? "").split(":").map((ref) => {
-    const name = ref.replace(/^refs\/heads\//u, "");
+    // isomorphic-git resolves a short remote ref against the remote's refs, so heads/main means main.
+    const name = ref.replace(/^(refs\/)?heads\//u, "");
     return name === "HEAD" ? current : name || undefined;
   });
   if (source === undefined || target === undefined) {
     return failed("HEAD is detached. Create a branch with git checkout -b <name>, then push it.");
+  }
+  if (target.startsWith("refs/")) {
+    return `Push to a branch name, such as git push origin HEAD:dorbs/my-change; ${target} is not a branch.`;
   }
   if (target === clone.branch) {
     return `The base branch ${clone.branch} is protected. Create a branch with git checkout -b <name>, commit, then push it.`;
@@ -68,7 +72,7 @@ const push = async (args: ReadonlyArray<string>, context: GitContext): Promise<s
       dir,
       url: context.url,
       ref: source,
-      remoteRef: target,
+      remoteRef: `refs/heads/${target}`,
       onAuth: context.onAuth,
     });
     if (!result.ok) {
