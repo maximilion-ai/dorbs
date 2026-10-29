@@ -58,6 +58,10 @@ export const serveGit =
           ...GIT_ENV,
           GIT_PROJECT_ROOT: root,
           GIT_HTTP_EXPORT_ALL: "1",
+          // http-backend refuses pushes from an unauthenticated client unless receive-pack is on.
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "http.receivepack",
+          GIT_CONFIG_VALUE_0: "true",
           REQUEST_METHOD: request.method,
           PATH_INFO: url.pathname,
           QUERY_STRING: url.search.slice(1),
