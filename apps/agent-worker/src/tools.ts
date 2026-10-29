@@ -248,7 +248,13 @@ const TOOLS = [
         if (cloned.repo !== id) throw new Error(`The workspace already holds ${cloned.repo}.`);
         return text(`${id} is already cloned at ${cloned.commit} into the workspace root.`);
       }
-      await host.workspace.git.clone({ url, dir: WORKSPACE_ROOT, depth: 1 });
+      const headers = (await host.github()).headers(url);
+      await host.workspace.git.clone({
+        url,
+        dir: WORKSPACE_ROOT,
+        depth: 1,
+        ...(headers === undefined ? {} : { headers: { ...headers } }),
+      });
       const commit = decodeCommit(
         await host.workspace.git.revParse({ dir: WORKSPACE_ROOT, ref: "HEAD" }),
       );

@@ -169,10 +169,8 @@ export const typecheckDouble = async (request: Request): Promise<Response> => {
     return git(request);
   }
   if (url.host === "github.com") {
-    const pushing =
-      url.pathname.endsWith("/git-receive-pack") ||
-      url.searchParams.get("service") === "git-receive-pack";
-    if (pushing && request.headers.get("authorization") !== basic("x-access-token", GITHUB_TOKEN)) {
+    // test/github is private: fetches need the token as well as pushes.
+    if (request.headers.get("authorization") !== basic("x-access-token", GITHUB_TOKEN)) {
       return new Response("Authentication required", {
         status: 401,
         headers: { "www-authenticate": 'Basic realm="GitHub"' },

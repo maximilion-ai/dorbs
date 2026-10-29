@@ -28,6 +28,8 @@ export class GitHub extends Context.Service<
   {
     /** Credentials for a github.com remote, and none for any other host. */
     readonly onAuth: AuthCallback;
+    /** The same credentials as request headers, for clone, which takes no onAuth. */
+    readonly headers: (url: string) => Readonly<Record<string, string>> | undefined;
     /** GitHub's REST API, or undefined without a GITHUB_TOKEN. */
     readonly api: GitHubApi | undefined;
   }
@@ -78,6 +80,13 @@ const make = Effect.gen(function* () {
       ? { username: "x-access-token", password: Redacted.value(token.value) }
       : undefined;
 
+  const headers = (url: string) => {
+    const auth = onAuth(url, {});
+    return auth === undefined || auth instanceof Promise
+      ? undefined
+      : { authorization: `Basic ${btoa(`${auth.username}:${auth.password}`)}` };
+  };
+
   const api = Option.map(
     token,
     (secret): GitHubApi =>
@@ -113,7 +122,7 @@ const make = Effect.gen(function* () {
         ),
   );
 
-  return { onAuth, api: Option.getOrUndefined(api) };
+  return { onAuth, headers, api: Option.getOrUndefined(api) };
 });
 
 /** Reads GITHUB_TOKEN, optional, and GITHUB_API_URL, https://api.github.com by default. */
