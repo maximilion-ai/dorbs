@@ -301,7 +301,8 @@ export const startStack = async (options: StackOptions) => {
   const agentToken = NodeCrypto.randomBytes(16).toString("hex");
   const dataDir = tempDir("dorbs-e2e-data-");
   const gitRoot = tempDir("dorbs-e2e-git-");
-  const commit = makeRepo(NodePath.join(gitRoot, "repo.git"), options.fixture);
+  const gitDir = NodePath.join(gitRoot, "repo.git");
+  const commit = makeRepo(gitDir, options.fixture);
   const gitUrl = `http://127.0.0.1:${await gitServer(gitRoot)}/repo.git`;
   const reposFile = NodePath.join(gitRoot, "repos.json");
   NodeFS.writeFileSync(reposFile, JSON.stringify([{ id: options.repo, url: gitUrl }]));
@@ -405,6 +406,7 @@ export const startStack = async (options: StackOptions) => {
     typecheckToken,
     dataDir,
     commit,
+    gitDir,
     gitUrl,
     socketPath,
     workerUrl,

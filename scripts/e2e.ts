@@ -1,6 +1,7 @@
 // Drives the local chain the way T3 Code does: nc -U -> acp-mux -> agent Worker (alchemy dev) -> typecheck service.
 
 import * as NodeAssert from "node:assert/strict";
+import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
@@ -26,17 +27,26 @@ const REPO = "dorbs/e2e";
 const sha256 = (text: string) => NodeCrypto.createHash("sha256").update(text).digest("hex");
 
 const run = async () => {
-  const { typecheckPort, typecheckToken, dataDir, commit, workerPort, mux, startNc, stopNc } =
-    await startStack({
-      repo: REPO,
-      fixture: TS_PROJECT,
-      cwd: CWD,
-      model: {
-        provider: "scripted",
-        id: "scripted",
-        openrouterKey: "unused-by-the-scripted-model",
-      },
-    });
+  const {
+    typecheckPort,
+    typecheckToken,
+    dataDir,
+    commit,
+    gitDir,
+    workerPort,
+    mux,
+    startNc,
+    stopNc,
+  } = await startStack({
+    repo: REPO,
+    fixture: TS_PROJECT,
+    cwd: CWD,
+    model: {
+      provider: "scripted",
+      id: "scripted",
+      openrouterKey: "unused-by-the-scripted-model",
+    },
+  });
 
   const firstNc = await startNc();
   const { client } = firstNc;
@@ -136,6 +146,21 @@ const run = async () => {
   NodeAssert.deepEqual(first.result, { stopReason: "end_turn" }, JSON.stringify(first));
   ok("first prompt resolves with stopReason end_turn");
 
+  const pushed = await client.request(4, "session/prompt", prompt(sessionId, "e2e push"), 60_000);
+  NodeAssert.deepEqual(pushed.result, { stopReason: "end_turn" }, JSON.stringify(pushed));
+  const pushText = client
+    .updates(sessionId)
+    .find((u) => u.sessionUpdate === "tool_call_update" && u.toolCallId === "call-push")
+    ?.content?.[0]?.content?.text;
+  const remoteCommit = NodeChildProcess.execFileSync(
+    "git",
+    ["--git-dir", gitDir, "rev-parse", "refs/heads/dorbs/e2e"],
+    { encoding: "utf8" },
+  ).trim();
+  NodeAssert.equal(pushText, `Pushed dorbs/e2e to origin at ${remoteCommit}`);
+  NodeAssert.notEqual(remoteCommit, commit, "the pushed branch carries a new commit");
+  ok(`git push -u origin dorbs/e2e put ${remoteCommit} on the local git server`);
+
   // T3 Code ends a thread's command by killing it, as on its 30-minute idle unload.
   firstNc.nc.kill("SIGTERM");
   await within(3_000, "nc to exit on SIGTERM", firstNc.exited);
@@ -171,8 +196,8 @@ const run = async () => {
   );
   NodeAssert.equal(
     replayed.length,
-    updates.length + 2,
-    "the replay is the first turn's updates, its prompt and its end",
+    client.updates(sessionId).length + 4,
+    "the replay is both turns' updates, their prompts and their ends",
   );
   ok(
     `session/load on a new nc replays ${replayed.length} updates, the src/hello.ts diff included, then answers`,
@@ -189,7 +214,7 @@ const run = async () => {
   ok(`a prompt on the loaded session reads src/hello.ts: ${JSON.stringify(HELLO)}`);
   NodeAssert.deepEqual(readUpdates.at(-1), {
     sessionUpdate: "agent_message_chunk",
-    content: { type: "text", text: "Prompts so far: e2e | read hello." },
+    content: { type: "text", text: "Prompts so far: e2e | e2e push | read hello." },
   });
   ok("the model saw the first turn's prompt in the same Pi transcript");
 

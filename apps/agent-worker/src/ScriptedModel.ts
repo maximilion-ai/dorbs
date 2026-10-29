@@ -141,6 +141,13 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
     callTool("typecheck", {}, "call-typecheck-package"),
     say("n is a string."),
   ],
+  "e2e push": [
+    git("checkout -b dorbs/e2e", "call-checkout"),
+    git("add -A", "call-add"),
+    git('commit -m "Add hello"', "call-commit"),
+    git("push -u origin dorbs/e2e", "call-push"),
+    say("Pushed dorbs/e2e."),
+  ],
 };
 
 const nextStep = (messages: ReadonlyArray<Message>): Step => {
