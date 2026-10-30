@@ -11,6 +11,7 @@ import { SYSTEM_PROMPT, type Loop, type LoopHost } from "./Loop.ts";
 import { ModelUnavailable } from "./ModelProvider.ts";
 import { NOTHING_STREAMED, toOpenCodeUpdates } from "./openCodeUpdates.ts";
 import { openCodeTools, OUTPUT_LIMITS, WORKSPACE_ROOT } from "./tools.ts";
+import type { SessionRecord } from "./session.ts";
 import { RunOutcome } from "./Turn.ts";
 
 /** OpenCode's agent for a session: our system prompt, with OpenCode's own prompt sections after it. */
@@ -61,8 +62,8 @@ const toolsOnly = (tools: ReturnType<typeof openCodeTools>): Plugin.Plugin => ({
 });
 
 /**
- * OpenCode as a session's agent loop: OpenCode's root session over this object's SQLite, with the session's tools as
- * its only tools and Code Mode off.
+ * OpenCode as a session's agent loop: an OpenCode session over this object's SQLite, made on the first prompt, with the
+ * session's tools as its only tools and Code Mode off.
  */
 export const makeOpenCodeLoop = (host: LoopHost): Loop => {
   // A write's diff, from the tool that made it to the event that reports it; both run in this isolate.
@@ -112,8 +113,18 @@ export const makeOpenCodeLoop = (host: LoopHost): Loop => {
     host.storage,
   );
 
+  // OpenCode serialises a session's inbox under a lock it keeps per isolate and keys by session id. Durable Objects
+  // that share an isolate must not share an id, as they would with the harness's root session: one would resume the
+  // other's waiting work in its own request, which workerd refuses.
+  const openCodeSession = async (record: SessionRecord): Promise<string> => {
+    if (record.openCodeSession !== undefined) return record.openCodeSession;
+    const session = await harness.sessions.create();
+    host.saveRecord({ ...record, openCodeSession: session.id });
+    return session.id;
+  };
+
   const run: Loop["run"] = async (record, prompt, signal, emit) => {
-    const session = harness.session();
+    const session = harness.session(await openCodeSession(record));
     const operationId = crypto.randomUUID();
     const settled = Promise.withResolvers<RunOutcome>();
     const stream = await session.events();

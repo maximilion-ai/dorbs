@@ -20,13 +20,14 @@ import { RunOutcome, transition, Turn, TurnEvent, type TurnCommand } from "./Tur
 export type HarnessName = "pi" | "opencode";
 
 /**
- * The session as stored: the client's cwd, the agent loop it runs on, and the Pi session once the first prompt made
+ * The session as stored: the client's cwd, the agent loop it runs on, and the loop's session once the first prompt made
  * one. Sessions made before the choice of loop have no harness and run on Pi.
  */
 export type SessionRecord = {
   readonly cwd: string;
   readonly harness?: HarnessName;
   readonly piSession?: string;
+  readonly openCodeSession?: string;
 };
 
 export type Emit = (update: Acp.SessionUpdate) => void;

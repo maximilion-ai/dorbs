@@ -6,6 +6,7 @@ import { env } from "cloudflare:workers";
 import * as Schema from "effect/Schema";
 
 import { connect, updates } from "./client.ts";
+import type { SessionRecord } from "../src/session.ts";
 import type { AcpSession } from "./worker.ts";
 
 const prompt = (sessionId: string, text: string) => ({
@@ -16,8 +17,13 @@ const prompt = (sessionId: string, text: string) => ({
 const double = async <A>(url: string): Promise<A> => (await fetch(url)).json();
 
 /** Each call gets a fresh stub, since an evicted object breaks the stubs that reached it. */
-const inSession = <R>(sessionId: string, fn: (instance: AcpSession) => R) =>
-  runInDurableObject(env.AcpSession.getByName(sessionId), (instance: AcpSession) => fn(instance));
+const inSession = <R>(
+  sessionId: string,
+  fn: (instance: AcpSession, state: DurableObjectState) => R,
+) =>
+  runInDurableObject(env.AcpSession.getByName(sessionId), (instance: AcpSession, state) =>
+    fn(instance, state),
+  );
 
 const decodeDurable = Schema.decodeUnknownSync(
   Schema.Struct({
@@ -28,12 +34,13 @@ const decodeDurable = Schema.decodeUnknownSync(
 
 /** OpenCode's durable events for the session, as `seq:type`. */
 const durableLog = (sessionId: string) =>
-  inSession(sessionId, async (instance) => {
+  inSession(sessionId, async (instance, state) => {
     const harness = instance.loop.capability;
     if (!(harness instanceof OpenCodeHarness))
       throw new Error("The session does not run OpenCode.");
     const events: string[] = [];
-    for await (const event of harness.session().log()) {
+    const { openCodeSession } = state.storage.kv.get<SessionRecord>("acp/session") ?? {};
+    for await (const event of harness.session(openCodeSession).log()) {
       const durable = decodeDurable(event);
       if (durable.durable !== undefined) events.push(`${durable.durable.seq}:${durable.type}`);
     }
@@ -71,6 +78,21 @@ it("offers the model none of OpenCode's own tools, so none of them runs", async 
     (await double<string[]>("http://typecheck.test/__log")).slice(before),
     [],
     "nothing reached the network",
+  );
+});
+
+// Local workerd runs every Durable Object of a class in one isolate, as production may.
+it("runs prompts of sessions that share an isolate at the same time", async () => {
+  const answers = await Promise.all(
+    Array.from({ length: 6 }, async () => {
+      const client = await connect();
+      const sessionId = await client.newSession();
+      return (await client.request(2, "session/prompt", prompt(sessionId, "write hello"))).result;
+    }),
+  );
+  assert.deepStrictEqual(
+    answers,
+    Array.from({ length: 6 }, () => ({ stopReason: "end_turn" })),
   );
 });
 
