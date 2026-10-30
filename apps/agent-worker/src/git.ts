@@ -55,7 +55,9 @@ const remoteBranches = async (
     headers: { "user-agent": "git/dorbs", ...headers },
   });
   if (!response.ok) throw new Error(`origin answered HTTP ${response.status} to a ref listing`);
-  const advertised = (await response.text()).matchAll(/[0-9a-f]{40} refs\/heads\/([^\0\n]+)/gu);
+  // The advertisement is binary pkt-lines; its ref names are UTF-8.
+  const body = new TextDecoder().decode(await response.arrayBuffer());
+  const advertised = body.matchAll(/[0-9a-f]{40} refs\/heads\/([^\0\n]+)/gu);
   return new Set([...advertised].flatMap(([, branch]) => branch ?? []));
 };
 
