@@ -4,9 +4,9 @@ import type { JsonRpcNotification, JsonRpcRequest } from "@dorbs/protocol/jsonrp
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { PiHarness } from "agents/harness/pi";
-import { Lifecycle } from "agents/lifecycle";
+import { Lifecycle, type LifecycleJobContext } from "agents/lifecycle";
 import { DurableObject } from "cloudflare:workers";
-import type * as Config from "effect/Config";
+import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -34,6 +34,11 @@ const SYSTEM_PROMPT =
 const RECORD_KEY = "acp/session";
 const ATTACHED_KEY = "acp/attached";
 const CLONE_KEY = "workspace/clone";
+/** The Lifecycle job that deletes this session once it has been idle for the retention period. */
+const RETIRE = "retire";
+const DAY_MS = 24 * 60 * 60 * 1000;
+const RetentionDays = Config.Int("SESSION_RETENTION_DAYS").pipe(Config.withDefault(30));
+
 /** History rows per replayed RPC; a row is at most 256 KiB, so a page stays under the 32 MiB RPC limit. */
 const REPLAY_PAGE = 64;
 
@@ -99,6 +104,25 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
 
     readonly lifecycle = Lifecycle.install(this).use(this.harness);
 
+    readonly retentionMs =
+      Effect.runSync(RetentionDays.parse(ConfigProvider.fromUnknown(this.env))) * DAY_MS;
+
+    /** Puts off deleting this session until it has been idle for the retention period from now. */
+    private async touch(): Promise<void> {
+      await this.lifecycle.jobs.push({
+        id: RETIRE,
+        fn: RETIRE,
+        time: Date.now() + this.retentionMs,
+      });
+    }
+
+    /** Deletes the history, the workspace and the Pi session, then resets this object so nothing stale lingers. */
+    async onJob({ job }: LifecycleJobContext): Promise<void> {
+      if (job.fn !== RETIRE) return;
+      await this.ctx.storage.deleteAll();
+      this.ctx.abort("Retired after its retention period", { retryAlarm: false });
+    }
+
     readonly history = (() => {
       const { sql } = this.ctx.storage;
       sql.exec(
@@ -149,13 +173,18 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
     } satisfies SessionHost);
 
     /** session/new: creates this session and attaches the connection that made it. */
-    open(connection: ConnectionId, cwd: string): void {
+    async open(connection: ConnectionId, cwd: string): Promise<void> {
       this.session.open(connection, cwd);
+      await this.touch();
     }
 
     /** One frame for this session; resolves once the frame is accepted, before a prompt's turn ends. */
-    receive(connection: ConnectionId, frame: JsonRpcRequest | JsonRpcNotification): Promise<void> {
-      return Effect.runPromise(this.session.receive(connection, frame));
+    async receive(
+      connection: ConnectionId,
+      frame: JsonRpcRequest | JsonRpcNotification,
+    ): Promise<void> {
+      await this.touch();
+      await Effect.runPromise(this.session.receive(connection, frame));
     }
 
     private async piSession(record: SessionRecord): Promise<string> {
@@ -211,6 +240,8 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
       } finally {
         signal.removeEventListener("abort", abort);
         await stream.stop();
+        // A turn can run on after its client is gone; the idle period starts when it ends.
+        await this.touch();
       }
     }
   };
