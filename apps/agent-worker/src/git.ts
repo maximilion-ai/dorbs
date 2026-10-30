@@ -9,7 +9,8 @@ export type GitContext = {
   readonly workspace: Workspace;
   readonly dir: string;
   readonly clone: Clone;
-  readonly saveClone: (clone: Clone) => void;
+  /** Records a branch this session's push created on origin. */
+  readonly created: (branch: string) => void;
   /** Origin's registered url, or undefined once the repo is no longer registered. */
   readonly url: string | undefined;
   /** Credentials for origin's url; see GitHub's headers. */
@@ -131,7 +132,7 @@ const push = async (args: ReadonlyArray<string>, context: GitContext): Promise<s
   } catch (error) {
     return failed(error instanceof Error ? error.message : String(error));
   }
-  if (!created.includes(target)) context.saveClone({ ...clone, created: [...created, target] });
+  if (!created.includes(target)) context.created(target);
   return `Pushed ${target} to origin at ${commit}`;
 };
 

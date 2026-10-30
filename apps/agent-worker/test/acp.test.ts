@@ -627,6 +627,23 @@ it("cuts each tool result to 64 KB and says how to read the rest", async () => {
   );
 });
 
+it("remembers every branch a session creates, when it pushes several at once", async () => {
+  const client = await connect();
+  const sessionId = await client.newSession();
+  await client.request(2, "session/prompt", prompt(sessionId, "push two"));
+  const [a, b] = await Promise.all([
+    refOf("fixture.git", "refs/heads/dorbs/pair-a"),
+    refOf("fixture.git", "refs/heads/dorbs/pair-b"),
+  ]);
+  assert.deepStrictEqual(
+    ["call-push-a-again", "call-push-b-again"].map((id) => toolText(updates(client.frames), id)),
+    [
+      `Pushed dorbs/pair-a to origin at ${a?.commit}`,
+      `Pushed dorbs/pair-b to origin at ${b?.commit}`,
+    ],
+  );
+});
+
 it("refuses model writes to the clone's git directory, by any spelling or link, and git commands that rewrite it", async () => {
   const record = await recordSince();
   const client = await connect();

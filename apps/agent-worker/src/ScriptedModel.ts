@@ -237,6 +237,24 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
     git("diff", "call-diff"),
     say("Read."),
   ],
+  "push two": [
+    callTool("clone_repo", { repo: "test/fixture" }, "call-clone"),
+    git("checkout -b dorbs/pair", "call-checkout"),
+    () =>
+      fauxAssistantMessage(
+        [
+          fauxToolCall("git", { args: "push origin HEAD:dorbs/pair-a" }, { id: "call-push-a" }),
+          fauxToolCall("git", { args: "push origin HEAD:dorbs/pair-b" }, { id: "call-push-b" }),
+        ],
+        { stopReason: "toolUse" },
+      ),
+    callTool("write_file", { path: "src/new.ts", content: NEW_FILE }, "call-write"),
+    git("add -A", "call-add"),
+    git('commit -m "add new"', "call-commit"),
+    git("push origin HEAD:dorbs/pair-a", "call-push-a-again"),
+    git("push origin HEAD:dorbs/pair-b", "call-push-b-again"),
+    say("Pushed both twice."),
+  ],
   "e2e push": [
     git("checkout -b dorbs/e2e", "call-checkout"),
     git("add -A", "call-add"),

@@ -418,7 +418,13 @@ const TOOLS = [
           workspace: host.workspace,
           dir: WORKSPACE_ROOT,
           clone,
-          saveClone: host.saveClone,
+          // Read again, not the clone above: pushes in one round run at once.
+          created: (branch) => {
+            const current = host.clone();
+            if (current !== undefined) {
+              host.saveClone({ ...current, created: [...(current.created ?? []), branch] });
+            }
+          },
           url,
           headers,
         }),
