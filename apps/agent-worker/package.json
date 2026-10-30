@@ -8,11 +8,14 @@
     "test": "vp test run --config ./vitest.config.ts"
   },
   "dependencies": {
+    "@ai-sdk/provider": "catalog:",
     "@cloudflare/computer": "catalog:",
     "@dorbs/protocol": "workspace:*",
     "@earendil-works/chord": "catalog:",
     "@earendil-works/pi-ai": "catalog:",
     "@earendil-works/pi-durable": "catalog:",
+    "@opencode/plugin": "catalog:",
+    "@opencode/sdk": "catalog:",
     "@platformatic/vfs": "catalog:",
     "agents": "catalog:",
     "effect": "catalog:",
@@ -25,6 +28,7 @@
     "@effect/platform-node": "catalog:",
     "@effect/vitest": "catalog:",
     "alchemy": "catalog:",
+    "esbuild": "catalog:",
     "tsrs": "catalog:",
     "vite-plus": "catalog:"
   }

@@ -3,6 +3,8 @@ packages:
   - packages/*
 
 catalog:
+  # The AI SDK model contract OpenCode loads; matches the one @opencode/core depends on.
+  "@ai-sdk/provider": 3.0.19
   "@alchemy.run/cloudflare": 2.0.0-beta.84
   "@cloudflare/computer": 0.8.0
   "@cloudflare/vitest-plugin": 1.4.9
@@ -18,11 +20,16 @@ catalog:
   "@platformatic/vfs": 0.5.0
   # Must match the oxlint that vite-plus bundles, which loads our JS plugin.
   "@oxlint/plugins": 1.89.0
+  # 2.2.3 is the first to run plugins' AI SDK hooks before its npm installer, which cannot run on workerd.
+  "@opencode/plugin": 2.2.3
+  "@opencode/sdk": 2.2.3
   "@types/node": 26.6.5
   agents: 0.31.0
   alchemy: 2.0.0-beta.84
   # effect 4.0.7 is newer than pnpm's minimumReleaseAge allows.
   effect: 4.0.6
+  # The agent-worker tests prebundle OpenCode with it; wrangler and alchemy already pin it.
+  esbuild: 0.28.2
   knip: 6.43.0
   oxlint: 1.89.0
   tsrs: 0.20.0-ts7.1.0-beta
@@ -38,6 +45,8 @@ overrides:
   effect: "catalog:"
   vite: "catalog:"
   vitest: "catalog:"
+  # OpenCode's packages want ws 8.21.0 and 8.22.0, which puts two copies of @opencode/core in the Worker.
+  ws: 8.22.0
 
 peerDependencyRules:
   allowedVersions:
@@ -48,5 +57,24 @@ allowBuilds:
   esbuild: true
   workerd: true
   "@google/genai": false
+  # OpenCode's native file watcher and shell parsers, which its workerd profile does not load.
+  "@parcel/watcher": false
+  tree-sitter-bash: false
+  tree-sitter-powershell: false
   core-js-pure: false
   protobufjs: false
+
+# OpenCode 2.2.3 was published 2026-10-30T09:51Z, inside the release-age window; drop this once it passes.
+minimumReleaseAgeExclude:
+  - "@opencode/ai@2.2.3"
+  - "@opencode/client@2.2.3"
+  - "@opencode/codemode@2.2.3"
+  - "@opencode/core@2.2.3"
+  - "@opencode/plugin-browser@2.2.3"
+  - "@opencode/plugin@2.2.3"
+  - "@opencode/protocol@2.2.3"
+  - "@opencode/schema@2.2.3"
+  - "@opencode/sdk@2.2.3"
+  - "@opencode/server@2.2.3"
+  - "@opencode/simulation@2.2.3"
+  - "@opencode/util@2.2.3"
