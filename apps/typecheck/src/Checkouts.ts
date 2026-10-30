@@ -80,7 +80,7 @@ const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const { dataDir } = yield* ServiceConfig;
+  const { dataDir, processTimeout } = yield* ServiceConfig;
   const caches = path.join(dataDir, "git");
   const trees = path.join(dataDir, "checkouts");
   yield* fs.makeDirectory(trees, { recursive: true });
@@ -99,7 +99,10 @@ const make = Effect.gen(function* () {
     args: ReadonlyArray<string>,
     env: Record<string, string> = {},
   ) {
-    const result = yield* runProcess(spawner, cwd, command, args, env).pipe(Effect.orDie);
+    const result = yield* runProcess(spawner, cwd, command, args, {
+      env,
+      timeout: processTimeout,
+    }).pipe(Effect.orDie);
     if (result.exitCode !== 0) {
       yield* Effect.die(
         new Error(`${command} ${args[0]} exited ${result.exitCode}: ${result.stderr}`),
@@ -124,8 +127,14 @@ const make = Effect.gen(function* () {
       cache,
       "git",
       ["fetch", "--quiet", "--depth", "1", "--no-tags", "--no-write-fetch-head", repo.url, commit],
-      gitEnv(token),
-    ).pipe(Effect.orDie);
+      { env: gitEnv(token), timeout: processTimeout },
+    ).pipe(
+      Effect.catchTags({
+        PlatformError: Effect.die,
+        ProcessFailed: (error) =>
+          Effect.fail(new FetchFailed({ repo: repo.id, output: error.message })),
+      }),
+    );
     if (result.exitCode !== 0) {
       yield* Effect.fail(
         result.stderr.includes("not our ref")

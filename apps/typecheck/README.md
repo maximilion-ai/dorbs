@@ -38,6 +38,8 @@ An action fetches its commit with `git fetch --depth 1` into a bare cache per re
 
 Dependencies install once per lockfile hash (`pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile`) from the commit's manifests, `pnpm-lock.yaml` and `pnpm-workspace.yaml`. The commit's `.npmrc` does not apply. A committed symlink becomes a plain file in the tree, so no client write can leave its check. Every check on that lockfile shares the install, also after a restart. A failed install answers 422 and is retried by the next check. A failed fetch answers 502.
 
+`PROCESS_TIMEOUT` bounds every git, pnpm, tsrs and oxlint run and defaults to `10 minutes`. Past it the service kills the process's whole group, so a hung fetch answers 502, a hung install 422, and the next check tries again. The service reads at most 16 MiB of a process's stdout and of its stderr.
+
 ## Run locally
 
 ```sh

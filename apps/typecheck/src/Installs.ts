@@ -37,7 +37,7 @@ const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const { dataDir } = yield* ServiceConfig;
+  const { dataDir, processTimeout } = yield* ServiceConfig;
   const root = path.join(dataDir, "installs");
   const storeDir = path.join(dataDir, "pnpm-store");
   yield* fs.makeDirectory(root, { recursive: true });
@@ -66,17 +66,25 @@ const make = Effect.gen(function* () {
         );
       }
     }).pipe(Effect.orDie);
-    const result = yield* runProcess(spawner, staging, "pnpm", [
-      "install",
-      "--frozen-lockfile",
-      "--ignore-scripts",
-      // A pnpmfile's hooks would run as code in the service.
-      "--ignore-pnpmfile",
-      "--store-dir",
-      storeDir,
-    ]).pipe(
+    const result = yield* runProcess(
+      spawner,
+      staging,
+      "pnpm",
+      [
+        "install",
+        "--frozen-lockfile",
+        "--ignore-scripts",
+        // A pnpmfile's hooks would run as code in the service.
+        "--ignore-pnpmfile",
+        "--store-dir",
+        storeDir,
+      ],
+      { timeout: processTimeout },
+    ).pipe(
       Effect.catchTags({
         PlatformError: (error) =>
+          Effect.succeed({ exitCode: -1, stdout: "", stderr: error.message }),
+        ProcessFailed: (error) =>
           Effect.succeed({ exitCode: -1, stdout: "", stderr: error.message }),
       }),
     );

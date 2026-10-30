@@ -1,5 +1,6 @@
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -29,6 +30,8 @@ export class ServiceConfig extends Context.Service<
     readonly dataDir: string;
     readonly token: Redacted.Redacted;
     readonly repos: ReadonlyMap<RepoId, Repo>;
+    /** How long any process the service spawns may run: git, pnpm or a tool. */
+    readonly processTimeout: Duration.Duration;
   }
 >()("dorbs/typecheck/ServiceConfig") {}
 
@@ -53,6 +56,9 @@ const make = Effect.gen(function* () {
     dataDir: Config.NonEmptyString("DATA_DIR"),
     token: Config.schema(Schema.Redacted(Schema.NonEmptyString), "TYPECHECK_TOKEN"),
     reposFile: Config.NonEmptyString("REPOS_FILE"),
+    processTimeout: Config.Duration("PROCESS_TIMEOUT").pipe(
+      Config.withDefault(Duration.minutes(10)),
+    ),
   });
   const registrations = yield* decodeRegistrations(
     yield* (yield* FileSystem.FileSystem).readFileString(config.reposFile),
@@ -77,6 +83,7 @@ const make = Effect.gen(function* () {
     dataDir: config.dataDir,
     token: config.token,
     repos: new Map(repos.map((repo) => [repo.id, repo])),
+    processTimeout: config.processTimeout,
   };
 });
 

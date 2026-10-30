@@ -462,3 +462,21 @@ it.live("refuses a changed file that imports from outside the repo, and runs no 
     );
   }).pipe(Effect.provide(Server)),
 );
+
+it.live("answers 502 when a fetch outlives its deadline, and the next check runs again", () =>
+  Effect.gen(function* () {
+    const statuses = [];
+    for (const _ of [1, 2]) {
+      const response = yield* postCheckRaw("fixture", {
+        repo: "test/hanging",
+        commit: "0000000000000000000000000000000000000001",
+      });
+      statuses.push({ status: response.status, body: yield* response.text });
+    }
+    const timedOut = {
+      status: 502,
+      body: "git fetch from test/hanging failed:\ngit timed out after 500ms",
+    };
+    assert.deepStrictEqual(statuses, [timedOut, timedOut]);
+  }).pipe(Effect.provide(TestServer({ fixture: FIXTURE }, { PROCESS_TIMEOUT: "500 millis" }))),
+);

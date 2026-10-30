@@ -66,7 +66,7 @@ const make = Effect.gen(function* () {
   const cache = yield* ActionCache;
   const checkouts = yield* Checkouts;
   const installs = yield* Installs;
-  const { dataDir, repos } = yield* ServiceConfig;
+  const { dataDir, repos, processTimeout } = yield* ServiceConfig;
   const checksDir = path.join(dataDir, "checks");
   yield* fs.makeDirectory(checksDir, { recursive: true });
   // A client .oxlintrc.json could load jsPlugins, which run as code; only this config applies.
@@ -80,7 +80,9 @@ const make = Effect.gen(function* () {
     args: ReadonlyArray<string>,
     okExitCodes: ReadonlyArray<number>,
   ) {
-    const result = yield* runProcess(spawner, cwd, command, args).pipe(Effect.orDie);
+    const result = yield* runProcess(spawner, cwd, command, args, {
+      timeout: processTimeout,
+    }).pipe(Effect.orDie);
     if (!okExitCodes.includes(result.exitCode)) {
       return yield* Effect.die(
         new Error(`${command} exited ${result.exitCode}: ${result.stderr}${result.stdout}`),
