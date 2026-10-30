@@ -376,7 +376,25 @@ export const makeSession = (host: SessionHost) => {
       driving = false;
       return Effect.void;
     }
-    return Effect.andThen(runTurn(next), drive);
+    return runTurn(next).pipe(
+      // A turn that breaks outside the loop, as on a storage error, still answers its prompt and lets the next run.
+      Effect.catchDefect((defect) =>
+        Effect.sync(() => {
+          turn = Turn.Idle();
+          host.savePrompts(host.prompts().slice(1));
+          answer(
+            next,
+            Result.fail(
+              new RpcError({
+                code: ErrorCode.internal,
+                reason: defect instanceof Error ? defect.message : String(defect),
+              }),
+            ),
+          );
+        }),
+      ),
+      Effect.andThen(drive),
+    );
   });
 
   /** Runs the open prompts, oldest first, unless they are running already; the first may be one a restart cut off. */

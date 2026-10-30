@@ -23,6 +23,7 @@ const sessionWith = (
     for (const update of emitted) emit(update);
     return RunOutcome.Answered();
   },
+  savePrompts: (prompts: ReadonlyArray<OpenPrompt>) => void = () => {},
 ) => {
   const sent: string[] = [];
   let record: SessionRecord | undefined;
@@ -50,6 +51,7 @@ const sessionWith = (
     },
     prompts: () => prompts,
     savePrompts: (next) => {
+      savePrompts(next);
       prompts = next;
     },
     replay: () => {},
@@ -61,22 +63,22 @@ const sessionWith = (
   const session = makeSession(host);
   session.open(CLIENT, "/project");
   /** Prompts once, then gives the prompt's response and every session/update sent. */
-  const prompt = Effect.gen(function* () {
+  const prompt = Effect.fn("Test.prompt")(function* (id = 2) {
     yield* session.receive(CLIENT, {
       jsonrpc: "2.0",
-      id: 2,
+      id,
       method: "session/prompt",
       params: { sessionId: "session-1", prompt: [{ type: "text", text: "edit" }] },
     });
     const frames = yield* Effect.promise(() =>
       vi.waitFor(() => {
         const parsed = sent.map((message) => JSON.parse(message));
-        assert.isTrue(parsed.some((frame) => frame.id === 2));
+        assert.isTrue(parsed.some((frame) => frame.id === id));
         return parsed;
       }),
     );
     return {
-      response: frames.find((frame) => frame.id === 2),
+      response: frames.find((frame) => frame.id === id),
       updates: frames.flatMap((frame) => (frame.id === undefined ? [frame.params.update] : [])),
     };
   });
@@ -101,7 +103,7 @@ it.effect(
     Effect.gen(function* () {
       const kept: string[] = [];
       const { prompt } = sessionWith([bigEdit], (message) => kept.push(message));
-      const { response, updates } = yield* prompt;
+      const { response, updates } = yield* prompt();
       assert.deepStrictEqual(response.result, { stopReason: "end_turn" });
       assert.deepStrictEqual(updates, [bigEdit]);
       const row = kept.find((message) => message.includes("call-edit")) ?? "";
@@ -124,7 +126,7 @@ it.effect(
         if (message.includes('"completed"')) throw new Error("SQLITE_TOOBIG");
         kept.push(message);
       });
-      const { response, updates } = yield* prompt;
+      const { response, updates } = yield* prompt();
       assert.deepStrictEqual(response.result, { stopReason: "end_turn" });
       const failed: SessionUpdate = {
         sessionUpdate: "tool_call_update",
@@ -167,7 +169,7 @@ it.effect(
           throw new Error("OpenCode: the event stream did not open");
         },
       );
-      const { response } = yield* prompt;
+      const { response } = yield* prompt();
       assert.deepStrictEqual(response.error, {
         code: -32603,
         message: "OpenCode: the event stream did not open",
@@ -177,4 +179,25 @@ it.effect(
         _meta: { "dorbs/turnEnded": { error: "OpenCode: the event stream did not open" } },
       });
     }),
+);
+
+it.effect("answers a prompt whose turn breaks outside the loop, and runs the next one", () =>
+  Effect.gen(function* () {
+    let broken = true;
+    const { prompt } = sessionWith(
+      [],
+      () => {},
+      undefined,
+      (prompts) => {
+        if (broken && prompts[0]?.started === true) {
+          broken = false;
+          throw new Error("SQLITE_FULL");
+        }
+      },
+    );
+    const first = yield* prompt(2);
+    assert.deepStrictEqual(first.response.error, { code: -32603, message: "SQLITE_FULL" });
+    const second = yield* prompt(3);
+    assert.deepStrictEqual(second.response.result, { stopReason: "end_turn" });
+  }),
 );
