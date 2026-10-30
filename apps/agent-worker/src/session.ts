@@ -66,6 +66,33 @@ const isStreamed = (
 /** The most streamed text one history row keeps, in characters; JSON escaping keeps a row well under 2 MB. */
 const RUN_CHARS = 32 * 1024;
 
+/** The most one history row keeps, in UTF-8 bytes; a Durable Object's SQLite rows stop at 2 MB. */
+const ROW_BYTES = 256 * 1024;
+
+const utf8 = new TextEncoder();
+
+const cut = (value: unknown, max: number): unknown => {
+  if (typeof value === "string") {
+    return value.length <= max
+      ? value
+      : `${value.slice(0, max)}\n[… ${value.length - max} more characters not kept in the session history]`;
+  }
+  if (Array.isArray(value)) return value.map((item) => cut(item, max));
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cut(item, max)]));
+  }
+  return value;
+};
+
+/** `encoded`, with its long strings cut and marked until it fits one history row. */
+const fitted = (encoded: string): string => {
+  let row = encoded;
+  for (let max = ROW_BYTES / 4; utf8.encode(row).byteLength > ROW_BYTES && max >= 1024; max /= 2) {
+    row = JSON.stringify(cut(JSON.parse(encoded), max));
+  }
+  return row;
+};
+
 const decodeLoad = Schema.decodeUnknownEffect(Acp.LoadSessionRequest);
 const decodePrompt = Schema.decodeUnknownEffect(Acp.PromptRequest);
 const decodeCancel = Schema.decodeUnknownEffect(Acp.CancelNotification);
@@ -125,18 +152,30 @@ export const makeSession = (host: SessionHost) => {
   // Streamed text is kept as one row per run of chunks of one kind, not one per chunk.
   let run: { readonly sessionUpdate: Streamed; text: string } | undefined;
 
+  /** Keeps a message for replay; the reason when the history could not take it. */
+  const store = (encoded: string): string | undefined => {
+    try {
+      host.remember(fitted(encoded));
+      return undefined;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  };
+
   const flush = () => {
     if (run === undefined) return;
     const { sessionUpdate, text } = run;
     run = undefined;
-    host.remember(
+    const failed = store(
       Effect.runSync(
         message({ sessionUpdate, content: { type: "text", text } }).pipe(Effect.orDie),
       ),
     );
+    if (failed !== undefined) console.error(`Could not keep streamed text for replay: ${failed}`);
   };
 
-  const keep = (update: Acp.SessionUpdate, encoded: string) => {
+  /** Keeps an update for replay and returns the message to send, which says so if a tool's could not be kept. */
+  const keep = (update: Acp.SessionUpdate, encoded: string): string => {
     if (isStreamed(update) && update.content.type === "text") {
       const { text } = update.content;
       if (
@@ -144,14 +183,35 @@ export const makeSession = (host: SessionHost) => {
         run.text.length + text.length <= RUN_CHARS
       ) {
         run.text += text;
-        return;
+        return encoded;
       }
       flush();
       run = { sessionUpdate: update.sessionUpdate, text };
-      return;
+      return encoded;
     }
     flush();
-    host.remember(encoded);
+    const failed = store(encoded);
+    if (failed === undefined) return encoded;
+    console.error(`Could not keep a ${update.sessionUpdate} for replay: ${failed}`);
+    if (!("toolCallId" in update)) return encoded;
+    const failure = Effect.runSync(
+      message({
+        sessionUpdate: "tool_call_update",
+        toolCallId: update.toolCallId,
+        status: "failed",
+        content: [
+          {
+            type: "content",
+            content: {
+              type: "text",
+              text: `The session history could not keep this result: ${failed}`,
+            },
+          },
+        ],
+      }).pipe(Effect.orDie),
+    );
+    store(failure);
+    return failure;
   };
 
   /** Keeps an update for replay and sends it to the attached connection, unless that one is `except`. */
@@ -159,9 +219,9 @@ export const makeSession = (host: SessionHost) => {
     Effect.runSync(
       message(update).pipe(
         Effect.map((encoded) => {
-          keep(update, encoded);
+          const kept = keep(update, encoded);
           const attached = host.attached();
-          if (attached !== undefined && attached !== except) host.send(attached, encoded);
+          if (attached !== undefined && attached !== except) host.send(attached, kept);
         }),
         Effect.catchTags({
           SchemaError: (error) => Effect.logError("Dropped an invalid session/update", error),
