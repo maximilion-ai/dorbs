@@ -72,6 +72,9 @@ it.effect("names every option in the chain that writes files or reaches outside 
           "composite": true,
           "outDir": "../dist",
           "plugins": [],
+          "generateTrace": "trace",
+          "generateCpuProfile": "profile.cpuprofile",
+          "baseUrl": "/tmp",
         },
       }`,
       "packages/a/tsconfig.json": `{
@@ -91,7 +94,10 @@ it.effect("names every option in the chain that writes files or reaches outside 
       }`,
     });
     assert.deepStrictEqual(unsafe, [
+      "config/base.json: compilerOptions.baseUrl",
       "config/base.json: compilerOptions.composite",
+      "config/base.json: compilerOptions.generateCpuProfile",
+      "config/base.json: compilerOptions.generateTrace",
       "config/base.json: compilerOptions.incremental",
       "config/base.json: compilerOptions.outDir",
       "config/base.json: compilerOptions.plugins",

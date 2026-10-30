@@ -12,7 +12,7 @@ Every route requires `Authorization: Bearer $TYPECHECK_TOKEN` and answers 401 ot
   - `ActionResult` with `cached: true` when an identical action ran before. No tool runs.
   - `MissingBlobs` with exactly the file hashes the store lacks. Upload them and retry.
   - `Rejected` with `UnknownCommit` when the repo has no such commit, or `ProtectedPaths` for a file the commit's `tsconfig.json` extends or references.
-  - 422 when a tsconfig in the commit's chain sets an option that writes files (`incremental`, `composite`, `tsBuildInfoFile`, `outDir`, `outFile`, `declarationDir`, `plugins`) or a path or module that leaves the repo (`extends`, `files`, `include`, `references`, `rootDir`, `rootDirs`, `typeRoots`, `paths`, `types`, `jsxImportSource`). The body names each.
+  - 422 when a tsconfig in the commit's chain sets an option that writes files (`incremental`, `composite`, `tsBuildInfoFile`, `outDir`, `outFile`, `declarationDir`, `plugins`, `generateTrace`, `generateCpuProfile`) or a path or module that leaves the repo (`extends`, `files`, `include`, `references`, `rootDir`, `rootDirs`, `typeRoots`, `baseUrl`, `paths`, `types`, `jsxImportSource`). The body names each.
   - `ActionResult` with only `OutsideModule` diagnostics from tool `typecheck` when a changed `.ts`, `.tsx`, `.js` or similar file names a module that can resolve outside the repo: an absolute path, a file URL, a relative path past the root, or a package path with `..`, in an import, export, `require`, `import()`, triple-slash reference or `@jsxImportSource` pragma. No tool runs, since its errors would quote the outside file.
   - `ActionResult` with diagnostics from the toolchain's tools, and `outputs`, which a check leaves empty. Paths are relative to the repo root.
 

@@ -55,10 +55,20 @@ const inRepo = (from: string, target: string): RelativePath | undefined => {
 };
 
 // Options that write files even under --noEmit, or that name output: the service runs none of them.
-const WRITES = ["tsBuildInfoFile", "outDir", "outFile", "out", "declarationDir", "plugins"];
+const WRITES = [
+  "tsBuildInfoFile",
+  "outDir",
+  "outFile",
+  "out",
+  "declarationDir",
+  "plugins",
+  "generateTrace",
+  "generateCpuProfile",
+];
 const WRITES_WHEN_ON = ["incremental", "composite"];
 // Options whose paths TypeScript resolves against the config's own directory.
-const PATHS = ["rootDir", "rootDirs", "typeRoots"];
+// TypeScript 7 rejects baseUrl, but a config that names one outside the repo is refused regardless.
+const PATHS = ["rootDir", "rootDirs", "typeRoots", "baseUrl"];
 // Options whose values TypeScript resolves as module specifiers.
 const SPECIFIERS = ["types", "jsxImportSource"];
 
