@@ -217,6 +217,14 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
     git("push", "call-push-again"),
     say("Pushed dorbs/shared again."),
   ],
+  "read big": [
+    callTool("read_file", { path: "big.txt" }, "call-read"),
+    callTool("read_file", { path: "big.txt", offset: 1500, limit: 2 }, "call-read-range"),
+    callTool("read_file", { path: "min.js" }, "call-read-min"),
+    callTool("grep", { pattern: "^x", path: "min.js" }, "call-grep"),
+    git("diff", "call-diff"),
+    say("Read."),
+  ],
   "e2e push": [
     git("checkout -b dorbs/e2e", "call-checkout"),
     git("add -A", "call-add"),

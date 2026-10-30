@@ -589,6 +589,44 @@ it("pushes only branches under dorbs/ that are new on origin or that the session
   assert.notStrictEqual(moved?.commit, main?.commit);
 });
 
+it("cuts each tool result to 64 KB and says how to read the rest", async () => {
+  const lines = Array.from(
+    { length: 3000 },
+    (_, i) => `line ${String(i + 1).padStart(4, "0")} ${"x".repeat(30)}`,
+  );
+  const minified = "x".repeat(100_000);
+  const client = await connect();
+  const sessionId = await client.newSession();
+  await client.request(2, "session/prompt", prompt(sessionId, "clone"));
+  await inSession(sessionId, async (instance) => {
+    await instance.workspace.fs.writeFile("/workspace/big.txt", `${lines.join("\n")}\n`);
+    await instance.workspace.fs.writeFile("/workspace/src/index.ts", `${lines.join("\n")}\n`);
+    await instance.workspace.fs.writeFile("/workspace/min.js", minified);
+  });
+  await client.request(3, "session/prompt", prompt(sessionId, "read big"));
+  const frames = updates(client.frames);
+  // 1585 lines of 41 bytes with their newlines fit in 64 KB, less 512 bytes kept for the note.
+  assert.strictEqual(
+    toolText(frames, "call-read"),
+    `${lines.slice(0, 1585).join("\n")}\n[Showing lines 1-1585 of 3000. Call read_file with offset 1586 to read on.]`,
+  );
+  assert.strictEqual(
+    toolText(frames, "call-read-range"),
+    `${lines.slice(1499, 1501).join("\n")}\n[Showing lines 1500-1501 of 3000. Call read_file with offset 1502 to read on.]`,
+  );
+  assert.strictEqual(
+    toolText(frames, "call-read-min"),
+    `${minified.slice(0, 65_024)}\n[Line 1 is 100000 characters long; showing its first 65024. Search it with grep.]`,
+  );
+  assert.strictEqual(toolText(frames, "call-grep"), `min.js:1: ${"x".repeat(500)}…`);
+  const diff = toolText(frames, "call-diff");
+  assert.isAtMost(new TextEncoder().encode(diff).length, 64 * 1024);
+  assert.match(
+    diff,
+    /\n\[Cut to its first \d+ of \d+ lines\. Narrow the command, such as git log -n 20 or git diff -- <path>\.\]$/u,
+  );
+});
+
 it("refuses model writes to the clone's git directory, by any spelling or link, and git commands that rewrite it", async () => {
   const record = await recordSince();
   const client = await connect();
