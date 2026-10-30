@@ -58,7 +58,7 @@ const openCodeBundle = async (): Promise<string> => {
   return outfile;
 };
 
-const harness = (name: "pi" | "opencode", include: ReadonlyArray<string>) => ({
+const harness = (name: string, loop: "pi" | "opencode", include: ReadonlyArray<string>) => ({
   extends: true,
   plugins: [
     cloudflareTest({
@@ -82,7 +82,7 @@ const harness = (name: "pi" | "opencode", include: ReadonlyArray<string>) => ({
           GITHUB_APP_ID,
           GITHUB_APP_PRIVATE_KEY: APP_KEY.privateKey,
           GITHUB_API_URL: "http://github-api.test",
-          HARNESS: name,
+          HARNESS: loop,
           MODEL_PROVIDER: "scripted",
           MODEL_ID: "scripted",
           ALCHEMY_DEV: "true",
@@ -104,10 +104,12 @@ export default defineConfig({
     dedupe: ["@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable"],
   },
   test: {
+    // Each project has its own doubles, whose request log and held typecheck its tests assert on.
     projects: [
-      harness("pi", ["src/**/*.test.ts", "test/acp.test.ts"]),
-      // The ACP behaviours again, and OpenCode's own, with OpenCode as the agent loop.
-      harness("opencode", ["test/acp.test.ts", "test/opencode.test.ts"]),
+      harness("pi", "pi", ["src/**/*.test.ts", "test/acp.test.ts"]),
+      // The ACP behaviours again with OpenCode as the agent loop, then what only OpenCode has to show.
+      harness("opencode", "opencode", ["test/acp.test.ts"]),
+      harness("opencode-only", "opencode", ["test/opencode.test.ts"]),
     ],
   },
 });
