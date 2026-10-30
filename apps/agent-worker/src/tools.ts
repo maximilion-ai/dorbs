@@ -14,7 +14,7 @@ import * as Match from "effect/Match";
 import * as Schema from "effect/Schema";
 
 import { gh } from "./gh.ts";
-import { git } from "./git.ts";
+import { git, isGitPath } from "./git.ts";
 import type { GitHub } from "./GitHub.ts";
 import type { Change, Clone } from "./Typecheck.ts";
 
@@ -67,6 +67,7 @@ const row = <P extends TSchema>(tool: Row<P>) => ({
     description: tool.description,
     parameters: tool.parameters,
     replay: tool.replay,
+    outputLimits: OUTPUT_LIMITS,
     execute: (args) => tool.run(args, host),
   }),
 });
@@ -83,7 +84,66 @@ const directory = (path: string | undefined): string =>
 
 const relative = (path: string): string => path.slice(WORKSPACE_ROOT.length + 1);
 
-const text = (value: string): ToolExecutionResult => ({ output: [{ type: "text", text: value }] });
+/**
+ * What Pi keeps of one tool result for the model and the transcript. Results stay within it, so their own note on
+ * what they cut, which says how to read the rest, is not cut in turn.
+ */
+const OUTPUT_LIMITS = { maxBytes: 64 * 1024, maxLines: 2000 };
+const BUDGET = OUTPUT_LIMITS.maxBytes - 512;
+const encoder = new TextEncoder();
+
+/** How many of `lines`, from the first, fit in one result with a note after them. */
+const fitting = (lines: ReadonlyArray<string>): number => {
+  let bytes = 0;
+  let count = 0;
+  for (const line of lines) {
+    bytes += encoder.encode(line).length + 1;
+    if (bytes > BUDGET || count === OUTPUT_LIMITS.maxLines - 1) break;
+    count += 1;
+  }
+  return count;
+};
+
+/** As much of a line too long for one result as fits. */
+const head = (line: string): string =>
+  line.slice(0, encoder.encodeInto(line, new Uint8Array(BUDGET)).read);
+
+const output = (value: string): ToolExecutionResult => ({
+  output: [{ type: "text", text: value }],
+});
+
+/** `value` as a tool result, cut to fit with a note that ends in `hint`, how to see the rest. */
+const text = (value: string, hint = "Narrow the request to see the rest."): ToolExecutionResult => {
+  const lines = value.split("\n");
+  const count = fitting(lines);
+  if (count === lines.length) return output(value);
+  const shown = count === 0 ? head(lines[0] ?? "") : lines.slice(0, count).join("\n");
+  return output(`${shown}\n[Cut to its first ${count} of ${lines.length} lines. ${hint}]`);
+};
+
+/** Lines `offset` on of a file, at most `limit` of them and as many as fit, with a note on where the rest starts. */
+const readLines = (content: string, offset: number, limit: number | undefined): string => {
+  const lines = content.split("\n");
+  // A final newline ends the last line rather than starting another.
+  if (content.endsWith("\n")) lines.pop();
+  const from = offset - 1;
+  if (from >= lines.length)
+    return `The file has ${lines.length} lines; offset ${offset} is past its end.`;
+  const wanted = lines.slice(from, limit === undefined ? undefined : from + limit);
+  const count = fitting(wanted);
+  if (count === 0) {
+    const line = wanted[0] ?? "";
+    const shown = head(line);
+    return `${shown}\n[Line ${offset} is ${line.length} characters long; showing its first ${shown.length}. Search it with grep.]`;
+  }
+  const end = from + count;
+  if (end === lines.length)
+    return lines.slice(from).join("\n") + (content.endsWith("\n") ? "\n" : "");
+  return `${lines.slice(from, end).join("\n")}\n[Showing lines ${offset}-${end} of ${lines.length}. Call read_file with offset ${end + 1} to read on.]`;
+};
+
+// Minified code puts a whole file on one line.
+const GREP_LINE = 500;
 
 const isMissing = (error: unknown): boolean =>
   error instanceof Error && "code" in error && error.code === "ENOENT";
@@ -95,17 +155,47 @@ const readIfPresent = (workspace: Workspace, path: string): Promise<string | und
     throw error;
   });
 
+/**
+ * Where a model write to `path` lands. The git directory is refused in any case, since its config steers where
+ * pushes send credentials, and so is any path through a symbolic link, which could lead there.
+ */
+const writable = async (workspace: Workspace, path: string): Promise<string> => {
+  const target = absolute(path);
+  const names = relative(target).split("/");
+  if (isGitPath(relative(target))) {
+    throw new Error(
+      `${path} is in the repo's git directory, which only the agent writes. Change files with git commands instead.`,
+    );
+  }
+  for (let end = 1; end <= names.length; end += 1) {
+    // Computer 0.8.0's runtime filesystem has lstat but not the lstatOrNull it types.
+    const stat = await workspace.fs
+      .lstat(`${WORKSPACE_ROOT}/${names.slice(0, end).join("/")}`)
+      .catch((error: unknown) => {
+        if (isMissing(error)) return undefined;
+        throw error;
+      });
+    if (stat === undefined) break;
+    if (stat.isSymbolicLink) {
+      throw new Error(
+        `${path} goes through a symbolic link. Write to the file it points to instead.`,
+      );
+    }
+  }
+  return target;
+};
+
 const write = async (
   host: ToolHost,
   path: string,
   newText: string,
 ): Promise<ToolExecutionResult> => {
-  const target = absolute(path);
+  const target = await writable(host.workspace, path);
   const oldText = await readIfPresent(host.workspace, target);
   await host.workspace.fs.mkdir(target.slice(0, target.lastIndexOf("/")), { recursive: true });
   await host.workspace.fs.writeFile(target, newText);
   const change: FileChange = {
-    path: decodePath(path),
+    path: decodePath(relative(target)),
     ...(oldText === undefined ? {} : { oldText }),
     newText,
   };
@@ -162,11 +252,18 @@ const TOOLS = [
     name: "read_file",
     title: (args) => `read_file ${arg(args, "path")}`,
     kind: "read",
-    description: "Read a UTF-8 text file from the workspace.",
-    parameters: Type.Object({ path: Path }),
+    description:
+      "Read a UTF-8 text file from the workspace. Long files come in parts; offset and limit pick lines.",
+    parameters: Type.Object({
+      path: Path,
+      offset: Type.Optional(
+        Type.Integer({ minimum: 1, description: "First line to read, from 1" }),
+      ),
+      limit: Type.Optional(Type.Integer({ minimum: 1, description: "Most lines to read" })),
+    }),
     replay: "safe",
-    run: async ({ path }, { workspace }) =>
-      text(await workspace.fs.readFile(absolute(path), "utf8")),
+    run: async ({ path, offset = 1, limit }, { workspace }) =>
+      output(readLines(await workspace.fs.readFile(absolute(path), "utf8"), offset, limit)),
   }),
   row({
     name: "write_file",
@@ -186,7 +283,10 @@ const TOOLS = [
     // A rerun would not find oldText it already replaced.
     replay: "unsafe",
     run: async ({ path, oldText, newText }, host) => {
-      const current = await host.workspace.fs.readFile(absolute(path), "utf8");
+      const current = await host.workspace.fs.readFile(
+        await writable(host.workspace, path),
+        "utf8",
+      );
       const at = current.indexOf(oldText);
       if (at === -1 || current.indexOf(oldText, at + 1) !== -1) {
         throw new Error(`oldText must occur exactly once in ${path}`);
@@ -204,7 +304,10 @@ const TOOLS = [
     run: async ({ path }, { workspace }) => {
       const entries = await workspace.fs.find(directory(path), "**/*", NOT_GIT);
       const files = entries.filter((entry) => entry.type === "file").map((e) => relative(e.path));
-      return text(files.length === 0 ? "No files." : files.join("\n"));
+      return text(
+        files.length === 0 ? "No files." : files.join("\n"),
+        "List a subdirectory to see the rest.",
+      );
     },
   }),
   row({
@@ -223,7 +326,13 @@ const TOOLS = [
       return text(
         matches.length === 0
           ? "No matches."
-          : matches.map((m) => `${relative(m.path)}:${m.line}: ${m.text}`).join("\n"),
+          : matches
+              .map((m) => {
+                const line = m.text.length > GREP_LINE ? `${m.text.slice(0, GREP_LINE)}…` : m.text;
+                return `${relative(m.path)}:${m.line}: ${line}`;
+              })
+              .join("\n"),
+        "Narrow the pattern or the path.",
       );
     },
   }),
@@ -293,7 +402,8 @@ const TOOLS = [
     kind: "execute",
     description:
       "Run git in the cloned repo, one command per call, without shell operators. " +
-      "The base branch is protected: commit on a new branch and push it to origin. " +
+      "Commit on a new branch under dorbs/, such as dorbs/add-x, and push it to origin; " +
+      "pushes to other branches are refused. " +
       "fetch, pull, clone, remote and config are not available.",
     parameters: Args("git", 'status, commit -m "Add x" or push -u origin my-branch'),
     replay: "unsafe",
@@ -304,7 +414,21 @@ const TOOLS = [
       }
       const [url, { headers }] = await Promise.all([urlOf(host, clone), host.github()]);
       return text(
-        await git(args, { workspace: host.workspace, dir: WORKSPACE_ROOT, clone, url, headers }),
+        await git(args, {
+          workspace: host.workspace,
+          dir: WORKSPACE_ROOT,
+          clone,
+          // Read again, not the clone above: pushes in one round run at once.
+          created: (branch) => {
+            const current = host.clone();
+            if (current !== undefined) {
+              host.saveClone({ ...current, created: [...(current.created ?? []), branch] });
+            }
+          },
+          url,
+          headers,
+        }),
+        "Narrow the command, such as git log -n 20 or git diff -- <path>.",
       );
     },
   }),
@@ -324,7 +448,10 @@ const TOOLS = [
         host.github(),
       ]);
       const currentBranch = () => host.workspace.git.currentBranch({ dir: WORKSPACE_ROOT });
-      return text(await gh(args, { clone, url, api, currentBranch }));
+      return text(
+        await gh(args, { clone, url, api, currentBranch }),
+        "Narrow the command, such as gh pr list --state open.",
+      );
     },
   }),
 ];

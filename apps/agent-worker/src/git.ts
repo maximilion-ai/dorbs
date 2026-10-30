@@ -9,6 +9,8 @@ export type GitContext = {
   readonly workspace: Workspace;
   readonly dir: string;
   readonly clone: Clone;
+  /** Records a branch this session's push created on origin. */
+  readonly created: (branch: string) => void;
   /** Origin's registered url, or undefined once the repo is no longer registered. */
   readonly url: string | undefined;
   /** Credentials for origin's url; see GitHub's headers. */
@@ -16,7 +18,17 @@ export type GitContext = {
 };
 
 // The agent owns the network and the remotes; push is the one way out, and the tool runs it.
-const MANAGED = new Set(["fetch", "pull", "clone", "remote", "config", "credential", "submodule"]);
+// config and init write the git config, which steers where a push sends credentials.
+const MANAGED = new Set([
+  "fetch",
+  "pull",
+  "clone",
+  "remote",
+  "config",
+  "init",
+  "credential",
+  "submodule",
+]);
 const FORCE = new Set(["-f", "--force", "--force-with-lease", "--force-if-includes"]);
 const DELETE = new Set(["-d", "--delete"]);
 const UPSTREAM = new Set(["-u", "--set-upstream"]);
@@ -31,6 +43,28 @@ const cliText = ({ stdout, stderr, exitCode }: GitCliResult): string => {
 };
 
 const failed = (message: string): string => `${message}\nexit 1`;
+
+// The agent's pushes go to branches of their own, so none moves a branch whose CI runs with secrets.
+const BRANCH_PREFIX = "dorbs/";
+
+/** The branches origin advertises to a push, from its smart HTTP ref advertisement. */
+const remoteBranches = async (
+  url: string,
+  headers: Readonly<Record<string, string>> | undefined,
+): Promise<ReadonlySet<string>> => {
+  const response = await fetch(`${url}/info/refs?service=git-receive-pack`, {
+    headers: { "user-agent": "git/dorbs", ...headers },
+  });
+  if (!response.ok) throw new Error(`origin answered HTTP ${response.status} to a ref listing`);
+  // The advertisement is binary pkt-lines; its ref names are UTF-8.
+  const body = new TextDecoder().decode(await response.arrayBuffer());
+  const advertised = body.matchAll(/[0-9a-f]{40} refs\/heads\/([^\0\n]+)/gu);
+  return new Set([...advertised].flatMap(([, branch]) => branch ?? []));
+};
+
+/** Whether a path names the git directory or something in it, in any case. */
+export const isGitPath = (path: string): boolean =>
+  path.split(/[/=:]/u).some((name) => name.toLowerCase() === ".git");
 
 const push = async (args: ReadonlyArray<string>, context: GitContext): Promise<string> => {
   const { workspace, dir, clone } = context;
@@ -65,11 +99,25 @@ const push = async (args: ReadonlyArray<string>, context: GitContext): Promise<s
   if (target === clone.branch) {
     return `The base branch ${clone.branch} is protected. Create a branch with git checkout -b <name>, commit, then push it.`;
   }
+  if (!target.startsWith(BRANCH_PREFIX)) {
+    return `Push to a branch under ${BRANCH_PREFIX}, such as git push origin HEAD:${BRANCH_PREFIX}my-change; ${target} is not one.`;
+  }
   if (context.url === undefined) return failed(`${clone.repo} is no longer a registered repo.`);
   const commit = await workspace.git.revParse({ dir, ref: source }).catch(() => undefined);
   if (commit === undefined) return failed(`error: src refspec ${source} does not match any`);
+  // Computer's push takes no proxy of its own, so isomorphic-git would send the credentials to the config's.
+  const proxy = await workspace.git.configGet({ dir, path: "http.corsProxy" });
+  if (proxy !== undefined) {
+    return failed(
+      "Push refused: the repo's git config sets http.corsProxy, which would send origin's credentials to another host.",
+    );
+  }
+  const created = clone.created ?? [];
   try {
     const headers = await context.headers(context.url);
+    if (!created.includes(target) && (await remoteBranches(context.url, headers)).has(target)) {
+      return `${target} already exists on origin, and this session did not create it. Push to a new branch, such as git push origin HEAD:${BRANCH_PREFIX}my-change.`;
+    }
     const result = await workspace.git.push({
       dir,
       url: context.url,
@@ -84,6 +132,7 @@ const push = async (args: ReadonlyArray<string>, context: GitContext): Promise<s
   } catch (error) {
     return failed(error instanceof Error ? error.message : String(error));
   }
+  if (!created.includes(target)) context.created(target);
   return `Pushed ${target} to origin at ${commit}`;
 };
 
@@ -101,6 +150,10 @@ export const git = async (line: string, context: GitContext): Promise<string> =>
   }
   if (subcommand !== undefined && MANAGED.has(subcommand)) {
     return `git ${subcommand} is not available: the agent manages the network and remotes. Commit your work, then publish it with git push.`;
+  }
+  const gitPath = args.find(isGitPath);
+  if (gitPath !== undefined) {
+    return failed(`git does not take paths in the repo's git directory, such as ${gitPath}.`);
   }
   if (subcommand === "push") return push(args, context);
   return cliText(await context.workspace.git.cli({ argv: [...argv], cwd: context.dir }));
