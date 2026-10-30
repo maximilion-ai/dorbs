@@ -24,9 +24,10 @@ const SPECIFIER = new RegExp(
     // Triple-slash references by path or by types.
     String.raw`\/\/\/${GAP}<reference\b[^>\n]*?\b(?:path|types)\s*=\s*${quoted(3)}`,
     // The @jsxImportSource pragma, which names the module the JSX runtime loads from.
-    String.raw`@jsxImportSource\s+()([^\s*]+)`,
+    String.raw`@jsxImportSource\s+()(\S+)`,
   ].join("|"),
-  "g",
+  // Case-blind, so no spelling TypeScript might accept slips past.
+  "gi",
 );
 
 export type OutsideModule = {

@@ -28,6 +28,8 @@ it("finds every module specifier that can resolve outside the repo, wherever Typ
     'import m from "node:fs";',
     'import n from "\\x2fetc/n";',
     'const message = "from here";',
+    '/// <reference PATH="/etc/o" />',
+    "// @jsxImportSource *../../../../p",
   ].join("\n");
   assert.deepStrictEqual(at(text), [
     [1, 20, "/Users/op/secret"],
@@ -43,5 +45,7 @@ it("finds every module specifier that can resolve outside the repo, wherever Typ
     [12, 24, "/etc/j"],
     [14, 4, "/etc/k"],
     [17, 16, "\\x2fetc/n"],
+    [19, 22, "/etc/o"],
+    [20, 21, "*../../../../p"],
   ]);
 });

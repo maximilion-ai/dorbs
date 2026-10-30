@@ -56,7 +56,7 @@ const TOOLCHAINS: ReadonlySet<ToolchainId> = new Set([
 const rejected = (reason: RejectReason) => ({ _tag: "Rejected", reason }) as const;
 
 // The files TypeScript reads as modules, so the ones whose imports can reach another file.
-const MODULE_FILE = /\.[cm]?[jt]sx?$/;
+const MODULE_FILE = /\.[cm]?[jt]sx?$/i;
 const SERVICE = ToolName.make("typecheck");
 
 const OUTSIDE_PROGRAM: Diagnostic = {
