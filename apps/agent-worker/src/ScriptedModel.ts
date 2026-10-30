@@ -1,13 +1,16 @@
 import {
+  createAssistantMessageEventStream,
   fauxAssistantMessage,
   fauxProvider,
   fauxText,
   fauxToolCall,
   type AssistantMessage,
+  type AssistantMessageEventStream,
   type FauxResponseFactory,
   type Message,
   type ToolCall,
 } from "@earendil-works/pi-ai";
+import type { Provider } from "@earendil-works/pi-ai/models";
 export const HELLO = "export const hello = (name: string): string => `Hello, ${name}!`;\n";
 export const COUNT = 'export const count: number = "three";\n';
 export const NEW_FILE = "export const fresh = true;\n";
@@ -153,6 +156,17 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
     callTool("typecheck", {}, "call-typecheck-package"),
     say("n is a string."),
   ],
+  "say slowly": [
+    () =>
+      fauxAssistantMessage(
+        [
+          fauxText("I'll start by cloning the repo."),
+          fauxToolCall("clone_repo", { repo: "test/fixture" }, { id: "call-clone" }),
+        ],
+        { stopReason: "toolUse" },
+      ),
+    say("Cloned test/fixture and read its README."),
+  ],
   "e2e push": [
     git("checkout -b dorbs/e2e", "call-checkout"),
     git("add -A", "call-add"),
@@ -162,11 +176,55 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
   ],
 };
 
+const lastPrompt = (messages: ReadonlyArray<Message>): string =>
+  userText(messages[messages.findLastIndex((message) => message.role === "user")]);
+
 const nextStep = (messages: ReadonlyArray<Message>): Step => {
   const lastUser = messages.findLastIndex((message) => message.role === "user");
-  const script = SCRIPTS[userText(messages[lastUser])] ?? [say("No script for this prompt.")];
+  const script = SCRIPTS[lastPrompt(messages)] ?? [say("No script for this prompt.")];
   const replies = messages.slice(lastUser + 1).filter((m) => m.role === "assistant").length;
   return script[replies] ?? say("Script finished.");
+};
+
+/** Scripts whose answers stream slowly, as a real model's do. */
+const SLOW = new Set(["say slowly"]);
+
+// Longer than Pi's 100 ms partial interval, so Pi commits the answer while it is still streaming.
+const PAUSE_MS = 250;
+
+const pause = () => new Promise((resolve) => setTimeout(resolve, PAUSE_MS));
+
+/**
+ * Replays the scripted answer with each text block in two halves and a pause after each, so Pi commits the first
+ * half as the partial that starts the message and the second as a delta.
+ */
+const slowly = (fast: AssistantMessageEventStream): AssistantMessageEventStream => {
+  const slow = createAssistantMessageEventStream();
+  void (async () => {
+    const message = await fast.result();
+    const content: AssistantMessage["content"] = [];
+    for (const [contentIndex, block] of message.content.entries()) {
+      if (block.type !== "text") {
+        content.push(block);
+        continue;
+      }
+      const half = Math.ceil(block.text.length / 2);
+      const text = { type: "text" as const, text: "" };
+      content.push(text);
+      for (const delta of [block.text.slice(0, half), block.text.slice(half)]) {
+        text.text += delta;
+        slow.push({
+          type: "text_delta",
+          contentIndex,
+          delta,
+          partial: structuredClone({ ...message, content }),
+        });
+        await pause();
+      }
+    }
+    slow.end(message);
+  })();
+  return slow;
 };
 
 /** A fake model that answers from SCRIPTS, keyed by the prompt text. */
@@ -178,5 +236,12 @@ export const scriptedModel = () => {
     return nextStep(context.messages)(options?.signal, context.messages);
   };
   faux.setResponses([respond]);
-  return { provider: faux.provider, model: faux.getModel() };
+  const provider: Provider = {
+    ...faux.provider,
+    streamSimple: (model, context, options) => {
+      const stream = faux.provider.streamSimple(model, context, options);
+      return SLOW.has(lastPrompt(context.messages)) ? slowly(stream) : stream;
+    },
+  };
+  return { provider, model: faux.getModel() };
 };
