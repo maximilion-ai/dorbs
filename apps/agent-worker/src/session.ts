@@ -16,8 +16,18 @@ import {
 } from "./rpc.ts";
 import { RunOutcome, transition, Turn, TurnEvent, type TurnCommand } from "./Turn.ts";
 
-/** The session as stored: the client's cwd, and the Pi session once the first prompt made one. */
-export type SessionRecord = { readonly cwd: string; readonly piSession?: string };
+/** The agent loop a session runs on. */
+export type HarnessName = "pi" | "opencode";
+
+/**
+ * The session as stored: the client's cwd, the agent loop it runs on, and the Pi session once the first prompt made
+ * one. Sessions made before the choice of loop have no harness and run on Pi.
+ */
+export type SessionRecord = {
+  readonly cwd: string;
+  readonly harness?: HarnessName;
+  readonly piSession?: string;
+};
 
 export type Emit = (update: Acp.SessionUpdate) => void;
 

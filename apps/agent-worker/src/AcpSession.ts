@@ -12,11 +12,12 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as GitHub from "./GitHub.ts";
 import type { Loop, LoopHost } from "./Loop.ts";
 import { ModelProvider, type ModelUnavailable } from "./ModelProvider.ts";
+import { makeOpenCodeLoop } from "./OpenCodeLoop.ts";
 import { makeOutbox } from "./Outbox.ts";
 import { makePiLoop } from "./PiLoop.ts";
 import * as Repos from "./Repos.ts";
 import { nameOf, type ConnectionId } from "./rpc.ts";
-import { makeSession, type SessionHost, type SessionRecord } from "./session.ts";
+import { makeSession, type HarnessName, type SessionHost, type SessionRecord } from "./session.ts";
 import type { ToolHost } from "./tools.ts";
 import * as Typecheck from "./Typecheck.ts";
 
@@ -31,12 +32,14 @@ const CLONE_KEY = "workspace/clone";
 const RETIRE = "retire";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RetentionDays = Config.Int("SESSION_RETENTION_DAYS").pipe(Config.withDefault(30));
+/** The agent loop new sessions run on. */
+const HarnessConfig = Config.Literals(["pi", "opencode"], "HARNESS").pipe(Config.withDefault("pi"));
 
 /** History rows per replayed RPC; a row is at most 256 KiB, so a page stays under the 32 MiB RPC limit. */
 const REPLAY_PAGE = 64;
 
 /**
- * One ACP session, named by its sessionId: its turn, its agent loop over this object's SQLite, its
+ * One ACP session, named by its sessionId: its turn, its agent loop (Pi or OpenCode) over this object's SQLite, its
  * Computer workspace and cloned repo, and the history a session/load replays. It reaches clients through the
  * AcpConnection it is attached to.
  */
@@ -68,6 +71,13 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
       github: () => this.runtime.runPromise(Effect.service(GitHub.GitHub)),
     };
 
+    /** The loop this session runs on: the one its record names, else the configured one, which open() records. */
+    readonly harness: HarnessName = (() => {
+      const record = this.ctx.storage.kv.get<SessionRecord>(RECORD_KEY);
+      if (record !== undefined) return record.harness ?? "pi";
+      return Effect.runSync(HarnessConfig.parse(ConfigProvider.fromUnknown(this.env)));
+    })();
+
     readonly loop: Loop = (() => {
       const host: LoopHost = {
         storage: this.ctx.storage,
@@ -76,7 +86,7 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
         tools: this.toolHost,
         saveRecord: (record) => this.ctx.storage.kv.put(RECORD_KEY, record),
       };
-      return makePiLoop(host);
+      return this.harness === "opencode" ? makeOpenCodeLoop(host) : makePiLoop(host);
     })();
 
     readonly lifecycle = Lifecycle.install(this).use(this.loop.capability);
@@ -140,7 +150,8 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
     readonly session = makeSession({
       sessionId: nameOf(this.ctx),
       record: () => this.ctx.storage.kv.get<SessionRecord>(RECORD_KEY),
-      saveRecord: (record) => this.ctx.storage.kv.put(RECORD_KEY, record),
+      saveRecord: (record) =>
+        this.ctx.storage.kv.put(RECORD_KEY, { ...record, harness: this.harness }),
       attached: () => this.ctx.storage.kv.get<ConnectionId>(ATTACHED_KEY),
       attach: (connection) => this.ctx.storage.kv.put(ATTACHED_KEY, connection),
       remember: this.history.remember,

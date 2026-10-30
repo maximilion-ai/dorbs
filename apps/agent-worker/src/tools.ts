@@ -8,8 +8,9 @@ import {
   type Rejected,
   type RepoId,
 } from "@dorbs/protocol/typecheck";
-import { Type, type Static, type TSchema } from "@earendil-works/pi-ai";
+import { Type, validateToolArguments, type Static, type TSchema } from "@earendil-works/pi-ai";
 import type { ToolExecutionResult, ToolRegistration } from "@earendil-works/pi-durable";
+import type { Plugin } from "@opencode/plugin";
 import * as Match from "effect/Match";
 import * as Schema from "effect/Schema";
 
@@ -58,6 +59,15 @@ type Row<P extends TSchema> = {
   readonly run: (args: Static<P>, host: ToolHost) => Promise<ToolExecutionResult>;
 };
 
+type ToolEditor = Parameters<Parameters<Plugin.Context["tool"]["transform"]>[0]>[0];
+type OpenCodeTool = Parameters<ToolEditor["add"]>[0];
+
+/** Arguments as a model sends them: a JSON object. */
+export const isJsonObject = Schema.is(Schema.Record(Schema.String, Schema.Json));
+
+/** Takes a call's `details`, such as a write's FileChange, which OpenCode's tool events do not carry. */
+export type KeepDetails = (toolCallId: string, details: unknown) => void;
+
 const row = <P extends TSchema>(tool: Row<P>) => ({
   name: tool.name,
   kind: tool.kind,
@@ -69,6 +79,30 @@ const row = <P extends TSchema>(tool: Row<P>) => ({
     replay: tool.replay,
     outputLimits: OUTPUT_LIMITS,
     execute: (args) => tool.run(args, host),
+  }),
+  // A direct tool, not one of OpenCode's Code Mode tools, with the arguments Pi would pass after its validation.
+  openCode: (host: ToolHost, keep: KeepDetails): OpenCodeTool => ({
+    name: tool.name,
+    description: tool.description,
+    // A TypeBox schema is JSON Schema, with TypeBox's symbol keys besides.
+    input: Object.fromEntries(Object.entries(tool.parameters)),
+    options: { codemode: false },
+    execute: async (input, context) => {
+      if (!isJsonObject(input)) throw new Error(`${tool.name} takes an object of arguments.`);
+      const args: Static<P> = validateToolArguments(tool, {
+        type: "toolCall",
+        id: context.id,
+        name: tool.name,
+        arguments: input,
+      });
+      const result = await tool.run(args, host);
+      if (result.details !== undefined) keep(context.id, result.details);
+      return {
+        content: (result.output ?? [])
+          .map((item) => (item.type === "text" ? item.text : ""))
+          .join(""),
+      };
+    },
   }),
 });
 
@@ -88,7 +122,7 @@ const relative = (path: string): string => path.slice(WORKSPACE_ROOT.length + 1)
  * What Pi keeps of one tool result for the model and the transcript. Results stay within it, so their own note on
  * what they cut, which says how to read the rest, is not cut in turn.
  */
-const OUTPUT_LIMITS = { maxBytes: 64 * 1024, maxLines: 2000 };
+export const OUTPUT_LIMITS = { maxBytes: 64 * 1024, maxLines: 2000 };
 const BUDGET = OUTPUT_LIMITS.maxBytes - 512;
 const encoder = new TextEncoder();
 
@@ -469,3 +503,6 @@ export const toolPresentation = (
 
 export const registerTools = (host: ToolHost): ToolRegistration[] =>
   TOOLS.map((tool) => tool.register(host));
+
+export const openCodeTools = (host: ToolHost, keep: KeepDetails): OpenCodeTool[] =>
+  TOOLS.map((tool) => tool.openCode(host, keep));

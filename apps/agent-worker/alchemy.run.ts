@@ -17,6 +17,8 @@ export const Worker = Cloudflare.Worker("AgentWorker", {
     TYPECHECK_URL: Config.String("TYPECHECK_URL"),
     TYPECHECK_TOKEN: Config.Redacted("TYPECHECK_TOKEN"),
     REPOS: Config.String("REPOS"),
+    // The agent loop new sessions run on: pi or opencode.
+    HARNESS: Config.String("HARNESS").pipe(Config.withDefault("pi")),
     MODEL_PROVIDER: Config.String("MODEL_PROVIDER"),
     MODEL_ID: Config.String("MODEL_ID"),
     OPENROUTER_API_KEY: Config.Redacted("OPENROUTER_API_KEY"),

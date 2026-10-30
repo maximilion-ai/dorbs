@@ -1,14 +1,18 @@
+import type { LanguageModelV3 } from "@ai-sdk/provider";
 import type { Provider } from "@earendil-works/pi-ai/models";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
+import { Model, Provider as OpenCodeProvider, type Plugin } from "@opencode/plugin";
+import type { OpenCodeWorkerd } from "@opencode/sdk/workerd";
 import type { PiModel } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 
-import { scriptedModel } from "./ScriptedModel.ts";
+import { scriptedLanguageModel, scriptedModel } from "./ScriptedModel.ts";
 
 export class ModelUnavailable extends Schema.TaggedError<ModelUnavailable>()("ModelUnavailable", {
   provider: Schema.String,
@@ -19,10 +23,20 @@ export class ModelUnavailable extends Schema.TaggedError<ModelUnavailable>()("Mo
   }
 }
 
-/** The pi-ai provider Pi generates with, and the model new sessions start on. */
+/** The same model as OpenCode reaches it: the plugins that add its provider, provider config, and the model. */
+export type OpenCodeModel = {
+  readonly model: { readonly providerID: string; readonly id: string };
+  readonly plugins: ReadonlyArray<Plugin.Plugin>;
+  readonly providers?: NonNullable<OpenCodeWorkerd.Configuration["providers"]>;
+};
+
+/**
+ * The pi-ai provider Pi generates with and the model new sessions start on, and the same model for OpenCode where
+ * this Worker wires one.
+ */
 export class ModelProvider extends Context.Service<
   ModelProvider,
-  { readonly provider: Provider; readonly model: PiModel }
+  { readonly provider: Provider; readonly model: PiModel; readonly openCode?: OpenCodeModel }
 >()("dorbs/agent-worker/ModelProvider") {}
 
 const ModelConfig = Config.all({
@@ -32,9 +46,46 @@ const ModelConfig = Config.all({
 });
 
 /**
- * Reads MODEL_PROVIDER and MODEL_ID. OpenRouter reads its OPENROUTER_API_KEY secret from the environment
- * itself; Workers AI needs the Worker's `AI` binding. The scripted model runs only under `alchemy dev`,
- * which sets ALCHEMY_DEV, so a deployed Worker cannot answer from a script.
+ * An OpenCode plugin that adds provider `id` with one model, which `language` answers for. OpenCode builds an AI SDK
+ * model from a package, so the provider names one OpenCode cannot load and the plugin hands over the SDK instead.
+ */
+const languageModel = (id: string, language: LanguageModelV3): OpenCodeModel => {
+  const providerID = OpenCodeProvider.ID.make(id);
+  const pkg = `aisdk:dorbs-${id}`;
+  return {
+    model: { providerID: id, id },
+    plugins: [
+      {
+        id: `dorbs.models.${id}`,
+        setup: async (ctx) => {
+          const transform = await ctx.provider.transform((editor) => {
+            editor.add({
+              info: { id: providerID, name: id, activation: "enabled", package: pkg },
+              models: [{ ...Model.Info.default(providerID, Model.ID.make(id)), package: pkg }],
+            });
+          });
+          const hook = await ctx.aisdk.hook(
+            "sdk",
+            (event) => {
+              event.sdk = { languageModel: () => language };
+            },
+            { providerID },
+          );
+          return async () => {
+            await hook.dispose();
+            await transform.dispose();
+          };
+        },
+      },
+    ],
+  };
+};
+
+/**
+ * Reads MODEL_PROVIDER and MODEL_ID. OpenRouter needs the OPENROUTER_API_KEY secret, which Pi reads from the
+ * environment itself and OpenCode takes in its config; Workers AI needs the Worker's `AI` binding and serves Pi only.
+ * The scripted model
+ * runs only under `alchemy dev`, which sets ALCHEMY_DEV, so a deployed Worker cannot answer from a script.
  */
 export const layer = (ai: Ai | undefined) =>
   Layer.effect(
@@ -42,7 +93,16 @@ export const layer = (ai: Ai | undefined) =>
     Effect.gen(function* () {
       const config = yield* ModelConfig;
       if (config.provider === "openrouter") {
-        return { provider: openrouterProvider(), model: { provider: "openrouter", id: config.id } };
+        const apiKey = yield* Config.Redacted("OPENROUTER_API_KEY");
+        return {
+          provider: openrouterProvider(),
+          model: { provider: "openrouter", id: config.id },
+          openCode: {
+            model: { providerID: "openrouter", id: config.id },
+            plugins: [],
+            providers: { openrouter: { settings: { apiKey: Redacted.value(apiKey) } } },
+          },
+        };
       }
       if (config.provider === "scripted") {
         if (!config.dev) {
@@ -51,7 +111,7 @@ export const layer = (ai: Ai | undefined) =>
             reason: "only under alchemy dev (ALCHEMY_DEV=true)",
           });
         }
-        return scriptedModel();
+        return { ...scriptedModel(), openCode: languageModel("scripted", scriptedLanguageModel()) };
       }
       if (ai === undefined) {
         return yield* new ModelUnavailable({ provider: config.provider, reason: "no AI binding" });
