@@ -31,8 +31,8 @@ export type SessionHost = {
   readonly attach: (connection: ConnectionId) => void;
   /** Keeps one session/update message for every later load to replay; streamed text arrives joined into runs. */
   readonly remember: (message: string) => void;
-  /** Every kept message, oldest first. */
-  readonly history: () => ReadonlyArray<string>;
+  /** Sends every kept message to a connection, oldest first, after every message sent before and before any after. */
+  readonly replay: (connection: ConnectionId) => void;
   /** Sends one message to a connection, after every message sent before it. */
   readonly send: (connection: ConnectionId, message: string) => void;
   readonly run: (
@@ -198,7 +198,7 @@ export const makeSession = (host: SessionHost) => {
     yield* stored;
     host.attach(connection);
     flush();
-    for (const message of host.history()) host.send(connection, message);
+    host.replay(connection);
     return Accepted.Answered({ result: yield* encodeLoadResponse({}).pipe(Effect.orDie) });
   });
 

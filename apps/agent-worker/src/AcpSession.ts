@@ -14,6 +14,7 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 
 import * as GitHub from "./GitHub.ts";
 import { ModelProvider, type ModelUnavailable } from "./ModelProvider.ts";
+import { makeOutbox } from "./Outbox.ts";
 import * as Repos from "./Repos.ts";
 import { nameOf, type ConnectionId } from "./rpc.ts";
 import { makeSession, type Emit, type SessionHost, type SessionRecord } from "./session.ts";
@@ -33,6 +34,8 @@ const SYSTEM_PROMPT =
 const RECORD_KEY = "acp/session";
 const ATTACHED_KEY = "acp/attached";
 const CLONE_KEY = "workspace/clone";
+/** History rows per replayed RPC; a row is at most 256 KiB, so a page stays under the 32 MiB RPC limit. */
+const REPLAY_PAGE = 64;
 
 const outcomeOf = (status: "done" | "unanswered", reason: string | undefined): RunOutcome =>
   status === "done"
@@ -105,15 +108,33 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
         remember: (message: string) => {
           sql.exec("INSERT INTO acp_history (message) VALUES (?)", message);
         },
-        all: () =>
-          sql
-            .exec<{ message: string }>("SELECT message FROM acp_history ORDER BY seq")
-            .toArray()
-            .map((row) => row.message),
+        /** Every row kept so far, a page at a time, read as the replay asks for it. */
+        pages: () => {
+          const last =
+            sql.exec<{ last: number | null }>("SELECT max(seq) AS last FROM acp_history").one()
+              .last ?? 0;
+          return function* () {
+            for (let after = 0; after < last;) {
+              const rows = sql
+                .exec<{ seq: number; message: string }>(
+                  "SELECT seq, message FROM acp_history WHERE seq > ? AND seq <= ? ORDER BY seq LIMIT ?",
+                  after,
+                  last,
+                  REPLAY_PAGE,
+                )
+                .toArray();
+              if (rows.length === 0) return;
+              yield rows.map((row) => row.message);
+              after = rows.at(-1)?.seq ?? last;
+            }
+          };
+        },
       };
     })();
 
-    #outbox = Promise.resolve();
+    readonly outbox = makeOutbox((connection, messages) =>
+      this.env.AcpConnection.getByName(connection).deliver(messages),
+    );
 
     readonly session = makeSession({
       sessionId: nameOf(this.ctx),
@@ -122,13 +143,8 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
       attached: () => this.ctx.storage.kv.get<ConnectionId>(ATTACHED_KEY),
       attach: (connection) => this.ctx.storage.kv.put(ATTACHED_KEY, connection),
       remember: this.history.remember,
-      history: this.history.all,
-      send: (connection, message) => {
-        const to = this.env.AcpConnection.getByName(connection);
-        this.#outbox = this.#outbox
-          .then(() => to.deliver(message))
-          .catch((error: unknown) => console.error(`Could not deliver to ${connection}`, error));
-      },
+      replay: (connection) => this.outbox.replay(connection, this.history.pages()),
+      send: this.outbox.send,
       run: (record, prompt, signal, emit) => this.run(record, prompt, signal, emit),
     } satisfies SessionHost);
 

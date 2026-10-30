@@ -77,10 +77,12 @@ export class AcpConnection extends DurableObject {
     ws.close(code === 1005 || code === 1006 ? 1000 : code, reason);
   }
 
-  /** Sends one message from a session to this connection's client, if the client is still there. */
-  deliver(message: string): void {
+  /** Sends messages from a session to this connection's client, one WebSocket message each, if the client is still there. */
+  deliver(messages: ReadonlyArray<string>): void {
     for (const ws of this.ctx.getWebSockets()) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(message);
+      for (const message of messages) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(message);
+      }
     }
   }
 

@@ -480,6 +480,20 @@ it("keeps a long streamed turn as one history row per message and tool step, and
   assert.strictEqual(replay.at(-2)?.content?.text, LONG_ANSWER);
 });
 
+it("replays a history longer than one page of rows in order", async () => {
+  const first = await connect();
+  const sessionId = await first.newSession();
+  const turns: unknown[] = [];
+  for (let id = 2; turns.length < 70; id += 1) {
+    const from = updates(first.frames).length;
+    await first.request(id, "session/prompt", prompt(sessionId, "write hello"));
+    turns.push(said("write hello"), ...updates(first.frames).slice(from), ended("end_turn"));
+  }
+  const second = await connect();
+  const { replay } = await second.load(1, sessionId);
+  assert.deepStrictEqual(replay, turns);
+});
+
 it("refuses a prompt from a connection the session moved away from", async () => {
   const first = await connect();
   const sessionId = await first.newSession();
