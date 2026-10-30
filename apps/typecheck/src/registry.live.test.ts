@@ -96,7 +96,7 @@ it.live.skipIf(process.env["TYPECHECK_OFFLINE"] === "1")(
           .readFileString(`${installs}/${install}/node_modules/.modules.yaml`)
           .pipe(Effect.map((modules) => modules.includes("pnpm@10.33.4"))),
       );
-      assert.deepStrictEqual(versions.toSorted(), [false, true]);
+      assert.sameMembers(versions, [false, true]);
     }).pipe(
       Effect.provide(
         TestServer({

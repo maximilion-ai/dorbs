@@ -25,6 +25,7 @@ import {
 
 import { ActionCache, actionDigest } from "./ActionCache.ts";
 import { BlobStore } from "./BlobStore.ts";
+import { CheckTrees } from "./CheckTrees.ts";
 import { type Checkout, Checkouts, type FetchFailed } from "./Checkouts.ts";
 import { parseOxlint, parseTsrs } from "./diagnostics.ts";
 import { type InstallFailed, Installs, type UnsupportedPackageManager } from "./Installs.ts";
@@ -67,14 +68,6 @@ const rejected = (reason: RejectReason) => ({ _tag: "Rejected", reason }) as con
 const MODULE_FILE = /\.[cm]?[jt]sx?$/i;
 const SERVICE = ToolName.make("typecheck");
 
-// APFS clones and Linux reflinks share blocks until a write, so a check does not copy the tree.
-const CLONE =
-  process.platform === "darwin"
-    ? ["-cR"]
-    : process.platform === "linux"
-      ? ["-R", "--reflink=auto"]
-      : undefined;
-
 const OUTSIDE_PROGRAM: Diagnostic = {
   tool: SERVICE,
   path: RelativePath.make("tsconfig.json"),
@@ -94,6 +87,7 @@ const make = Effect.gen(function* () {
   const cache = yield* ActionCache;
   const checkouts = yield* Checkouts;
   const installs = yield* Installs;
+  const trees = yield* CheckTrees;
   const storage = yield* Storage;
   const { dataDir, repos, processTimeout, confine } = yield* ServiceConfig;
   if (confine && process.platform !== "darwin") {
@@ -154,49 +148,12 @@ const make = Effect.gen(function* () {
     }).pipe(Effect.scoped, Effect.orDie),
   );
 
-  // A filesystem without clones fails `cp -c`, so the copy falls back to bytes.
-  const cloneTree = Effect.fn("Checker.cloneTree")(function* (from: string, to: string) {
-    const cloned =
-      CLONE !== undefined &&
-      (yield* runProcess(spawner, checksDir, "cp", [...CLONE, `${from}/.`, to], {
-        timeout: processTimeout,
-      })).exitCode === 0;
-    if (cloned) return;
-    yield* fs.remove(to, { recursive: true });
-    yield* fs.makeDirectory(to);
-    yield* fs.copy(from, to);
-  });
-
   const runTools = Effect.fn("Checker.runTools")(function* (
     checkout: Checkout,
     action: Action,
     installDir: string,
   ) {
-    const dir = yield* fs.makeTempDirectoryScoped({ directory: checksDir });
-    yield* cloneTree(checkout.dir, dir);
-    yield* Effect.forEach(
-      action.files,
-      (file) => {
-        const target = path.join(dir, file.path);
-        return fs
-          .makeDirectory(path.dirname(target), { recursive: true })
-          .pipe(Effect.andThen(fs.copyFile(blobs.pathOf(file.sha256), target)));
-      },
-      { concurrency: 32, discard: true },
-    );
-    yield* Effect.forEach(
-      action.deleted,
-      (file) => fs.remove(path.join(dir, file), { force: true }),
-      {
-        discard: true,
-      },
-    );
-    for (const pkg of checkout.packages) {
-      const modules = path.join(installDir, pkg, "node_modules");
-      if (yield* fs.exists(modules)) {
-        yield* fs.symlink(modules, path.join(dir, pkg, "node_modules"));
-      }
-    }
+    const dir = yield* trees.open(checkout, action, installDir);
     const realDir = yield* fs.realPath(dir);
     const realInstall = yield* fs.realPath(installDir);
     // The sandbox sees real paths. A tool may read the check, its install and the toolchain, and

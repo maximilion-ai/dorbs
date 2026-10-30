@@ -584,10 +584,24 @@ it.live("runs the tools once for identical concurrent actions", () =>
   }).pipe(Effect.provide(Server)),
 );
 
-it.live("clones the checkout into each check instead of copying its bytes", () =>
+it.live("clones the checkout once and lays each check's changes over the same tree", () =>
   Effect.gen(function* () {
-    const response = yield* checkChange("fixture", { files: { "src/e.ts": "export {};\n" } });
-    assert.strictEqual(response._tag, "ActionResult");
+    const C_TS = { ...BAD_TS, path: RelativePath.make("src/new/c.ts") };
+    const responses = [
+      yield* checkChange("fixture", {
+        files: {
+          "src/a.ts": 'export const a: number = "a";\n',
+          "src/new/c.ts": 'export const c: number = "c";\n',
+        },
+        deleted: ["src/bad.ts"],
+      }),
+      yield* checkChange("fixture", { files: { "src/e.ts": "export {};\n" } }),
+      yield* checkChange("fixture", { deleted: ["src/bad.ts"] }),
+    ];
+    assert.deepStrictEqual(
+      responses.map((response) => response._tag === "ActionResult" && response.diagnostics),
+      [[{ ...BAD_TS, path: RelativePath.make("src/a.ts") }, C_TS], [BAD_TS], []],
+    );
     const clone = process.platform === "darwin" ? "cp -cR " : "cp -R --reflink=auto ";
     assert.lengthOf(
       (yield* spawned).filter((line) => line.startsWith(clone)),
