@@ -1,4 +1,5 @@
 import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 
 import { assert, it } from "@effect/vitest";
@@ -755,4 +756,47 @@ it.live("answers 422 naming the package manager for a commit that pins another",
       }),
     ),
   ),
+);
+
+// Whether the temp dir's filesystem finds a file by a name in another case, as APFS does by default.
+const caseInsensitive = (() => {
+  const dir = NodeFS.mkdtempSync(`${NodeOS.tmpdir()}/case-`);
+  NodeFS.writeFileSync(`${dir}/a`, "");
+  const found = NodeFS.existsSync(`${dir}/A`);
+  NodeFS.rmSync(dir, { recursive: true });
+  return found;
+})();
+
+// Only a filesystem that ignores case can name src/Upper.ts as src/upper.ts.
+it.live.skipIf(!caseInsensitive)(
+  "starts the next check from the commit after a change that names a file in another case",
+  () =>
+    Effect.gen(function* () {
+      const UPPER = {
+        tool: ToolName.make("oxlint"),
+        path: RelativePath.make("src/Upper.ts"),
+        line: 1,
+        column: 1,
+        code: "eslint(no-debugger)",
+        message: "`debugger` statement is not allowed",
+        severity: "warning",
+      } as const;
+      const first = yield* checkChange("cased", { deleted: ["src/upper.ts"] });
+      const second = yield* checkChange("cased", {});
+      assert.deepStrictEqual(
+        [first, second].map((response) => response._tag === "ActionResult" && response.diagnostics),
+        [[], [UPPER]],
+      );
+    }).pipe(
+      Effect.provide(
+        TestServer({
+          cased: {
+            "package.json": EMPTY_PACKAGE,
+            "tsconfig.json": TSCONFIG,
+            "src/a.ts": "export const a = 1;\n",
+            "src/Upper.ts": "debugger;\nexport const u = 1;\n",
+          },
+        }),
+      ),
+    ),
 );

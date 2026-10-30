@@ -110,6 +110,21 @@ const make = Effect.gen(function* () {
     yield* fs.copyFile(path.join(checkout.dir, file), path.join(tree, file));
   });
 
+  // Where the filesystem ignores case or Unicode form, restoring a path the checkout spells another
+  // way would rename its file, so only a check whose paths are spelled exactly keeps its tree.
+  const spelledExactly = Effect.fn("CheckTrees.spelledExactly")(function* (
+    checkout: Checkout,
+    file: string,
+  ) {
+    const parts = file.split("/");
+    for (const [depth, name] of parts.entries()) {
+      const parent = path.join(checkout.dir, ...parts.slice(0, depth));
+      if (!(yield* fs.exists(path.join(parent, name)))) return true;
+      if (!(yield* fs.readDirectory(parent)).includes(name)) return false;
+    }
+    return true;
+  });
+
   const open: CheckTrees["Service"]["open"] = (checkout, action, installDir) => {
     const touched = [...action.files.map((file) => file.path), ...action.deleted];
     const links: Array<string> = [];
@@ -117,6 +132,12 @@ const make = Effect.gen(function* () {
       Exit.isFailure(exit)
         ? discard(tree)
         : Effect.gen(function* () {
+            for (const file of touched) {
+              if (!(yield* spelledExactly(checkout, file))) {
+                yield* discard(tree);
+                return;
+              }
+            }
             for (const link of links) yield* fs.remove(link);
             for (const file of touched) yield* restore(checkout, tree, file);
             idle.set(checkout.dir, [...(idle.get(checkout.dir) ?? []), tree]);
