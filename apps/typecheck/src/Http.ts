@@ -18,6 +18,7 @@ import * as Checker from "./Checker.ts";
 import * as Checkouts from "./Checkouts.ts";
 import * as Installs from "./Installs.ts";
 import * as ServiceConfig from "./ServiceConfig.ts";
+import * as Storage from "./Storage.ts";
 
 const BlobParams = Schema.Struct({ sha256: Sha256 });
 const encodeActionResponse = HttpServerResponse.schemaJson(ActionResponse);
@@ -90,6 +91,7 @@ export const layer = routes.pipe(
     Checker.layer.pipe(
       Layer.provideMerge(Layer.mergeAll(ActionCache.layer, Checkouts.layer, Installs.layer)),
       Layer.provideMerge(BlobStore.layer),
+      Layer.provideMerge(Storage.layer),
       Layer.provideMerge(ServiceConfig.layer),
     ),
   ),

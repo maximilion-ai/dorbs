@@ -15,6 +15,7 @@ import { CommitSha, RelativePath, RepoId, Sha256 } from "@dorbs/protocol/typeche
 import { runProcess } from "./runProcess.ts";
 import { type Repo, ServiceConfig } from "./ServiceConfig.ts";
 import * as SingleFlight from "./SingleFlight.ts";
+import { Storage } from "./Storage.ts";
 import { tsconfigChain } from "./tsconfigChain.ts";
 
 export class UnknownCommit extends Schema.TaggedError<UnknownCommit>()("UnknownCommit", {
@@ -84,6 +85,19 @@ const make = Effect.gen(function* () {
   const caches = path.join(dataDir, "git");
   const trees = path.join(dataDir, "checkouts");
   yield* fs.makeDirectory(trees, { recursive: true });
+  const storage = yield* Storage;
+  // A tree sits at checkouts/<owner>/<name>/<commit>, since a repo id has one slash.
+  const listed = (dir: string) =>
+    fs
+      .readDirectory(dir)
+      .pipe(
+        Effect.map((names) =>
+          names.filter((name) => !name.startsWith(".")).map((name) => path.join(dir, name)),
+        ),
+      );
+  const owners = yield* listed(trees);
+  const names = (yield* Effect.forEach(owners, listed)).flat();
+  yield* storage.adopt((yield* Effect.forEach(names, listed)).flat());
   const once = yield* SingleFlight.make<Checkout, UnknownCommit | FetchFailed>({
     keep: 256,
     // Eviction may have removed the tree since.
@@ -166,6 +180,7 @@ const make = Effect.gen(function* () {
       yield* fs.makeDirectory(path.dirname(dir), { recursive: true });
       yield* fs.rename(staging, dir);
     }).pipe(Effect.orDie);
+    yield* storage.record(dir);
     return dir;
   });
 
@@ -195,7 +210,9 @@ const make = Effect.gen(function* () {
   });
 
   const ensure: Checkouts["Service"]["ensure"] = (repo, commit) =>
-    once(`${repo.id}@${commit}`, materialize(repo, commit).pipe(Effect.flatMap(describe)));
+    once(`${repo.id}@${commit}`, materialize(repo, commit).pipe(Effect.flatMap(describe))).pipe(
+      Effect.tap((checkout) => storage.touch(checkout.dir)),
+    );
 
   return Checkouts.of({ ensure });
 });

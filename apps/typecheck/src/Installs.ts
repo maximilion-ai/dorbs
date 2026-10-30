@@ -16,6 +16,7 @@ import { installWorkspace } from "./pnpmWorkspace.ts";
 import { runProcess } from "./runProcess.ts";
 import { ServiceConfig } from "./ServiceConfig.ts";
 import * as SingleFlight from "./SingleFlight.ts";
+import { Storage } from "./Storage.ts";
 
 export class InstallFailed extends Schema.TaggedError<InstallFailed>()("InstallFailed", {
   lockfile: Sha256,
@@ -42,6 +43,12 @@ const make = Effect.gen(function* () {
   const root = path.join(dataDir, "installs");
   const storeDir = path.join(dataDir, "pnpm-store");
   yield* fs.makeDirectory(root, { recursive: true });
+  const storage = yield* Storage;
+  yield* storage.adopt(
+    (yield* fs.readDirectory(root))
+      .filter((name) => !name.startsWith("."))
+      .map((name) => path.join(root, name)),
+  );
   const once = yield* SingleFlight.make<string, InstallFailed>({
     keep: 256,
     // Eviction may have removed the install since.
@@ -103,11 +110,12 @@ const make = Effect.gen(function* () {
       });
     }
     yield* fs.rename(staging, dir).pipe(Effect.orDie);
+    yield* storage.record(dir);
     return dir;
   });
 
   const ensure: Installs["Service"]["ensure"] = (checkout) =>
-    once(checkout.lockfile, slots.withPermit(install(checkout)));
+    once(checkout.lockfile, slots.withPermit(install(checkout))).pipe(Effect.tap(storage.touch));
 
   return Installs.of({ ensure });
 });

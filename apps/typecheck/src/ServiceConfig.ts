@@ -32,6 +32,8 @@ export class ServiceConfig extends Context.Service<
     readonly repos: ReadonlyMap<RepoId, Repo>;
     /** How long any process the service spawns may run: git, pnpm or a tool. */
     readonly processTimeout: Duration.Duration;
+    /** How many bytes of blobs, results, checkouts and installs to keep before evicting. */
+    readonly cacheMaxBytes: number;
   }
 >()("dorbs/typecheck/ServiceConfig") {}
 
@@ -59,6 +61,7 @@ const make = Effect.gen(function* () {
     processTimeout: Config.Duration("PROCESS_TIMEOUT").pipe(
       Config.withDefault(Duration.minutes(10)),
     ),
+    cacheMaxBytes: Config.Number("CACHE_MAX_BYTES").pipe(Config.withDefault(20 * 1024 ** 3)),
   });
   const registrations = yield* decodeRegistrations(
     yield* (yield* FileSystem.FileSystem).readFileString(config.reposFile),
@@ -84,6 +87,7 @@ const make = Effect.gen(function* () {
     token: config.token,
     repos: new Map(repos.map((repo) => [repo.id, repo])),
     processTimeout: config.processTimeout,
+    cacheMaxBytes: config.cacheMaxBytes,
   };
 });
 

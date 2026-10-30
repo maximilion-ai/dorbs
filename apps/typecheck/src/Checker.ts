@@ -32,6 +32,7 @@ import { outsideModules } from "./moduleSpecifiers.ts";
 import { runProcess } from "./runProcess.ts";
 import { type Repo, ServiceConfig } from "./ServiceConfig.ts";
 import * as SingleFlight from "./SingleFlight.ts";
+import { Storage } from "./Storage.ts";
 import { toolBudget } from "./toolBudget.ts";
 
 export class UnsafeConfig extends Schema.TaggedError<UnsafeConfig>()("UnsafeConfig", {
@@ -89,6 +90,7 @@ const make = Effect.gen(function* () {
   const cache = yield* ActionCache;
   const checkouts = yield* Checkouts;
   const installs = yield* Installs;
+  const storage = yield* Storage;
   const { dataDir, repos, processTimeout } = yield* ServiceConfig;
   const checksDir = path.join(dataDir, "checks");
   yield* fs.makeDirectory(checksDir, { recursive: true });
@@ -262,6 +264,9 @@ const make = Effect.gen(function* () {
     const touched = [...action.files.map((file) => file.path), ...action.deleted];
     const missing = yield* blobs.missing(action.files.map((file) => file.sha256));
     if (missing.length > 0) return { _tag: "MissingBlobs", sha256s: missing } as const;
+    yield* Effect.forEach(action.files, (file) => storage.touch(blobs.pathOf(file.sha256)), {
+      discard: true,
+    });
     const outside = yield* outsideImports(action);
     if (outside.length > 0) {
       const result: ActionResult = {
@@ -316,7 +321,7 @@ const make = Effect.gen(function* () {
     const cached = yield* cache.get(digest);
     if (cached !== undefined) return { ...cached, cached: true };
     // Identical actions share one run; the run checks the cache again, in case one just landed.
-    return yield* flights(digest, compute(repo, action, digest));
+    return yield* flights(digest, storage.use(compute(repo, action, digest)));
   });
 
   return Checker.of({ run });

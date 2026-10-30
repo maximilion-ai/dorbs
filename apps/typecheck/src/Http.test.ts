@@ -8,7 +8,13 @@ import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as Ref from "effect/Ref";
 
-import { type Diagnostic, RelativePath, Sha256, ToolName } from "@dorbs/protocol/typecheck";
+import {
+  type ActionResponse,
+  type Diagnostic,
+  RelativePath,
+  Sha256,
+  ToolName,
+} from "@dorbs/protocol/typecheck";
 
 import {
   EMPTY_PACKAGE,
@@ -588,4 +594,42 @@ it.live("clones the checkout into each check instead of copying its bytes", () =
       1,
     );
   }).pipe(Effect.provide(Server)),
+);
+
+it.live("evicts what was used least recently past CACHE_MAX_BYTES, and rebuilds it on demand", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const { dataDir, commits } = yield* Fixtures;
+    const tree = (name: string) => fs.exists(`${dataDir}/checkouts/test/${name}/${commits[name]}`);
+    const diagnosticsOf = (response: ActionResponse) =>
+      response._tag === "ActionResult" && {
+        diagnostics: response.diagnostics,
+        cached: response.cached,
+      };
+    const first = yield* checkChange("first", {});
+    const second = yield* checkChange("second", {});
+    // A check evicts before it runs, so the second check removed only what the first left.
+    assert.deepStrictEqual([yield* tree("first"), yield* tree("second")], [false, true]);
+    const again = yield* checkChange("first", {});
+    assert.deepStrictEqual([yield* tree("first"), yield* tree("second")], [true, false]);
+    assert.deepStrictEqual([first, second, again].map(diagnosticsOf), [
+      { diagnostics: [BAD_TS], cached: false },
+      { diagnostics: [], cached: false },
+      { diagnostics: [BAD_TS], cached: false },
+    ]);
+  }).pipe(
+    Effect.provide(
+      TestServer(
+        {
+          first: FIXTURE,
+          second: {
+            "package.json": EMPTY_PACKAGE,
+            "tsconfig.json": TSCONFIG,
+            "src/a.ts": "export {};\n",
+          },
+        },
+        { CACHE_MAX_BYTES: "1" },
+      ),
+    ),
+  ),
 );
