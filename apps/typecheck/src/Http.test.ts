@@ -1,3 +1,6 @@
+import * as NodeCrypto from "node:crypto";
+import * as NodeOS from "node:os";
+
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -383,4 +386,48 @@ it.live("answers 401 on every route without the right bearer token", () =>
     );
     assert.deepStrictEqual(statuses, [401, 401, 401, 401, 401]);
   }).pipe(Effect.provide(Server)),
+);
+
+const BUILD_INFO = `${NodeOS.tmpdir()}/typecheck-escape-${NodeCrypto.randomUUID()}.tsbuildinfo`;
+
+it.live(
+  "answers 422 before any tool runs when the commit's tsconfig writes outside the check",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const response = yield* postCheckRaw("buildinfo", {});
+      assert.deepStrictEqual(
+        { status: response.status, body: yield* response.text },
+        {
+          status: 422,
+          body:
+            "The commit's tsconfig sets options the service does not run: " +
+            "config/base.json: compilerOptions.incremental, " +
+            "config/base.json: compilerOptions.tsBuildInfoFile",
+        },
+      );
+      assert.isFalse(yield* fs.exists(BUILD_INFO));
+      assert.deepStrictEqual(
+        (yield* spawned).filter((line) => !line.startsWith("git ")),
+        [],
+        "no install and no tool ran",
+      );
+    }).pipe(
+      Effect.provide(
+        TestServer({
+          buildinfo: {
+            "package.json": EMPTY_PACKAGE,
+            "tsconfig.json": '{ "extends": "./config/base.json", "include": ["src"] }\n',
+            "config/base.json": JSON.stringify({
+              compilerOptions: {
+                ...JSON.parse(TSCONFIG).compilerOptions,
+                incremental: true,
+                tsBuildInfoFile: BUILD_INFO,
+              },
+            }),
+            "src/a.ts": "export const a = 1;\n",
+          },
+        }),
+      ),
+    ),
 );

@@ -44,6 +44,8 @@ export type Checkout = {
   readonly lockfile: Sha256;
   /** The tsconfig files the commit's tsconfig.json extends or references, by any name. */
   readonly tsconfigs: ReadonlySet<RelativePath>;
+  /** Options in those files that write files or reach outside the repo, as `path: option`. */
+  readonly unsafeConfig: ReadonlyArray<string>;
 };
 
 export class Checkouts extends Context.Service<
@@ -169,14 +171,14 @@ const make = Effect.gen(function* () {
       .filter((entry) => !entry.split(path.sep).includes("node_modules"))
       .map((entry) => path.dirname(entry));
     const lockfile = sha256((yield* read("pnpm-lock.yaml")) ?? new Uint8Array());
-    const tsconfigs = yield* tsconfigChain((file) =>
+    const chain = yield* tsconfigChain((file) =>
       read(file).pipe(
         Effect.map((content) =>
           content === undefined ? undefined : Buffer.from(content).toString(),
         ),
       ),
     );
-    return { dir, packages, lockfile, tsconfigs };
+    return { dir, packages, lockfile, tsconfigs: chain.files, unsafeConfig: chain.unsafe };
   });
 
   const ensure: Checkouts["Service"]["ensure"] = (repo, commit) =>

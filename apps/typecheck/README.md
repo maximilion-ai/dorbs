@@ -12,6 +12,7 @@ Every route requires `Authorization: Bearer $TYPECHECK_TOKEN` and answers 401 ot
   - `ActionResult` with `cached: true` when an identical action ran before. No tool runs.
   - `MissingBlobs` with exactly the file hashes the store lacks. Upload them and retry.
   - `Rejected` with `UnknownCommit` when the repo has no such commit, or `ProtectedPaths` for a file the commit's `tsconfig.json` extends or references.
+  - 422 when a tsconfig in the commit's chain sets an option that writes files (`incremental`, `composite`, `tsBuildInfoFile`, `outDir`, `outFile`, `declarationDir`, `plugins`) or a path or module that leaves the repo (`extends`, `files`, `include`, `references`, `rootDir`, `rootDirs`, `typeRoots`, `paths`, `types`, `jsxImportSource`). The body names each.
   - `ActionResult` with diagnostics from the toolchain's tools, and `outputs`, which a check leaves empty. Paths are relative to the repo root.
 
 The service runs one toolchain, `node26-tsrs0.20-oxlint1.89`. It caches each `ActionResult` on disk under the SHA-256 of the action, with files and deletions sorted, so the cache holds across restarts and every client shares it.

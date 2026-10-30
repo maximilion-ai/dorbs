@@ -7,6 +7,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
 import {
@@ -26,10 +27,20 @@ import { type InstallFailed, Installs } from "./Installs.ts";
 import { runProcess } from "./runProcess.ts";
 import { ServiceConfig } from "./ServiceConfig.ts";
 
+export class UnsafeConfig extends Schema.TaggedError<UnsafeConfig>()("UnsafeConfig", {
+  options: Schema.Array(Schema.String),
+}) {
+  override get message(): string {
+    return `The commit's tsconfig sets options the service does not run: ${this.options.join(", ")}`;
+  }
+}
+
 export class Checker extends Context.Service<
   Checker,
   {
-    readonly run: (action: Action) => Effect.Effect<ActionResponse, InstallFailed | FetchFailed>;
+    readonly run: (
+      action: Action,
+    ) => Effect.Effect<ActionResponse, InstallFailed | FetchFailed | UnsafeConfig>;
   }
 >()("dorbs/typecheck/Checker") {}
 
@@ -148,6 +159,10 @@ const make = Effect.gen(function* () {
     if (checkout === undefined) return rejected({ _tag: "UnknownCommit" });
     const chained = touched.filter((path) => checkout.tsconfigs.has(path));
     if (chained.length > 0) return rejected({ _tag: "ProtectedPaths", paths: chained });
+    // Only the commit's own configs can set these, since every chain member is protected.
+    if (checkout.unsafeConfig.length > 0) {
+      return yield* new UnsafeConfig({ options: checkout.unsafeConfig.toSorted() });
+    }
     const [duration, diagnostics] = yield* Effect.timed(
       installs
         .ensure(checkout)
