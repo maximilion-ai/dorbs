@@ -62,6 +62,14 @@ const rejected = (reason: RejectReason) => ({ _tag: "Rejected", reason }) as con
 const MODULE_FILE = /\.[cm]?[jt]sx?$/i;
 const SERVICE = ToolName.make("typecheck");
 
+// APFS clones and Linux reflinks share blocks until a write, so a check does not copy the tree.
+const CLONE =
+  process.platform === "darwin"
+    ? ["-cR"]
+    : process.platform === "linux"
+      ? ["-R", "--reflink=auto"]
+      : undefined;
+
 const OUTSIDE_PROGRAM: Diagnostic = {
   tool: SERVICE,
   path: RelativePath.make("tsconfig.json"),
@@ -135,13 +143,26 @@ const make = Effect.gen(function* () {
     }).pipe(Effect.scoped, Effect.orDie),
   );
 
+  // A filesystem without clones fails `cp -c`, so the copy falls back to bytes.
+  const cloneTree = Effect.fn("Checker.cloneTree")(function* (from: string, to: string) {
+    const cloned =
+      CLONE !== undefined &&
+      (yield* runProcess(spawner, checksDir, "cp", [...CLONE, `${from}/.`, to], {
+        timeout: processTimeout,
+      })).exitCode === 0;
+    if (cloned) return;
+    yield* fs.remove(to, { recursive: true });
+    yield* fs.makeDirectory(to);
+    yield* fs.copy(from, to);
+  });
+
   const runTools = Effect.fn("Checker.runTools")(function* (
     checkout: Checkout,
     action: Action,
     installDir: string,
   ) {
     const dir = yield* fs.makeTempDirectoryScoped({ directory: checksDir });
-    yield* fs.copy(checkout.dir, dir);
+    yield* cloneTree(checkout.dir, dir);
     yield* Effect.forEach(
       action.files,
       (file) => {

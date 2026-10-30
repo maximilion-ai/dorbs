@@ -577,3 +577,15 @@ it.live("runs the tools once for identical concurrent actions", () =>
     );
   }).pipe(Effect.provide(Server)),
 );
+
+it.live("clones the checkout into each check instead of copying its bytes", () =>
+  Effect.gen(function* () {
+    const response = yield* checkChange("fixture", { files: { "src/e.ts": "export {};\n" } });
+    assert.strictEqual(response._tag, "ActionResult");
+    const clone = process.platform === "darwin" ? "cp -cR " : "cp -R --reflink=auto ";
+    assert.lengthOf(
+      (yield* spawned).filter((line) => line.startsWith(clone)),
+      1,
+    );
+  }).pipe(Effect.provide(Server)),
+);
