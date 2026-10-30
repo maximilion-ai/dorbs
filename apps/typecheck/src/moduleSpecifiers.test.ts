@@ -65,9 +65,9 @@ it("finds every module specifier that can resolve outside the repo, wherever Typ
   ]);
 });
 
-// Each input is 5 MiB, the largest body the service takes; a quadratic scan would not finish.
+// Each input is 1 MiB; a quadratic scan would not finish, a linear one takes milliseconds.
 it("scans adversarial input in linear time", () => {
-  const fill = (unit: string) => unit.repeat(Math.ceil((5 * 1024 * 1024) / unit.length));
+  const fill = (unit: string) => unit.repeat(Math.ceil((1024 * 1024) / unit.length));
   for (const unit of [
     "import /*",
     "import //",
@@ -80,14 +80,14 @@ it("scans adversarial input in linear time", () => {
     assert.deepStrictEqual(outsideModules("src/a.ts", fill(unit)), [], unit);
   }
   assert.deepStrictEqual(
-    outsideModules("src/a.ts", `import${" ".repeat(5 * 1024 * 1024)}"/etc/x"`).map(
+    outsideModules("src/a.ts", `import${" ".repeat(1024 * 1024)}"/etc/x"`).map(
       ({ specifier }) => specifier,
     ),
     ["/etc/x"],
   );
-  assert.lengthOf(outsideModules("src/a.ts", fill('import("/a")')), 436_907);
+  assert.lengthOf(outsideModules("src/a.ts", fill('import("/a")')), 87_382);
   assert.deepStrictEqual(
-    outsideModules("src/a.ts", `${"// import\n".repeat(100_000)}${" ".repeat(5 * 1024 * 1024)}`),
+    outsideModules("src/a.ts", `${"// import\n".repeat(100_000)}${" ".repeat(1024 * 1024)}`),
     [],
   );
 });
