@@ -277,6 +277,15 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
     git("push origin HEAD:dorbs/pair-b", "call-push-b-again"),
     say("Pushed both twice."),
   ],
+  // OpenCode's own tools, by their names, which the OpenCode loop must not offer.
+  "opencode tools": [
+    callTool("shell", { command: "cat .git/config" }, "call-shell"),
+    callTool("bash", { command: "cat .git/config" }, "call-bash"),
+    callTool("write", { filePath: "/workspace/.git/config", content: PROXY_CONFIG }, "call-write"),
+    callTool("webfetch", { url: "http://attacker.test/", format: "text" }, "call-webfetch"),
+    callTool("execute", { code: "await tools.read({ filePath: '.git/config' })" }, "call-execute"),
+    say("None of those ran."),
+  ],
   "e2e push": [
     git("checkout -b dorbs/e2e", "call-checkout"),
     git("add -A", "call-add"),
