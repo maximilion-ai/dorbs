@@ -24,13 +24,13 @@ The service runs one toolchain, `node26-tsrs0.20-oxlint1.89`. It caches each `Ac
 [
   {
     "id": "maximilion/dorbs",
-    "url": "https://github.com/maximilion/dorbs.git",
+    "url": "https://git.example.com/maximilion/dorbs.git",
     "tokenEnv": "DORBS_READ_TOKEN"
   }
 ]
 ```
 
-The service reads the file once at startup. `tokenEnv` is optional and names the environment variable that holds a read token. git sends the token as an `Authorization` header and never puts it on a command line.
+The service reads the file once at startup. `tokenEnv` is optional and names the environment variable that holds a read token. A github.com repo without `tokenEnv` gets a read token from the GitHub App instead, when `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` (PKCS#8 PEM) are set: the service mints an installation token with `contents: read` for that repo alone, and reuses it until five minutes before it expires. `GITHUB_API_URL` defaults to `https://api.github.com`. git sends the token as an `Authorization` header and never puts it on a command line.
 
 An action fetches its commit with `git fetch --depth 1` into a bare cache per repo, then lays a clean tree of the commit on disk. Every check of that commit shares the tree. A check copies the tree, applies the change, links `node_modules`, and runs the tools. Config, manifests and the lockfile always come from the commit, so trust equals write access to the repo, as in CI. oxlint runs with the service's own config, never the repo's.
 

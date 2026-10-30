@@ -14,6 +14,7 @@ import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
+import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Ref from "effect/Ref";
 
@@ -26,7 +27,13 @@ import {
   ToolchainId,
 } from "@dorbs/protocol/typecheck";
 
-import { type FixtureFile, makeRepo } from "../../../scripts/gitFixture.ts";
+import { type FixtureFile, makeRepo, nodeListener } from "../../../scripts/gitFixture.ts";
+import {
+  GITHUB_APP_ID,
+  githubDouble,
+  type Issued,
+  makeAppKey,
+} from "../../../scripts/githubFixture.ts";
 import * as App from "./Http.ts";
 
 export const TOKEN = "test-token";
@@ -46,6 +53,8 @@ export class LogLines extends Context.Service<LogLines, Array<string>>()(
 /**
  * The commit of each fixture repo, registered as test/<name> with a file:// url, and the
  * Authorization headers that test/private's server received. That server refuses every request.
+ * The fixture repo is also on github.com, registered as test/github, where the GitHub App is
+ * installed; test/uninstalled is a github.com repo it is not installed on.
  */
 export class Fixtures extends Context.Service<
   Fixtures,
@@ -53,22 +62,61 @@ export class Fixtures extends Context.Service<
     readonly commits: Readonly<Record<string, CommitSha>>;
     readonly privateAuthorizations: ReadonlyArray<string>;
     readonly dataDir: string;
+    /** The tokens the GitHub double issued, with what the App asked for. */
+    readonly issued: () => ReadonlyArray<Issued>;
+    /** Where the double answers for github.com and its API. */
+    readonly githubUrl: string;
   }
 >()("dorbs/typecheck/test/Fixtures") {}
 
+const APP_KEY = makeAppKey();
+
+// Logs each command as the service built it, then sends its github.com urls to the GitHub double.
 const RecordingSpawner = Layer.effect(
   ChildProcessSpawner.ChildProcessSpawner,
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const log = yield* SpawnLog;
+    const { githubUrl } = yield* Fixtures;
     return ChildProcessSpawner.make((command) =>
       Ref.update(log, (lines) => [
         ...lines,
         command._tag === "StandardCommand" ? [command.command, ...command.args].join(" ") : "pipe",
-      ]).pipe(Effect.andThen(spawner.spawn(command))),
+      ]).pipe(
+        Effect.andThen(
+          spawner.spawn(
+            command._tag === "StandardCommand"
+              ? ChildProcess.make(
+                  command.command,
+                  command.args.map((arg) =>
+                    arg.replace(/^https:\/\/github\.com\//u, `${githubUrl}/`),
+                  ),
+                  command.options,
+                )
+              : command,
+          ),
+        ),
+      ),
     );
   }),
 );
+
+const listen = (handle: (request: Request) => Promise<Response> | Response) =>
+  Effect.acquireRelease(
+    Effect.callback<NodeHttp.Server>((resume) => {
+      const server = NodeHttp.createServer(nodeListener(handle));
+      server.listen(0, "127.0.0.1", () => resume(Effect.succeed(server)));
+    }),
+    (server) =>
+      Effect.callback<void>((resume) => {
+        server.close(() => resume(Effect.void));
+      }),
+  );
+
+const portOf = (server: NodeHttp.Server): number => {
+  const address = server.address();
+  return typeof address === "object" && address !== null ? address.port : 0;
+};
 
 const refusingServer = Effect.acquireRelease(
   Effect.callback<{ readonly server: NodeHttp.Server; readonly authorizations: string[] }>(
@@ -94,27 +142,37 @@ const FixtureConfig = (repos: Readonly<Record<string, Record<string, FixtureFile
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const dir = yield* fs.makeTempDirectoryScoped();
+      yield* fs.makeDirectory(`${dir}/test`);
       const commits = Object.fromEntries(
         Object.entries(repos).map(([name, files]) => [
           name,
-          CommitSha.make(makeRepo(`${dir}/${name}.git`, files)),
+          CommitSha.make(makeRepo(`${dir}/test/${name}.git`, files)),
         ]),
       );
       const refusing = yield* refusingServer;
-      const address = refusing.server.address();
-      const port = typeof address === "object" && address !== null ? address.port : 0;
+      const port = portOf(refusing.server);
+      const github = githubDouble({
+        publicKey: APP_KEY.publicKey,
+        installations: { "test/fixture": 7 },
+        gitRoot: dir,
+      });
+      const githubUrl = `http://127.0.0.1:${portOf(
+        yield* listen(async (request) => (await github.app(request)) ?? github.git(request)),
+      )}`;
       yield* fs.writeFileString(
         `${dir}/repos.json`,
         JSON.stringify([
           ...Object.keys(repos).map((name) => ({
             id: `test/${name}`,
-            url: `file://${dir}/${name}.git`,
+            url: `file://${dir}/test/${name}.git`,
           })),
           {
             id: "test/private",
             url: `http://127.0.0.1:${port}/private.git`,
             tokenEnv: "PRIVATE_TOKEN",
           },
+          { id: "test/github", url: "https://github.com/test/fixture.git" },
+          { id: "test/uninstalled", url: "https://github.com/test/uninstalled.git" },
         ]),
       );
       return Layer.mergeAll(
@@ -124,12 +182,17 @@ const FixtureConfig = (repos: Readonly<Record<string, Record<string, FixtureFile
             TYPECHECK_TOKEN: TOKEN,
             REPOS_FILE: `${dir}/repos.json`,
             PRIVATE_TOKEN,
+            GITHUB_APP_ID,
+            GITHUB_APP_PRIVATE_KEY: APP_KEY.privateKey,
+            GITHUB_API_URL: githubUrl,
           }),
         ),
         Layer.succeed(Fixtures, {
           commits,
           privateAuthorizations: refusing.authorizations,
           dataDir: `${dir}/data`,
+          issued: github.issued,
+          githubUrl,
         }),
       );
     }),

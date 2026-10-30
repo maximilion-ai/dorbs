@@ -114,12 +114,15 @@ const make = Effect.gen(function* () {
       yield* fs.makeDirectory(cache, { recursive: true }).pipe(Effect.orDie);
       yield* run(cache, "git", ["init", "--bare", "--quiet"], gitEnv(undefined));
     }
+    const token = yield* repo.token.pipe(
+      Effect.mapError((error) => new FetchFailed({ repo: repo.id, output: error.message })),
+    );
     const result = yield* runProcess(
       spawner,
       cache,
       "git",
       ["fetch", "--quiet", "--depth", "1", "--no-tags", "--no-write-fetch-head", repo.url, commit],
-      gitEnv(repo.token),
+      gitEnv(token),
     ).pipe(Effect.orDie);
     if (result.exitCode !== 0) {
       yield* Effect.fail(

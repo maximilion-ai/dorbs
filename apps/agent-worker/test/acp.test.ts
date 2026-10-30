@@ -669,7 +669,7 @@ it("says the GitHub App is not installed on a github.com repo it cannot reach", 
   assert.strictEqual(result?.status, "failed");
   assert.strictEqual(
     toolText(updates(client.frames), "call-clone"),
-    "<harness>\n[error] The GitHub App is not installed on test/elsewhere. Install it on the repo to give the agent access.\n</harness>",
+    "<harness>\n[error] The GitHub App is not installed on test/elsewhere. Install it on the repo to give dorbs access.\n</harness>",
   );
 });
 

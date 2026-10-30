@@ -180,7 +180,7 @@ export const installationTokens = Effect.fn("GitHubApp.installationTokens")(func
     );
     if (found.status === 404) {
       return yield* new GitHubAppFailed({
-        reason: `The GitHub App is not installed on ${id}. Install it on the repo to give the agent access.`,
+        reason: `The GitHub App is not installed on ${id}. Install it on the repo to give dorbs access.`,
       });
     }
     if (found.status !== 200)

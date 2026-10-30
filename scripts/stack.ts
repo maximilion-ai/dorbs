@@ -9,7 +9,7 @@ import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 import * as NodeAssert from "node:assert/strict";
 
-import { makeRepo, serveGit, type FixtureFile } from "./gitFixture.ts";
+import { makeRepo, nodeListener, serveGit, type FixtureFile } from "./gitFixture.ts";
 
 const ROOT = NodePath.resolve(import.meta.dirname, "..");
 const WORKER_DIR = NodePath.join(ROOT, "apps/agent-worker");
@@ -247,26 +247,7 @@ export const acpClient = (nc: NodeChildProcess.ChildProcessWithoutNullStreams) =
 
 /** Serves the bare repos under `root` over git's smart HTTP on a free port. */
 const gitServer = async (root: string): Promise<number> => {
-  const handle = serveGit(root);
-  const server = NodeHttp.createServer((request, response) => {
-    void (async () => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of request) chunks.push(Buffer.from(chunk));
-      const headers = new Headers();
-      for (const [name, value] of Object.entries(request.headers)) {
-        if (typeof value === "string") headers.set(name, value);
-      }
-      const answer = await handle(
-        new Request(`http://127.0.0.1${request.url ?? "/"}`, {
-          method: request.method ?? "GET",
-          headers,
-          ...(request.method === "POST" ? { body: Buffer.concat(chunks) } : {}),
-        }),
-      );
-      response.writeHead(answer.status, Object.fromEntries(answer.headers));
-      response.end(Buffer.from(await answer.arrayBuffer()));
-    })();
-  });
+  const server = NodeHttp.createServer(nodeListener(serveGit(root)));
   servers.push(server);
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {

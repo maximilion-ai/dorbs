@@ -2,6 +2,7 @@
 
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
+import type * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
 
 // No user or system git config, so a developer's hooks, signing or helpers never reach a fixture.
@@ -91,4 +92,29 @@ export const serveGit =
       status,
       headers,
     });
+  };
+
+/** A Node request listener that answers with a fetch-style handler, such as serveGit's. */
+export const nodeListener =
+  (handle: (request: Request) => Promise<Response> | Response): NodeHttp.RequestListener =>
+  (request, response) => {
+    void (async () => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(request.headers)) {
+        if (typeof value === "string") headers.set(name, value);
+      }
+      const answer = await handle(
+        new Request(`http://${request.headers.host ?? "127.0.0.1"}${request.url ?? "/"}`, {
+          method: request.method ?? "GET",
+          headers,
+          ...(request.method === "GET" || request.method === "HEAD"
+            ? {}
+            : { body: Buffer.concat(chunks) }),
+        }),
+      );
+      response.writeHead(answer.status, Object.fromEntries(answer.headers));
+      response.end(Buffer.from(await answer.arrayBuffer()));
+    })();
   };

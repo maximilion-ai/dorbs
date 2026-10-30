@@ -298,6 +298,50 @@ it.live("sends a repo's token only in its Authorization header, never in output 
   }).pipe(Effect.provide(Server)),
 );
 
+it.live(
+  "fetches a github.com repo with a read token the GitHub App mints for that repo alone",
+  () =>
+    Effect.gen(function* () {
+      const response = yield* postCheck("fixture", { repo: "test/github" });
+      assert.deepStrictEqual(response._tag === "ActionResult" && response.diagnostics, [BAD_TS]);
+      const { issued } = yield* Fixtures;
+      assert.deepStrictEqual(
+        issued().map(({ installation, repositories, permissions }) => ({
+          installation,
+          repositories,
+          permissions,
+        })),
+        [
+          {
+            installation: 7,
+            repositories: ["fixture"],
+            permissions: { contents: "read", metadata: "read" },
+          },
+        ],
+      );
+      const surfaces = [...(yield* spawned), ...(yield* LogLines)].join("\n");
+      for (const { token } of issued()) assert.notInclude(surfaces, token);
+    }).pipe(Effect.provide(Server)),
+);
+
+it.live("answers 502 for a github.com repo the GitHub App is not installed on", () =>
+  Effect.gen(function* () {
+    const response = yield* postCheckRaw("fixture", {
+      repo: "test/uninstalled",
+      commit: "0000000000000000000000000000000000000001",
+    });
+    assert.deepStrictEqual(
+      { status: response.status, body: yield* response.text },
+      {
+        status: 502,
+        body:
+          "git fetch from test/uninstalled failed:\nThe GitHub App is not installed on " +
+          "test/uninstalled. Install it on the repo to give dorbs access.",
+      },
+    );
+  }).pipe(Effect.provide(Server)),
+);
+
 it.live("rejects a blob whose content does not match its hash and does not store it", () =>
   Effect.gen(function* () {
     const client = yield* HttpClient.HttpClient;
