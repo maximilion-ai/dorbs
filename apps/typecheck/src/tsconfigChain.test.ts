@@ -118,3 +118,27 @@ it.effect("names every option in the chain that writes files or reaches outside 
     ]);
   }),
 );
+
+// The shapes of create-t3-app's and elysia's tsconfig.json: a comma, then a comment that holds ] or }.
+it.effect("keeps a comma that a comment holding a bracket follows", () =>
+  Effect.gen(function* () {
+    const unsafe = yield* unsafeOf({
+      "tsconfig.json": `{
+        "compilerOptions": {
+          "noUncheckedIndexedAccess": true, // TLDR - (array[0]) forces <T | undefined>
+          "outDir": "dist",
+          "moduleResolution": "bundler",          /* Specify how TypeScript looks up a file. */
+          // "paths": {},                         /* Remap imports. */
+          // "types": ["bun-types"],              /* Type packages. */
+          "types": ["../evil"]
+        },
+        "exclude": ["node_modules"]
+        // "include": ["src/**/*"]
+      }`,
+    });
+    assert.deepStrictEqual(unsafe, [
+      "tsconfig.json: compilerOptions.outDir",
+      "tsconfig.json: compilerOptions.types",
+    ]);
+  }),
+);
