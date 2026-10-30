@@ -54,6 +54,21 @@ const restartSession = async (sessionId: string) => {
 const responses = (frames: ReadonlyArray<Frame>, id: number) =>
   frames.filter((frame) => frame.id === id && frame.method === undefined);
 
+/** Every tool call in `updates` that has no end: an update after a restart that went missing. */
+const unended = (updates: ReadonlyArray<any>) =>
+  updates
+    .filter((update) => update.sessionUpdate === "tool_call")
+    .map((call) => call.toolCallId)
+    .filter(
+      (id) =>
+        !updates.some(
+          (update) =>
+            update.sessionUpdate === "tool_call_update" &&
+            update.toolCallId === id &&
+            (update.status === "completed" || update.status === "failed"),
+        ),
+    );
+
 const CHUNKS = new Set(["agent_message_chunk", "agent_thought_chunk"]);
 
 /** The thread T3 shows: a run of chunks of one kind reads as one message. */
@@ -91,6 +106,7 @@ it("finishes a turn whose session restarted in the middle of a tool call", async
     assert.deepStrictEqual((await turn).result, { stopReason: "end_turn" });
     assert.isTrue(await woken);
     const live = updates(client.frames);
+    assert.deepStrictEqual(unended(live), []);
     assert.deepStrictEqual(live.at(-1), {
       sessionUpdate: "agent_message_chunk",
       content: { type: "text", text: "count is a string." },
@@ -121,6 +137,7 @@ it("finishes a turn whose session restarted in the middle of a model stream", as
   assert.deepStrictEqual((await turn).result, { stopReason: "end_turn" });
   assert.isTrue(await woken);
   const live = updates(client.frames);
+  assert.deepStrictEqual(unended(live), []);
   assert.deepStrictEqual(thread(live).at(-1), {
     sessionUpdate: "agent_message_chunk",
     content: { type: "text", text: "Cloned test/fixture and read its README." },
@@ -158,6 +175,7 @@ it("shows a turn still running to a client that reconnects after its connection 
 
     assert.deepStrictEqual((await next).result, { stopReason: "end_turn" });
     const live = updates(second.frames.slice(attached.replay.length + 1));
+    assert.deepStrictEqual(unended([...attached.replay, ...live]), []);
     const end = live.findIndex((update) => update.sessionUpdate === "session_info_update");
     assert.deepStrictEqual(live.slice(end - 1, end + 1), [
       {
@@ -183,4 +201,31 @@ it("shows a turn still running to a client that reconnects after its connection 
   } finally {
     await double("http://typecheck.test/__release");
   }
+});
+
+it("reloads a session idle past its eviction with a history longer than a replay page, and prompts it", async () => {
+  const first = await connect();
+  const sessionId = await first.newSession();
+  const turns: unknown[] = [];
+  for (let id = 2; turns.length <= 64; id += 1) {
+    const from = updates(first.frames).length;
+    await first.request(id, "session/prompt", prompt(sessionId, "write hello"));
+    turns.push(said("write hello"), ...updates(first.frames).slice(from), ended("end_turn"));
+  }
+  await first.close(1000, "nc exited");
+  await restart(env.AcpSession.getByName(sessionId));
+
+  const second = await connect();
+  const { replay } = await second.load(1, sessionId);
+  assert.deepStrictEqual(replay, turns);
+  const read = await second.request(2, "session/prompt", prompt(sessionId, "read hello"));
+  assert.deepStrictEqual(read.result, { stopReason: "end_turn" });
+  const prompts = turns.filter((update: any) => update.sessionUpdate === "user_message_chunk");
+  assert.deepStrictEqual(updates(second.frames).at(-1), {
+    sessionUpdate: "agent_message_chunk",
+    content: {
+      type: "text",
+      text: `Prompts so far: ${[...prompts.map(() => "write hello"), "read hello"].join(" | ")}.`,
+    },
+  });
 });

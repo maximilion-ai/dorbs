@@ -295,11 +295,17 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
   ],
 };
 
-const lastPrompt = (said: ReadonlyArray<Said>): string =>
-  said.findLast((turn) => turn.role === "user")?.text ?? "";
+/** What OpenCode tells the model when it resumes a turn a restart cut off; the script goes on past it. */
+const CONTINUE_AFTER_RESTART =
+  "The server restarted while you were working. Continue from where you left off without repeating completed work.";
+
+const prompted = (turn: Said): turn is Extract<Said, { role: "user" }> =>
+  turn.role === "user" && turn.text !== CONTINUE_AFTER_RESTART;
+
+const lastPrompt = (said: ReadonlyArray<Said>): string => said.findLast(prompted)?.text ?? "";
 
 const nextStep = (said: ReadonlyArray<Said>): Step => {
-  const lastUser = said.findLastIndex((turn) => turn.role === "user");
+  const lastUser = said.findLastIndex(prompted);
   const script = SCRIPTS[lastPrompt(said)] ?? [say("No script for this prompt.")];
   const replies = said.slice(lastUser + 1).filter((turn) => turn.role === "assistant").length;
   return script[replies] ?? say("Script finished.");

@@ -1,7 +1,7 @@
 // What only the OpenCode loop has to show; vitest.config.ts runs this file with HARNESS=opencode.
-import { assert, it } from "@effect/vitest";
+import { assert, it, vi } from "@effect/vitest";
 import { OpenCodeHarness } from "agents/harness/opencode";
-import { runInDurableObject } from "cloudflare:test";
+import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import * as Schema from "effect/Schema";
 
@@ -154,6 +154,61 @@ it("cancels mid tool: the open call fails as interrupted and the session takes t
     await double("http://typecheck.test/__release");
     const next = await client.request(3, "session/prompt", prompt(sessionId, "write hello"));
     assert.deepStrictEqual(next.result, { stopReason: "end_turn" });
+  } finally {
+    await double("http://typecheck.test/__release");
+  }
+});
+
+it("catches up from OpenCode's durable log on a turn it ran on alone after a restart", async () => {
+  await double("http://typecheck.test/__hold");
+  try {
+    const client = await connect();
+    const sessionId = await client.newSession();
+    const turn = client.request(2, "session/prompt", prompt(sessionId, "typecheck"));
+    await client.until((frame) => frame.params?.update?.toolCallId === "call-typecheck");
+    // OpenCode resumes the turn while it boots, before the session watches it; here it runs to the end unwatched.
+    const restarted = await runInDurableObject(
+      env.AcpSession.getByName(sessionId),
+      async (_instance, state) => {
+        state.storage.kv.put("test/prompts", state.storage.kv.get("acp/prompts"));
+        state.storage.kv.delete("acp/prompts");
+        await state.storage.sync();
+        state.abort("restarted");
+      },
+    ).catch((error: unknown) => String(error));
+    assert.strictEqual(restarted, "Error: restarted");
+    await double("http://typecheck.test/__release");
+    assert.isTrue(await runDurableObjectAlarm(env.AcpSession.getByName(sessionId)));
+    await vi.waitFor(
+      async () =>
+        assert.match((await durableLog(sessionId)).at(-1) ?? "", /session\.execution\.succeeded$/),
+      { timeout: 4000 },
+    );
+    const rejoined = await runInDurableObject(
+      env.AcpSession.getByName(sessionId),
+      async (_instance, state) => {
+        state.storage.kv.put("acp/prompts", state.storage.kv.get("test/prompts"));
+        await state.storage.sync();
+        state.abort("restarted");
+      },
+    ).catch((error: unknown) => String(error));
+    assert.strictEqual(rejoined, "Error: restarted");
+    await inSession(sessionId, () => undefined);
+
+    assert.deepStrictEqual((await turn).result, { stopReason: "end_turn" });
+    const live = updates(client.frames);
+    assert.deepStrictEqual(
+      live
+        .filter((update) => update.toolCallId === "call-typecheck")
+        .map((update) => update.status),
+      ["in_progress", "failed"],
+    );
+    assert.deepStrictEqual(live.at(-1), {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "count is a string." },
+    });
+    const { replay } = await client.load(3, sessionId);
+    assert.deepStrictEqual(replay.slice(1, -1), live);
   } finally {
     await double("http://typecheck.test/__release");
   }

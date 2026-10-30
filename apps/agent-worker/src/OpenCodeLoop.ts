@@ -3,12 +3,14 @@ import {
   OpenCodeHarness,
   type OpenCodeHarnessOptions,
   type OpenCodeOperationResult,
+  type OpenCodeSession,
+  type OpenCodeSessionEvent,
 } from "agents/harness/opencode";
 import type { CapabilityStartContext } from "agents/lifecycle";
 
 import { SYSTEM_PROMPT, type Loop, type LoopHost } from "./Loop.ts";
 import { ModelUnavailable } from "./ModelProvider.ts";
-import { NOTHING_STREAMED, toOpenCodeUpdates } from "./openCodeUpdates.ts";
+import { fromLog, NOTHING_STREAMED, startsTurn, toOpenCodeUpdates } from "./openCodeUpdates.ts";
 import { openCodeTools, OUTPUT_LIMITS, WORKSPACE_ROOT } from "./tools.ts";
 import type { SessionRecord } from "./session.ts";
 import { RunOutcome } from "./Turn.ts";
@@ -22,6 +24,45 @@ const outcomeOf = ({ status, reason }: OpenCodeOperationResult): RunOutcome =>
     : reason === "interrupted"
       ? RunOutcome.Aborted()
       : RunOutcome.Failed({ reason: reason ?? "unanswered" });
+
+/**
+ * The session updates of the running turn already sent, by what makes them: a tool call's start or end, or a text or
+ * reasoning part once it ended. Kept so a turn caught up after a restart sends none of them twice.
+ */
+const PUBLISHED_KEY = "opencode/published";
+type Published = { readonly operationId: string; readonly keys: ReadonlyArray<string> };
+
+const keyOf = (event: OpenCodeSessionEvent): string | undefined => {
+  switch (event.type) {
+    case "tool_start":
+      return `start/${event.toolCallId}`;
+    case "tool_end":
+      return `end/${event.toolCallId}`;
+    case "text_delta":
+    case "text_end":
+      return `text/${event.messageId}/${event.ordinal}`;
+    case "reasoning_delta":
+    case "reasoning_end":
+      return `reasoning/${event.messageId}/${event.ordinal}`;
+    default:
+      return undefined;
+  }
+};
+
+/** Sends what OpenCode's durable log has of the turn of `operationId`, from the input that started it. */
+const catchUp = async (
+  session: OpenCodeSession,
+  operationId: string,
+  send: (event: OpenCodeSessionEvent) => void,
+) => {
+  const names = new Map<string, string>();
+  let inTurn = false;
+  for await (const logged of session.log()) {
+    inTurn ||= startsTurn(logged, operationId);
+    const event = inTurn ? fromLog(names, logged) : undefined;
+    if (event !== undefined) send(event);
+  }
+};
 
 /** OpenCode's tables, under the prefix the harness gives them, once OpenCode has opened in this object. */
 const opened = (storage: DurableObjectStorage): boolean =>
@@ -124,7 +165,7 @@ export const makeOpenCodeLoop = (host: LoopHost): Loop => {
     return session.id;
   };
 
-  const run: Loop["run"] = async (record, prompt, operationId, signal, emit) => {
+  const run: Loop["run"] = async (record, prompt, operation, signal, emit) => {
     const session = harness.session(await openCodeSession(record));
     const settled = Promise.withResolvers<RunOutcome>();
     const stream = await session.events();
@@ -134,32 +175,58 @@ export const makeOpenCodeLoop = (host: LoopHost): Loop => {
       details.delete(toolCallId);
       return value;
     };
-    // The turn ends on the event that settles the submission, so every update of the run is sent before the reply.
-    stream.start((events) => {
-      for (const event of events) {
-        const [next, updates] = toOpenCodeUpdates(streamed, event, record.cwd, take);
-        streamed = next;
-        for (const update of updates) emit(update);
-        if (event.type === "operation_end" && event.result.operationId === operationId) {
-          settled.resolve(outcomeOf(event.result));
-        }
-        if (event.type === "fault" && event.code === "events_failed") {
-          settled.resolve(RunOutcome.Failed({ reason: `event stream failed: ${event.message}` }));
-        }
+    const kept = host.storage.kv.get<Published>(PUBLISHED_KEY);
+    const published = new Set(kept?.operationId === operation.id ? kept.keys : []);
+    const send = (event: OpenCodeSessionEvent) => {
+      const key = keyOf(event);
+      if (key !== undefined && published.has(key)) return;
+      const [next, updates] = toOpenCodeUpdates(streamed, event, record.cwd, take);
+      streamed = next;
+      for (const update of updates) emit(update);
+      if (key === undefined || event.type === "text_delta" || event.type === "reasoning_delta") {
+        return;
       }
-    });
+      published.add(key);
+      host.storage.kv.put(PUBLISHED_KEY, { operationId: operation.id, keys: [...published] });
+    };
     const abort = () => {
       session.abort().catch((error: unknown) => console.error("OpenCode abort failed", error));
     };
     signal.addEventListener("abort", abort);
     try {
-      if (signal.aborted) return RunOutcome.Aborted();
-      await session.submit(prompt, { operationId });
+      let known = false;
+      if (operation.resumed) {
+        // OpenCode resumes a turn a restart cut off while it boots, before this stream attached, and may even finish it.
+        known = (await harness.pending({ session: session.id })).some(
+          (pending) => pending.operationId === operation.id,
+        );
+        const ended = known ? undefined : await session.wait(operation.id);
+        known ||= ended?.reason !== "not_found";
+        if (known) await catchUp(session, operation.id, send);
+        if (ended !== undefined && known) return outcomeOf(ended);
+      }
+      // The turn ends on the event that settles the submission, so every update of the run is sent before the reply.
+      stream.start((events) => {
+        for (const event of events) {
+          send(event);
+          if (event.type === "operation_end" && event.result.operationId === operation.id) {
+            settled.resolve(outcomeOf(event.result));
+          }
+          if (event.type === "fault" && event.code === "events_failed") {
+            settled.resolve(RunOutcome.Failed({ reason: `event stream failed: ${event.message}` }));
+          }
+        }
+      });
+      if (!known) {
+        if (signal.aborted) return RunOutcome.Aborted();
+        await session.submit(prompt, { operationId: operation.id });
+      }
       if (signal.aborted) abort();
       return await settled.promise;
     } finally {
       signal.removeEventListener("abort", abort);
       await stream.stop();
+      host.storage.kv.delete(PUBLISHED_KEY);
     }
   };
 

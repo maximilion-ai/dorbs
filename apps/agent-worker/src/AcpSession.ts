@@ -199,9 +199,9 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
       },
       replay: (connection) => this.outbox.replay(connection, this.history.pages()),
       send: this.outbox.send,
-      run: async (record, prompt, operationId, signal, emit) => {
+      run: async (record, prompt, operation, signal, emit) => {
         try {
-          return await this.loop.run(record, prompt, operationId, signal, emit);
+          return await this.loop.run(record, prompt, operation, signal, emit);
         } finally {
           // A turn can run on after its client is gone; the idle period starts when it ends.
           await this.touch();

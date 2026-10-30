@@ -19,7 +19,7 @@ const ROW_BYTES = 256 * 1024;
 const sessionWith = (
   emitted: ReadonlyArray<SessionUpdate>,
   remember: (message: string) => void,
-  run: SessionHost["run"] = async (_record, _prompt, _operationId, _signal, emit) => {
+  run: SessionHost["run"] = async (_record, _prompt, _operation, _signal, emit) => {
     for (const update of emitted) emit(update);
     return RunOutcome.Answered();
   },

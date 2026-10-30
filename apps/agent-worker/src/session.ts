@@ -46,6 +46,12 @@ export type OpenPrompt = {
   readonly started?: true;
 };
 
+/**
+ * One prompt's run in the agent loop. A run a restart cut off is `resumed`: the loop may have it already, and then
+ * waits for it and emits what is left of it instead of starting it again.
+ */
+export type Operation = { readonly id: string; readonly resumed: boolean };
+
 type Streamed = "agent_message_chunk" | "agent_thought_chunk";
 
 /** Streamed text of one kind, joined. */
@@ -71,14 +77,11 @@ export type SessionHost = {
   readonly replay: (connection: ConnectionId) => void;
   /** Sends one message to a connection, after every message sent before it. */
   readonly send: (connection: ConnectionId, message: string) => void;
-  /**
-   * Runs a prompt as operation `operationId` and resolves with how it ended. Given an operation the loop already has, as
-   * after a restart, it waits for that one instead and emits what is left of it.
-   */
+  /** Runs a prompt as `operation` and resolves with how it ended. */
   readonly run: (
     record: SessionRecord,
     prompt: string,
-    operationId: string,
+    operation: Operation,
     signal: AbortSignal,
     emit: Emit,
   ) => Promise<RunOutcome>;
@@ -326,7 +329,8 @@ export const makeSession = (host: SessionHost) => {
     const abort = new AbortController();
     const started = step(TurnEvent.Prompt({ requestId: taken.requestId, abort }));
     let open = taken;
-    if (Result.isSuccess(started) && open.started === undefined) {
+    const operation = { id: open.operationId, resumed: open.started !== undefined };
+    if (Result.isSuccess(started) && !operation.resumed) {
       for (const content of open.prompt) {
         publish({ sessionUpdate: "user_message_chunk", content }, open.connection);
       }
@@ -344,7 +348,7 @@ export const makeSession = (host: SessionHost) => {
         ? Effect.succeed(RunOutcome.Failed({ reason: `Unknown session ${host.sessionId}` }))
         : Effect.tryPromise({
             try: () =>
-              host.run(record, promptText(open.prompt), open.operationId, abort.signal, (update) =>
+              host.run(record, promptText(open.prompt), operation, abort.signal, (update) =>
                 publish(update),
               ),
             catch: (error) => error,

@@ -75,7 +75,8 @@ export const makePiLoop = (host: LoopHost): Loop => {
     return session.id;
   };
 
-  const run: Loop["run"] = async (record, prompt, operationId, signal, emit) => {
+  const run: Loop["run"] = async (record, prompt, operation, signal, emit) => {
+    const operationId = operation.id;
     const session = await piSession(record);
     const pi = harness.session(session);
     // Opening Pi watches a turn a restart cut off.
@@ -104,13 +105,15 @@ export const makePiLoop = (host: LoopHost): Loop => {
     };
     signal.addEventListener("abort", abort);
     try {
-      const pending = (await harness.pending({ session })).find(
-        (operation) => operation.operationId === operationId,
-      );
+      const pending = operation.resumed
+        ? (await harness.pending({ session })).find((known) => known.operationId === operationId)
+        : undefined;
       if (pending === undefined) {
-        // Pi has the operation only if a restart cut its turn off, and then it may have settled already.
-        const { status, reason } = await pi.wait(operationId);
-        if (reason !== "not_found") return outcomeOf(status, reason);
+        if (operation.resumed) {
+          // Pi may have settled the operation before the restart, or never got it.
+          const { status, reason } = await pi.wait(operationId);
+          if (reason !== "not_found") return outcomeOf(status, reason);
+        }
         if (signal.aborted) return RunOutcome.Aborted();
         await pi.submit(prompt, { operationId, whenBusy: "reject" });
       }
