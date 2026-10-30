@@ -30,6 +30,8 @@ it("finds every module specifier that can resolve outside the repo, wherever Typ
     'const message = "from here";',
     '/// <reference PATH="/etc/o" />',
     "// @jsxImportSource *../../../../p",
+    '/**@jsxImportSource preact*/const r = import("/etc/r");',
+    'const s = "from "; import("/etc/s");',
   ].join("\n");
   assert.deepStrictEqual(at(text), [
     [1, 20, "/Users/op/secret"],
@@ -47,5 +49,7 @@ it("finds every module specifier that can resolve outside the repo, wherever Typ
     [17, 16, "\\x2fetc/n"],
     [19, 22, "/etc/o"],
     [20, 21, "*../../../../p"],
+    [21, 47, "/etc/r"],
+    [22, 28, "/etc/s"],
   ]);
 });
