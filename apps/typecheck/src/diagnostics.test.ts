@@ -1,8 +1,9 @@
 import { assert, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
 
 import { RelativePath, ToolName } from "@dorbs/protocol/typecheck";
 
-import { parseTsrs } from "./diagnostics.ts";
+import { parseOxlint, parseTsrs } from "./diagnostics.ts";
 
 it("keeps indented lines with their message and withholds every line of an outside error", () => {
   const output = [
@@ -55,3 +56,34 @@ it("keeps indented lines with their message and withholds every line of an outsi
     },
   ]);
 });
+
+// SvelteKit's .svelte fixtures: oxlint reports a parse error, which has no rule and so no code.
+it.effect("keeps an oxlint parse error, which has no code", () =>
+  Effect.gen(function* () {
+    const diagnostics = yield* parseOxlint(
+      JSON.stringify({
+        diagnostics: [
+          {
+            message:
+              "Expected a semicolon or an implicit semicolon after a statement, but found none",
+            severity: "error",
+            help: "Try inserting a semicolon here",
+            filename: "src/lib/Plain.svelte",
+            labels: [{ span: { offset: 141, length: 0, line: 9, column: 14 } }],
+          },
+        ],
+      }),
+    );
+    assert.deepStrictEqual(diagnostics, [
+      {
+        tool: ToolName.make("oxlint"),
+        path: RelativePath.make("src/lib/Plain.svelte"),
+        line: 9,
+        column: 14,
+        code: "",
+        message: "Expected a semicolon or an implicit semicolon after a statement, but found none",
+        severity: "error",
+      },
+    ]);
+  }),
+);
