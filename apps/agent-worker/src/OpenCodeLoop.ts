@@ -1,5 +1,4 @@
 import type { Plugin } from "@opencode/plugin";
-import { OpenCodeWorkerd } from "@opencode/sdk/workerd";
 import {
   OpenCodeHarness,
   type OpenCodeHarnessOptions,
@@ -81,6 +80,8 @@ export const makeOpenCodeLoop = (host: LoopHost): Loop => {
           });
         }
         await host.workspace.fs.mkdir(WORKSPACE_ROOT, { recursive: true });
+        // Loaded on a session's first prompt, so an isolate that serves only Pi never evaluates OpenCode.
+        const { OpenCodeWorkerd } = await import("@opencode/sdk/workerd");
         return OpenCodeWorkerd.create({
           storage,
           // The bundled model catalog has our model; a refresh would fetch models.opencode.ai on every open.
