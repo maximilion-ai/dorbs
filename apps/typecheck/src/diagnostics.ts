@@ -65,7 +65,8 @@ const OxlintOutput = Schema.Struct({
   diagnostics: Schema.Array(
     Schema.Struct({
       message: Schema.String,
-      code: Schema.String,
+      // A parse error has no rule, so no code.
+      code: Schema.optionalKey(Schema.String),
       severity: Schema.String,
       filename: RelativePath,
       labels: Schema.Array(
@@ -84,7 +85,7 @@ export const parseOxlint = Effect.fn("parseOxlint")(function* (output: string) {
     path: diagnostic.filename,
     line: Math.max(1, diagnostic.labels[0]?.span.line ?? 1),
     column: Math.max(1, diagnostic.labels[0]?.span.column ?? 1),
-    code: diagnostic.code,
+    code: diagnostic.code ?? "",
     message: diagnostic.message,
     severity: diagnostic.severity === "error" ? "error" : "warning",
   }));

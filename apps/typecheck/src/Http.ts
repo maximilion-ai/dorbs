@@ -15,6 +15,7 @@ import { Action, ActionResponse, Sha256 } from "@dorbs/protocol/typecheck";
 import * as ActionCache from "./ActionCache.ts";
 import * as BlobStore from "./BlobStore.ts";
 import * as Checker from "./Checker.ts";
+import * as CheckTrees from "./CheckTrees.ts";
 import * as Checkouts from "./Checkouts.ts";
 import * as Installs from "./Installs.ts";
 import * as ServiceConfig from "./ServiceConfig.ts";
@@ -75,6 +76,8 @@ const routes = HttpRouter.use(
             Effect.succeed(HttpServerResponse.text(error.message, { status: 400 })),
           InstallFailed: (error) =>
             Effect.succeed(HttpServerResponse.text(error.message, { status: 422 })),
+          UnsupportedPackageManager: (error) =>
+            Effect.succeed(HttpServerResponse.text(error.message, { status: 422 })),
           UnsafeConfig: (error) =>
             Effect.succeed(HttpServerResponse.text(error.message, { status: 422 })),
           FetchFailed: (error) =>
@@ -89,7 +92,9 @@ const routes = HttpRouter.use(
 export const layer = routes.pipe(
   Layer.provide(
     Checker.layer.pipe(
-      Layer.provideMerge(Layer.mergeAll(ActionCache.layer, Checkouts.layer, Installs.layer)),
+      Layer.provideMerge(
+        Layer.mergeAll(ActionCache.layer, Checkouts.layer, Installs.layer, CheckTrees.layer),
+      ),
       Layer.provideMerge(BlobStore.layer),
       Layer.provideMerge(Storage.layer),
       Layer.provideMerge(ServiceConfig.layer),

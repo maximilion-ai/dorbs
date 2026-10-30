@@ -47,21 +47,39 @@ const make = Effect.gen(function* () {
     entries.set(file, { bytes, used });
   };
 
-  // Hard links into the pnpm store count in full, so installs weigh more than they free.
+  // Hard links into the pnpm store count in full, so installs weigh more than they free. A pnpm
+  // install also links to its siblings, in cycles, so the walk never follows a link, and counts a
+  // file that two hard links name once.
   const sizeOf = Effect.fn("Storage.sizeOf")(function* (target: string) {
-    const info = yield* fs.stat(target);
-    if (info.type !== "Directory") return Number(info.size);
-    const names = yield* fs.readDirectory(target, { recursive: true });
-    const sizes = yield* Effect.forEach(
-      names,
-      (name) =>
-        fs.stat(path.join(target, name)).pipe(
-          Effect.map((entry) => (entry.type === "File" ? Number(entry.size) : 0)),
-          Effect.orElseSucceed(() => 0),
-        ),
-      { concurrency: 32 },
-    );
-    return sizes.reduce((sum, size) => sum + size, 0);
+    const seen = new Set<string>();
+    let total = 0;
+    // One directory level at a time.
+    let level: ReadonlyArray<string> = [target];
+    while (level.length > 0) {
+      const children = yield* Effect.forEach(
+        level,
+        (file) =>
+          fs.lstat(file).pipe(
+            Effect.flatMap((info) => {
+              if (info.type === "Directory") {
+                return fs
+                  .readDirectory(file)
+                  .pipe(Effect.map((names) => names.map((name) => path.join(file, name))));
+              }
+              const inode = `${info.dev}:${Option.getOrElse(info.ino, () => file)}`;
+              if (info.type === "File" && !seen.has(inode)) {
+                seen.add(inode);
+                total += Number(info.size);
+              }
+              return Effect.succeed([]);
+            }),
+            Effect.orElseSucceed(() => []),
+          ),
+        { concurrency: 32 },
+      );
+      level = children.flat();
+    }
+    return total;
   });
 
   const record: Storage["Service"]["record"] = Effect.fn("Storage.record")(function* (target) {

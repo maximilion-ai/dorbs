@@ -4,6 +4,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Schema from "effect/Schema";
@@ -12,7 +13,7 @@ import * as Semaphore from "effect/Semaphore";
 import { Sha256 } from "@dorbs/protocol/typecheck";
 
 import type { Checkout } from "./Checkouts.ts";
-import { installWorkspace } from "./pnpmWorkspace.ts";
+import { installWorkspace, patchFiles } from "./pnpmWorkspace.ts";
 import { runProcess } from "./runProcess.ts";
 import { ServiceConfig } from "./ServiceConfig.ts";
 import * as SingleFlight from "./SingleFlight.ts";
@@ -27,11 +28,22 @@ export class InstallFailed extends Schema.TaggedError<InstallFailed>()("InstallF
   }
 }
 
+export class UnsupportedPackageManager extends Schema.TaggedError<UnsupportedPackageManager>()(
+  "UnsupportedPackageManager",
+  { name: Schema.String },
+) {
+  override get message(): string {
+    return `The commit pins the package manager ${this.name}; the service installs with pnpm only.`;
+  }
+}
+
 export class Installs extends Context.Service<
   Installs,
   {
     /** Returns the directory holding node_modules for the checkout's lockfile. */
-    readonly ensure: (checkout: Checkout) => Effect.Effect<string, InstallFailed>;
+    readonly ensure: (
+      checkout: Checkout,
+    ) => Effect.Effect<string, InstallFailed | UnsupportedPackageManager>;
   }
 >()("dorbs/typecheck/Installs") {}
 
@@ -57,26 +69,47 @@ const make = Effect.gen(function* () {
   // Installs run before a check takes its slot, so they get their own bound.
   const slots = yield* Semaphore.make(2);
 
-  const install = Effect.fn("Installs.install")(function* (checkout: Checkout) {
-    const dir = path.join(root, checkout.lockfile);
+  const install = Effect.fn("Installs.install")(function* (checkout: Checkout, key: string) {
+    const dir = path.join(root, key);
     if (yield* fs.exists(dir).pipe(Effect.orDie)) return dir;
+    const read = (file: string) =>
+      fs
+        .readFileString(path.join(checkout.dir, file))
+        .pipe(Effect.orElseSucceed((): string | undefined => undefined));
+    const workspace = yield* read("pnpm-workspace.yaml");
+    const patches = patchFiles(yield* read("package.json"), workspace);
+    if (patches.refused.length > 0) {
+      return yield* new InstallFailed({
+        lockfile: checkout.lockfile,
+        output: `The commit's pnpm config names patches the service does not stage: ${patches.refused.join(", ")}`,
+      });
+    }
     const staging = path.join(root, `.staging-${NodeCrypto.randomUUID()}`);
     yield* Effect.gen(function* () {
       yield* fs.makeDirectory(staging);
+      const copy = (file: string) =>
+        fs
+          .makeDirectory(path.dirname(path.join(staging, file)), { recursive: true })
+          .pipe(
+            Effect.andThen(fs.copyFile(path.join(checkout.dir, file), path.join(staging, file))),
+          );
       // No .npmrc: its registry and pnpmfile settings would steer the shared install.
       for (const manifest of checkout.packages.map((dir) => path.join(dir, "package.json"))) {
-        yield* fs.makeDirectory(path.dirname(path.join(staging, manifest)), { recursive: true });
-        yield* fs.copyFile(path.join(checkout.dir, manifest), path.join(staging, manifest));
+        yield* copy(manifest);
+      }
+      // A missing patch is pnpm's to report.
+      for (const patch of patches.files) {
+        const info = yield* fs.stat(path.join(checkout.dir, patch)).pipe(Effect.option);
+        if (Option.isSome(info) && info.value.type === "File") yield* copy(patch);
       }
       const lockfile = path.join(checkout.dir, "pnpm-lock.yaml");
       yield* (yield* fs.exists(lockfile))
         ? fs.copyFile(lockfile, path.join(staging, "pnpm-lock.yaml"))
         : fs.writeFileString(path.join(staging, "pnpm-lock.yaml"), "");
-      const workspace = path.join(checkout.dir, "pnpm-workspace.yaml");
-      if (yield* fs.exists(workspace)) {
+      if (workspace !== undefined) {
         yield* fs.writeFileString(
           path.join(staging, "pnpm-workspace.yaml"),
-          installWorkspace(yield* fs.readFileString(workspace)),
+          installWorkspace(workspace),
         );
       }
     }).pipe(Effect.orDie);
@@ -93,7 +126,9 @@ const make = Effect.gen(function* () {
         "--store-dir",
         storeDir,
       ],
-      { timeout: processTimeout },
+      // pnpm runs the version the commit's packageManager pins, also when the host's config says
+      // otherwise. An older pnpm it switches to ignores the variable.
+      { env: { pnpm_config_pm_on_fail: "download" }, timeout: processTimeout },
     ).pipe(
       Effect.catchTags({
         PlatformError: (error) =>
@@ -114,8 +149,17 @@ const make = Effect.gen(function* () {
     return dir;
   });
 
-  const ensure: Installs["Service"]["ensure"] = (checkout) =>
-    once(checkout.lockfile, slots.withPermit(install(checkout))).pipe(Effect.tap(storage.touch));
+  const ensure: Installs["Service"]["ensure"] = (checkout) => {
+    const manager = checkout.packageManager?.replace(/@.*$/, "");
+    if (manager !== undefined && manager !== "pnpm") {
+      return Effect.fail(new UnsupportedPackageManager({ name: manager }));
+    }
+    // The pinned pnpm runs the install, so one lockfile under two pins makes two installs.
+    const key = NodeCrypto.createHash("sha256")
+      .update(`${checkout.lockfile}\n${checkout.packageManager ?? ""}`)
+      .digest("hex");
+    return once(key, slots.withPermit(install(checkout, key))).pipe(Effect.tap(storage.touch));
+  };
 
   return Installs.of({ ensure });
 });

@@ -7,6 +7,31 @@ import { RelativePath } from "@dorbs/protocol/typecheck";
 
 import { leavesRepo, specifierLeavesRepo } from "./repoPaths.ts";
 
+/** The index past the comment that starts at `i`, or `i` when none does. */
+const skipComment = (text: string, i: number): number => {
+  if (text.startsWith("//", i)) {
+    // Any line terminator ends it, as in TypeScript.
+    const end = text.slice(i).search(/[\n\r\u2028\u2029]/);
+    return end === -1 ? text.length : i + end;
+  }
+  if (text.startsWith("/*", i)) {
+    const end = text.indexOf("*/", i + 2);
+    return end === -1 ? text.length : end + 2;
+  }
+  return i;
+};
+
+/** The first character at or after `i` that is neither whitespace nor in a comment. */
+const nextToken = (text: string, i: number): string | undefined => {
+  while (i < text.length) {
+    const end = skipComment(text, i);
+    if (end !== i) i = end;
+    else if (/\s/.test(text[i] ?? "")) i += 1;
+    else return text[i];
+  }
+  return undefined;
+};
+
 // tsconfig files are JSON with comments and trailing commas; this drops both outside strings.
 const parseJsonc = (text: string): unknown => {
   let json = "";
@@ -16,19 +41,13 @@ const parseJsonc = (text: string): unknown => {
       while (end < text.length && text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
       json += text.slice(i, end + 1);
       i = end + 1;
-    } else if (text.startsWith("//", i)) {
-      const end = text.indexOf("\n", i);
-      i = end === -1 ? text.length : end;
-    } else if (text.startsWith("/*", i)) {
-      const end = text.indexOf("*/", i + 2);
-      i = end === -1 ? text.length : end + 2;
-    } else if (
-      text[i] === "," &&
-      /^\s*(?:\/\/[^\n]*\s*|\/\*[\s\S]*?\*\/\s*)*[}\]]/.test(text.slice(i + 1))
-    ) {
+    } else if (skipComment(text, i) !== i) {
+      i = skipComment(text, i);
+    } else if (text[i] === "," && [undefined, "}", "]"].includes(nextToken(text, i + 1))) {
       i += 1;
     } else {
-      json += text[i];
+      // TypeScript skips any Unicode space between tokens; JSON.parse knows only four.
+      json += /\s/.test(text[i] ?? "") ? " " : text[i];
       i += 1;
     }
   }

@@ -1,9 +1,10 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 
 import { RelativePath, ToolName } from "@dorbs/protocol/typecheck";
 
-import { TestServer, TSCONFIG, checkChange } from "./testServer.ts";
+import { Fixtures, TestServer, TSCONFIG, checkChange } from "./testServer.ts";
 
 const ZOD_PACKAGE = `{
   "name": "fixture",
@@ -68,6 +69,48 @@ it.live.skipIf(process.env["TYPECHECK_OFFLINE"] === "1")(
         TestServer({
           zod: {
             "package.json": ZOD_PACKAGE,
+            "pnpm-lock.yaml": ZOD_LOCKFILE,
+            "tsconfig.json": TSCONFIG,
+            "src/index.ts": "export {};\n",
+          },
+        }),
+      ),
+    ),
+  { timeout: 60_000 },
+);
+
+// The host's pnpm is newer; each install records the version that ran it.
+it.live.skipIf(process.env["TYPECHECK_OFFLINE"] === "1")(
+  "installs with the pnpm version the commit pins, apart from the same lockfile unpinned",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const responses = [yield* checkChange("pinned", {}), yield* checkChange("zod", {})];
+      assert.deepStrictEqual(
+        responses.map((response) => response._tag),
+        ["ActionResult", "ActionResult"],
+      );
+      const installs = `${(yield* Fixtures).dataDir}/installs`;
+      const versions = yield* Effect.forEach(yield* fs.readDirectory(installs), (install) =>
+        fs
+          .readFileString(`${installs}/${install}/node_modules/.modules.yaml`)
+          .pipe(Effect.map((modules) => modules.includes("pnpm@10.33.4"))),
+      );
+      assert.sameMembers(versions, [false, true]);
+    }).pipe(
+      Effect.provide(
+        TestServer({
+          zod: {
+            "package.json": ZOD_PACKAGE,
+            "pnpm-lock.yaml": ZOD_LOCKFILE,
+            "tsconfig.json": TSCONFIG,
+            "src/index.ts": "export {};\n",
+          },
+          pinned: {
+            "package.json": ZOD_PACKAGE.replace(
+              '"private": true,',
+              '"private": true,\n  "packageManager": "pnpm@10.33.4",',
+            ),
             "pnpm-lock.yaml": ZOD_LOCKFILE,
             "tsconfig.json": TSCONFIG,
             "src/index.ts": "export {};\n",

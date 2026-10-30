@@ -1,4 +1,5 @@
 import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 
 import { assert, it } from "@effect/vitest";
@@ -584,10 +585,24 @@ it.live("runs the tools once for identical concurrent actions", () =>
   }).pipe(Effect.provide(Server)),
 );
 
-it.live("clones the checkout into each check instead of copying its bytes", () =>
+it.live("clones the checkout once and lays each check's changes over the same tree", () =>
   Effect.gen(function* () {
-    const response = yield* checkChange("fixture", { files: { "src/e.ts": "export {};\n" } });
-    assert.strictEqual(response._tag, "ActionResult");
+    const C_TS = { ...BAD_TS, path: RelativePath.make("src/new/c.ts") };
+    const responses = [
+      yield* checkChange("fixture", {
+        files: {
+          "src/a.ts": 'export const a: number = "a";\n',
+          "src/new/c.ts": 'export const c: number = "c";\n',
+        },
+        deleted: ["src/bad.ts"],
+      }),
+      yield* checkChange("fixture", { files: { "src/e.ts": "export {};\n" } }),
+      yield* checkChange("fixture", { deleted: ["src/bad.ts"] }),
+    ];
+    assert.deepStrictEqual(
+      responses.map((response) => response._tag === "ActionResult" && response.diagnostics),
+      [[{ ...BAD_TS, path: RelativePath.make("src/a.ts") }, C_TS], [BAD_TS], []],
+    );
     const clone = process.platform === "darwin" ? "cp -cR " : "cp -R --reflink=auto ";
     assert.lengthOf(
       (yield* spawned).filter((line) => line.startsWith(clone)),
@@ -632,4 +647,156 @@ it.live("evicts what was used least recently past CACHE_MAX_BYTES, and rebuilds 
       ),
     ),
   ),
+);
+
+// SvelteKit's tests have a route directory named package.json.
+it.live("treats only a file named package.json as a manifest", () =>
+  Effect.gen(function* () {
+    const response = yield* checkChange("routes", {});
+    assert.deepStrictEqual(response._tag === "ActionResult" && response.diagnostics, []);
+  }).pipe(
+    Effect.provide(
+      TestServer({
+        routes: {
+          "package.json": EMPTY_PACKAGE,
+          "tsconfig.json": TSCONFIG,
+          "src/routes/package.json/page.ts": "export const page = 1;\n",
+        },
+      }),
+    ),
+  ),
+);
+
+const PATCH = "--- a/index.js\n+++ b/index.js\n@@ -1 +1 @@\n-a\n+b\n";
+
+it.live("installs with the patch files the commit's pnpm config names", () =>
+  Effect.gen(function* () {
+    const response = yield* checkChange("patched", {});
+    assert.deepStrictEqual(response._tag === "ActionResult" && response.diagnostics, []);
+  }).pipe(
+    Effect.provide(
+      TestServer({
+        patched: {
+          "package.json": EMPTY_PACKAGE,
+          "pnpm-workspace.yaml":
+            'packages: ["."]\npatchedDependencies:\n  nothing@1.0.0: patches/nothing.patch\n',
+          "pnpm-lock.yaml": `lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+patchedDependencies:
+  nothing@1.0.0: ecca42a505ca8368222ce6cf242af2fa35f9a390cb69a33277731d3fbaef38f0
+
+importers:
+
+  .: {}
+`,
+          "patches/nothing.patch": PATCH,
+          "tsconfig.json": TSCONFIG,
+          "src/a.ts": "export const a = 1;\n",
+        },
+      }),
+    ),
+  ),
+);
+
+it.live(
+  "answers 422 for a patch path outside the repo or of pnpm's config, and installs nothing",
+  () =>
+    Effect.gen(function* () {
+      const response = yield* postCheckRaw("escaping", {});
+      assert.deepStrictEqual(
+        [response.status, (yield* response.text).split("\n").at(-1)],
+        [
+          422,
+          "The commit's pnpm config names patches the service does not stage: a: ../../outside.patch, b: .npmrc",
+        ],
+      );
+      assert.deepStrictEqual(
+        (yield* spawned).filter((line) => line.startsWith("pnpm")),
+        [],
+      );
+    }).pipe(
+      Effect.provide(
+        TestServer({
+          escaping: {
+            "package.json": EMPTY_PACKAGE,
+            "pnpm-workspace.yaml":
+              'packages: ["."]\npatchedDependencies:\n  a: ../../outside.patch\n  b: .npmrc\n',
+            ".npmrc": "registry=http://127.0.0.1:9/\n",
+            "tsconfig.json": TSCONFIG,
+            "src/a.ts": "export const a = 1;\n",
+          },
+        }),
+      ),
+    ),
+);
+
+it.live("answers 422 naming the package manager for a commit that pins another", () =>
+  Effect.gen(function* () {
+    const response = yield* postCheckRaw("yarn", {});
+    assert.deepStrictEqual(
+      [response.status, yield* response.text],
+      [422, "The commit pins the package manager yarn; the service installs with pnpm only."],
+    );
+    assert.deepStrictEqual(
+      (yield* spawned).filter((line) => line.startsWith("pnpm")),
+      [],
+    );
+  }).pipe(
+    Effect.provide(
+      TestServer({
+        yarn: {
+          "package.json": '{ "name": "fixture", "packageManager": "yarn@1.22.22" }\n',
+          "tsconfig.json": TSCONFIG,
+          "src/a.ts": "export const a = 1;\n",
+        },
+      }),
+    ),
+  ),
+);
+
+// Whether the temp dir's filesystem finds a file by a name in another case, as APFS does by default.
+const caseInsensitive = (() => {
+  const dir = NodeFS.mkdtempSync(`${NodeOS.tmpdir()}/case-`);
+  NodeFS.writeFileSync(`${dir}/a`, "");
+  const found = NodeFS.existsSync(`${dir}/A`);
+  NodeFS.rmSync(dir, { recursive: true });
+  return found;
+})();
+
+// Only a filesystem that ignores case can name src/Upper.ts as src/upper.ts.
+it.live.skipIf(!caseInsensitive)(
+  "starts the next check from the commit after a change that names a file in another case",
+  () =>
+    Effect.gen(function* () {
+      const UPPER = {
+        tool: ToolName.make("oxlint"),
+        path: RelativePath.make("src/Upper.ts"),
+        line: 1,
+        column: 1,
+        code: "eslint(no-debugger)",
+        message: "`debugger` statement is not allowed",
+        severity: "warning",
+      } as const;
+      const first = yield* checkChange("cased", { deleted: ["src/upper.ts"] });
+      const second = yield* checkChange("cased", {});
+      assert.deepStrictEqual(
+        [first, second].map((response) => response._tag === "ActionResult" && response.diagnostics),
+        [[], [UPPER]],
+      );
+    }).pipe(
+      Effect.provide(
+        TestServer({
+          cased: {
+            "package.json": EMPTY_PACKAGE,
+            "tsconfig.json": TSCONFIG,
+            "src/a.ts": "export const a = 1;\n",
+            "src/Upper.ts": "debugger;\nexport const u = 1;\n",
+          },
+        }),
+      ),
+    ),
 );

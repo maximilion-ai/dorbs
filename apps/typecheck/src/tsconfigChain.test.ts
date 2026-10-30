@@ -118,3 +118,42 @@ it.effect("names every option in the chain that writes files or reaches outside 
     ]);
   }),
 );
+
+// The shapes of create-t3-app's and elysia's tsconfig.json: a comma, then a comment that holds ] or }.
+it.effect("keeps a comma that a comment holding a bracket follows", () =>
+  Effect.gen(function* () {
+    const unsafe = yield* unsafeOf({
+      "tsconfig.json": `{
+        "compilerOptions": {
+          "noUncheckedIndexedAccess": true, // TLDR - (array[0]) forces <T | undefined>
+          "outDir": "dist",
+          "moduleResolution": "bundler",          /* Specify how TypeScript looks up a file. */
+          // "paths": {},                         /* Remap imports. */
+          // "types": ["bun-types"],              /* Type packages. */
+          "types": ["../evil"]
+        },
+        "exclude": ["node_modules"]
+        // "include": ["src/**/*"]
+      }`,
+    });
+    assert.deepStrictEqual(unsafe, [
+      "tsconfig.json: compilerOptions.outDir",
+      "tsconfig.json: compilerOptions.types",
+    ]);
+  }),
+);
+
+// TypeScript ends a line comment at any line terminator, so an option after a lone \r is live.
+it.effect("ends a line comment where TypeScript does", () =>
+  Effect.gen(function* () {
+    const unsafe = yield* unsafeOf({
+      "tsconfig.json":
+        '{ "compilerOptions": { // a\r"outDir": "a", // b\u2028"declarationDir": "b", // c\u2029"outFile": "c" } }',
+    });
+    assert.deepStrictEqual(unsafe, [
+      "tsconfig.json: compilerOptions.declarationDir",
+      "tsconfig.json: compilerOptions.outDir",
+      "tsconfig.json: compilerOptions.outFile",
+    ]);
+  }),
+);
