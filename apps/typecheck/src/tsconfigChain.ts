@@ -10,8 +10,9 @@ import { leavesRepo, specifierLeavesRepo } from "./repoPaths.ts";
 /** The index past the comment that starts at `i`, or `i` when none does. */
 const skipComment = (text: string, i: number): number => {
   if (text.startsWith("//", i)) {
-    const end = text.indexOf("\n", i);
-    return end === -1 ? text.length : end;
+    // Any line terminator ends it, as in TypeScript.
+    const end = text.slice(i).search(/[\n\r\u2028\u2029]/);
+    return end === -1 ? text.length : i + end;
   }
   if (text.startsWith("/*", i)) {
     const end = text.indexOf("*/", i + 2);
@@ -45,7 +46,8 @@ const parseJsonc = (text: string): unknown => {
     } else if (text[i] === "," && [undefined, "}", "]"].includes(nextToken(text, i + 1))) {
       i += 1;
     } else {
-      json += text[i];
+      // TypeScript skips any Unicode space between tokens; JSON.parse knows only four.
+      json += /\s/.test(text[i] ?? "") ? " " : text[i];
       i += 1;
     }
   }

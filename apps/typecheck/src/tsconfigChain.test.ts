@@ -142,3 +142,18 @@ it.effect("keeps a comma that a comment holding a bracket follows", () =>
     ]);
   }),
 );
+
+// TypeScript ends a line comment at any line terminator, so an option after a lone \r is live.
+it.effect("ends a line comment where TypeScript does", () =>
+  Effect.gen(function* () {
+    const unsafe = yield* unsafeOf({
+      "tsconfig.json":
+        '{ "compilerOptions": { // a\r"outDir": "a", // b\u2028"declarationDir": "b", // c\u2029"outFile": "c" } }',
+    });
+    assert.deepStrictEqual(unsafe, [
+      "tsconfig.json: compilerOptions.declarationDir",
+      "tsconfig.json: compilerOptions.outDir",
+      "tsconfig.json: compilerOptions.outFile",
+    ]);
+  }),
+);
