@@ -22,6 +22,8 @@ const PRAGMA_END = /\s|\*\//g;
 // No real module specifier comes close; a longer one counts as outside rather than being read.
 const MAX_SPECIFIER = 4096;
 const TOO_LONG = "a specifier over 4096 characters";
+const CONTINUED = "a string continued on the next line";
+const WHITESPACE = /\s/;
 
 export type OutsideModule = {
   readonly line: number;
@@ -63,30 +65,41 @@ export const outsideModules = (path: string, text: string): ReadonlyArray<Outsid
     return found[rank(found, from)] ?? text.length;
   };
 
-  const skipGap = (from: number): number => {
-    let i = from;
-    while (i < text.length) {
-      if (/\s/.test(text.charAt(i))) i += 1;
-      else if (text.startsWith("/*", i)) i = next("*/", i + 2) + 2;
-      else if (text.startsWith("//", i)) i = next("\n", i + 2);
-      else break;
-    }
-    return i;
-  };
+  // Where the whitespace and comments that start at each index end, filled right to left, so a
+  // long gap is walked once however many keywords lead into it.
+  const gapEnd = new Int32Array(text.length + 1).fill(text.length);
+  for (let i = text.length - 1; i >= 0; i--) {
+    if (WHITESPACE.test(text.charAt(i))) gapEnd[i] = gapEnd[i + 1] ?? text.length;
+    else if (text.startsWith("/*", i)) {
+      gapEnd[i] = gapEnd[Math.min(text.length, next("*/", i + 2) + 2)] ?? text.length;
+    } else if (text.startsWith("//", i)) gapEnd[i] = gapEnd[next("\n", i + 2)] ?? text.length;
+    else gapEnd[i] = i;
+  }
+  const skipGap = (from: number): number => gapEnd[from] ?? text.length;
 
-  // The text of the string literal that opens at `open`, or undefined when none does.
+  // The text of the string literal that opens at `open`, or undefined when none does. An
+  // unterminated string reads to the end of its line, since TypeScript may resolve that too.
   const quoted = (open: number): string | undefined => {
     const quote = text.charAt(open);
     if (quote !== '"' && quote !== "'" && quote !== "`") return undefined;
     const close = next(quote, open + 1);
-    // Only a template literal may span lines.
-    if (close === text.length || (quote !== "`" && next("\n", open + 1) < close)) return undefined;
-    return close - open - 1 > MAX_SPECIFIER ? TOO_LONG : text.slice(open + 1, close);
+    const newline = next("\n", open + 1);
+    const stop = quote !== "`" && newline < close ? newline : close;
+    const value = text.slice(open + 1, Math.min(stop, open + 2 + MAX_SPECIFIER)).replace(/\r$/, "");
+    if (value.length > MAX_SPECIFIER) return TOO_LONG;
+    // A backslash before the newline continues the string on the next line.
+    return stop === newline && value.endsWith("\\") ? CONTINUED : value;
   };
 
   const found: Array<OutsideModule> = [];
   const report = (start: number, specifier: string) => {
-    if (specifier !== TOO_LONG && !specifierLeavesRepo(path, specifier)) return;
+    if (
+      specifier !== TOO_LONG &&
+      specifier !== CONTINUED &&
+      !specifierLeavesRepo(path, specifier)
+    ) {
+      return;
+    }
     const newlines = all("\n");
     const before = rank(newlines, start);
     found.push({

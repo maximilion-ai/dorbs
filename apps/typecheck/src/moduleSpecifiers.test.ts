@@ -32,6 +32,9 @@ it("finds every module specifier that can resolve outside the repo, wherever Typ
     "// @jsxImportSource *../../../../p",
     '/**@jsxImportSource preact*/const r = import("/etc/r");',
     'const s = "from "; import("/etc/s");',
+    'import("/etc/\\',
+    't");',
+    'import "/etc/u',
   ].join("\n");
   assert.deepStrictEqual(at(text), [
     [1, 20, "/Users/op/secret"],
@@ -51,6 +54,8 @@ it("finds every module specifier that can resolve outside the repo, wherever Typ
     [20, 21, "*../../../../p"],
     [21, 47, "/etc/r"],
     [22, 28, "/etc/s"],
+    [23, 9, "a string continued on the next line"],
+    [25, 9, "/etc/u"],
   ]);
 });
 
@@ -75,4 +80,8 @@ it("scans adversarial input in linear time", () => {
     ["/etc/x"],
   );
   assert.lengthOf(outsideModules("src/a.ts", fill('import("/a")')), 436_907);
+  assert.deepStrictEqual(
+    outsideModules("src/a.ts", `${"// import\n".repeat(100_000)}${" ".repeat(5 * 1024 * 1024)}`),
+    [],
+  );
 });
