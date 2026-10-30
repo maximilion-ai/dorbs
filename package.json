@@ -8,6 +8,7 @@
     "live": "node scripts/live.ts",
     "load": "node scripts/load.ts",
     "bench": "node scripts/bench.ts",
+    "compare": "node scripts/compare.ts",
     "soak": "node scripts/soak.ts",
     "fmt": "vp fmt",
     "fmt:check": "vp fmt --check",
