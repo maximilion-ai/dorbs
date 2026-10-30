@@ -1,3 +1,6 @@
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -7,34 +10,35 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import { runProcess } from "./runProcess.ts";
 
-const isAlive = (pid: number) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
+// Resolves once every writer of the FIFO is gone, which for a process holding it means it died.
+const writersGone = (fifo: string) =>
+  new Promise<void>((resolve) => {
+    const stream = NodeFS.createReadStream(fifo);
+    stream.on("data", () => {});
+    stream.on("close", () => resolve());
+  });
 
 it.live("kills the whole process group when a process outlives its deadline", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const dir = yield* fs.makeTempDirectoryScoped();
+    NodeChildProcess.execFileSync("mkfifo", [`${dir}/child.fifo`]);
+    const childGone = writersGone(`${dir}/child.fifo`);
     // The shell and its child both ignore SIGTERM, so only SIGKILL ends them.
     const exit = yield* runProcess(
       spawner,
       dir,
       "sh",
-      ["-c", 'trap "" TERM; sleep 60 & echo $! > child.pid; wait'],
+      ["-c", 'trap "" TERM; sleep 60 3>child.fifo & wait'],
       { timeout: "200 millis" },
     ).pipe(Effect.exit);
-    const child = Number((yield* fs.readFileString(`${dir}/child.pid`)).trim());
     assert.include(
       Exit.isFailure(exit) ? String(exit.cause) : "succeeded",
       "sh timed out after 200ms",
     );
-    assert.isFalse(isAlive(child), "the child the shell started is gone too");
+    // A child the kill missed would hold the FIFO open for a minute, past the test timeout.
+    yield* Effect.promise(() => childGone);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
