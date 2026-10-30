@@ -34,6 +34,8 @@ export class ServiceConfig extends Context.Service<
     readonly processTimeout: Duration.Duration;
     /** How many bytes of blobs, results, checkouts and installs to keep before evicting. */
     readonly cacheMaxBytes: number;
+    /** Whether tsrs and oxlint run in a macOS sandbox that confines their reads and writes. */
+    readonly confine: boolean;
   }
 >()("dorbs/typecheck/ServiceConfig") {}
 
@@ -62,6 +64,7 @@ const make = Effect.gen(function* () {
       Config.withDefault(Duration.minutes(10)),
     ),
     cacheMaxBytes: Config.Number("CACHE_MAX_BYTES").pipe(Config.withDefault(20 * 1024 ** 3)),
+    confine: Config.Boolean("TYPECHECK_CONFINE").pipe(Config.withDefault(false)),
   });
   const registrations = yield* decodeRegistrations(
     yield* (yield* FileSystem.FileSystem).readFileString(config.reposFile),
@@ -88,6 +91,7 @@ const make = Effect.gen(function* () {
     repos: new Map(repos.map((repo) => [repo.id, repo])),
     processTimeout: config.processTimeout,
     cacheMaxBytes: config.cacheMaxBytes,
+    confine: config.confine,
   };
 });
 

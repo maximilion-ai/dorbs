@@ -30,6 +30,7 @@ import { parseOxlint, parseTsrs } from "./diagnostics.ts";
 import { type InstallFailed, Installs } from "./Installs.ts";
 import { outsideModules } from "./moduleSpecifiers.ts";
 import { runProcess } from "./runProcess.ts";
+import { sandboxProfile, toolchainPaths } from "./sandbox.ts";
 import { type Repo, ServiceConfig } from "./ServiceConfig.ts";
 import * as SingleFlight from "./SingleFlight.ts";
 import { Storage } from "./Storage.ts";
@@ -91,12 +92,17 @@ const make = Effect.gen(function* () {
   const checkouts = yield* Checkouts;
   const installs = yield* Installs;
   const storage = yield* Storage;
-  const { dataDir, repos, processTimeout } = yield* ServiceConfig;
+  const { dataDir, repos, processTimeout, confine } = yield* ServiceConfig;
+  if (confine && process.platform !== "darwin") {
+    return yield* Effect.die(new Error("TYPECHECK_CONFINE=1 needs macOS sandbox-exec."));
+  }
+  const toolchain = confine ? toolchainPaths() : [];
   const checksDir = path.join(dataDir, "checks");
   yield* fs.makeDirectory(checksDir, { recursive: true });
   // A client .oxlintrc.json could load jsPlugins, which run as code; only this config applies.
   const oxlintConfig = path.join(dataDir, "oxlintrc.json");
   yield* fs.writeFileString(oxlintConfig, "{}");
+  const realOxlintConfig = yield* fs.realPath(oxlintConfig);
   // The action cache keeps results, so a flight keeps none once it lands.
   const flights = yield* SingleFlight.make<
     ActionResponse,
@@ -188,39 +194,69 @@ const make = Effect.gen(function* () {
         yield* fs.symlink(modules, path.join(dir, pkg, "node_modules"));
       }
     }
+    const realDir = yield* fs.realPath(dir);
+    const realInstall = yield* fs.realPath(installDir);
+    // The sandbox sees real paths. A tool may read the check, its install and the toolchain, and
+    // write only a temp dir of its own.
+    const tmp = confine
+      ? yield* fs.realPath(yield* fs.makeTempDirectoryScoped({ directory: checksDir }))
+      : "";
+    const sandboxed = (command: string, args: ReadonlyArray<string>) =>
+      confine
+        ? ([
+            "sandbox-exec",
+            [
+              "-p",
+              sandboxProfile([realDir, realInstall, realOxlintConfig, ...toolchain], [tmp]),
+              command,
+              ...args,
+            ],
+          ] as const)
+        : ([command, args] as const);
+    // Homebrew's Node reads its OpenSSL config from outside the sandbox; it needs none.
+    const toolEnv = confine ? { TMPDIR: tmp, OPENSSL_CONF: "/dev/null" } : {};
     const [tsrs, oxlint] = yield* Effect.all(
       [
         runTool(
           dir,
-          "tsrs",
-          ["--noEmit", "-p", "tsconfig.json", "--pretty", "false", "--listFiles"],
+          ...sandboxed("tsrs", [
+            "--noEmit",
+            "-p",
+            "tsconfig.json",
+            "--pretty",
+            "false",
+            "--listFiles",
+          ]),
           [0, 1, 2],
           // tsrs sizes its rayon pool from this.
-          { RAYON_NUM_THREADS: String(budget.tsrsThreads) },
+          { ...toolEnv, RAYON_NUM_THREADS: String(budget.tsrsThreads) },
         ),
         runTool(
           dir,
-          "oxlint",
-          // oxlint skips node_modules only through a .gitignore, which a check dir lacks.
-          [
-            "--config",
-            oxlintConfig,
-            "--disable-nested-config",
-            "--format",
-            "json",
-            "--ignore-pattern",
-            "**/node_modules/**",
-            "--threads",
-            String(budget.oxlintThreads),
-          ],
+          ...sandboxed(
+            "oxlint",
+            // oxlint skips node_modules only through a .gitignore, which a check dir lacks.
+            [
+              "--config",
+              oxlintConfig,
+              "--disable-nested-config",
+              "--format",
+              "json",
+              "--ignore-pattern",
+              "**/node_modules/**",
+              "--threads",
+              String(budget.oxlintThreads),
+            ],
+          ),
           [0, 1],
+          toolEnv,
         ),
       ],
       { concurrency: "unbounded" },
     );
     // --listFiles prints each file of the program by absolute real path; module resolution can climb
     // past the check into any ancestor's node_modules, which no scan of the source can see.
-    const roots = [dir, installDir, yield* fs.realPath(dir), yield* fs.realPath(installDir)];
+    const roots = [dir, installDir, realDir, realInstall];
     const lib = yield* libDir;
     const read = tsrs.stdout.split("\n").filter((line) => line.startsWith("/"));
     const outside = read.filter(

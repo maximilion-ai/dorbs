@@ -41,6 +41,10 @@ Dependencies install once per lockfile hash (`pnpm install --frozen-lockfile --i
 
 `PROCESS_TIMEOUT` bounds every git, pnpm, tsrs and oxlint run and defaults to `10 minutes`. Past it the service kills the process's whole group, so a hung fetch answers 502, a hung install 422, and the next check tries again. The service reads at most 16 MiB of a process's stdout and of its stderr. At most two installs run at once. Checks share the cores: each gets 4 tsrs threads and 1 oxlint thread, and as many checks run at once as fit, so a 10-core machine runs 2.
 
+## Confinement
+
+tsrs and oxlint run as the service's user and read what a check points them at. The service refuses the known ways out (unsafe tsconfig options, outside imports, a program that read an outside file), but the operating system does not stop a read. `TYPECHECK_CONFINE=1` runs both tools under a macOS `sandbox-exec` profile: they may read the check, its install, the toolchain (this workspace's `node_modules`, Node and the Homebrew libraries it links) and system paths, and write only a temp directory of their own. They may still look up launchd services, which Node needs at startup. Off by default; on Linux the service refuses to start with it.
+
 ## Disk
 
 `CACHE_MAX_BYTES` caps the blobs, action results, checkouts and installs the service keeps, and defaults to 20 GiB. Past it, the next check first removes what was used least recently; it waits for running checks and holds new ones while it does. An evicted blob answers `MissingBlobs` again, and an evicted result, checkout or install is rebuilt on demand. Installs count their hard links into the pnpm store in full. The git caches and the pnpm store are not counted and still grow; prune them by hand (`pnpm store prune --store-dir $DATA_DIR/pnpm-store`).
