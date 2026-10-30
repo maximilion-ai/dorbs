@@ -18,6 +18,7 @@ import {
   type Diagnostic,
   type RejectReason,
   RelativePath,
+  type Sha256,
   ToolchainId,
   ToolName,
 } from "@dorbs/protocol/typecheck";
@@ -29,7 +30,8 @@ import { parseOxlint, parseTsrs } from "./diagnostics.ts";
 import { type InstallFailed, Installs } from "./Installs.ts";
 import { outsideModules } from "./moduleSpecifiers.ts";
 import { runProcess } from "./runProcess.ts";
-import { ServiceConfig } from "./ServiceConfig.ts";
+import { type Repo, ServiceConfig } from "./ServiceConfig.ts";
+import * as SingleFlight from "./SingleFlight.ts";
 import { toolBudget } from "./toolBudget.ts";
 
 export class UnsafeConfig extends Schema.TaggedError<UnsafeConfig>()("UnsafeConfig", {
@@ -85,6 +87,11 @@ const make = Effect.gen(function* () {
   // A client .oxlintrc.json could load jsPlugins, which run as code; only this config applies.
   const oxlintConfig = path.join(dataDir, "oxlintrc.json");
   yield* fs.writeFileString(oxlintConfig, "{}");
+  // The action cache keeps results, so a flight keeps none once it lands.
+  const flights = yield* SingleFlight.make<
+    ActionResponse,
+    InstallFailed | FetchFailed | UnsafeConfig
+  >(0);
   const budget = toolBudget(NodeOS.availableParallelism());
   const slots = yield* Semaphore.make(budget.checks);
 
@@ -224,16 +231,14 @@ const make = Effect.gen(function* () {
     return diagnostics;
   });
 
-  const run: Checker["Service"]["run"] = Effect.fn("Checker.run")(function* (action) {
-    if (!TOOLCHAINS.has(action.toolchain)) return rejected({ _tag: "UnknownToolchain" });
-    const repo = repos.get(action.repo);
-    if (repo === undefined) return rejected({ _tag: "UnknownRepo" });
-    const touched = [...action.files.map((file) => file.path), ...action.deleted];
-    const named = touched.filter(isProtectedPath);
-    if (named.length > 0) return rejected({ _tag: "ProtectedPaths", paths: named });
-    const digest = actionDigest(action);
+  const compute = Effect.fn("Checker.compute")(function* (
+    repo: Repo,
+    action: Action,
+    digest: Sha256,
+  ) {
     const cached = yield* cache.get(digest);
     if (cached !== undefined) return { ...cached, cached: true };
+    const touched = [...action.files.map((file) => file.path), ...action.deleted];
     const missing = yield* blobs.missing(action.files.map((file) => file.sha256));
     if (missing.length > 0) return { _tag: "MissingBlobs", sha256s: missing } as const;
     const outside = yield* outsideImports(action);
@@ -277,6 +282,20 @@ const make = Effect.gen(function* () {
     };
     yield* cache.put(digest, result);
     return result;
+  });
+
+  const run: Checker["Service"]["run"] = Effect.fn("Checker.run")(function* (action) {
+    if (!TOOLCHAINS.has(action.toolchain)) return rejected({ _tag: "UnknownToolchain" });
+    const repo = repos.get(action.repo);
+    if (repo === undefined) return rejected({ _tag: "UnknownRepo" });
+    const touched = [...action.files.map((file) => file.path), ...action.deleted];
+    const named = touched.filter(isProtectedPath);
+    if (named.length > 0) return rejected({ _tag: "ProtectedPaths", paths: named });
+    const digest = actionDigest(action);
+    const cached = yield* cache.get(digest);
+    if (cached !== undefined) return { ...cached, cached: true };
+    // Identical actions share one run; the run checks the cache again, in case one just landed.
+    return yield* flights(digest, compute(repo, action, digest));
   });
 
   return Checker.of({ run });

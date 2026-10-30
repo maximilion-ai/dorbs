@@ -10,16 +10,21 @@ type State<A, E> =
 
 /**
  * Runs work once per key. Concurrent callers share the run in flight and later callers get its
- * value. Runs fork into the scope that made the function, so a caller hanging up cancels nothing.
+ * value, for the `keep` keys that settled last. Runs fork into the scope that made the function,
+ * so a caller hanging up cancels nothing.
  */
-export const make = <A, E>() =>
+export const make = <A, E>(keep: number) =>
   Effect.all([Effect.scope, Ref.make(new Map<string, State<A, E>>())]).pipe(
     Effect.map(([scope, states]) => {
       const settle = (key: string, exit: Exit.Exit<A, E>) =>
         Ref.update(states, (map) => {
           const next = new Map(map);
-          if (Exit.isSuccess(exit)) next.set(key, { _tag: "Ready", value: exit.value });
-          else next.delete(key);
+          next.delete(key);
+          if (Exit.isSuccess(exit) && keep > 0) {
+            next.set(key, { _tag: "Ready", value: exit.value });
+            const ready = [...next].filter(([, state]) => state._tag === "Ready");
+            for (const [old] of ready.slice(0, Math.max(0, ready.length - keep))) next.delete(old);
+          }
           return next;
         });
 

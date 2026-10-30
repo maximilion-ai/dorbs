@@ -553,3 +553,27 @@ it.live("runs at most two installs at once", () =>
     ),
   ),
 );
+
+it.live("runs the tools once for identical concurrent actions", () =>
+  Effect.gen(function* () {
+    const change = { files: { "src/d.ts": 'export const d: number = "d";\n' } };
+    yield* upload(change.files["src/d.ts"]);
+    const responses = yield* Effect.all(
+      [1, 2, 3].map(() => postCheck("fixture", change)),
+      { concurrency: "unbounded" },
+    );
+    const D_TS = { ...BAD_TS, path: RelativePath.make("src/d.ts") };
+    assert.deepStrictEqual(
+      responses.map((response) => response._tag === "ActionResult" && response.diagnostics),
+      [
+        [BAD_TS, D_TS],
+        [BAD_TS, D_TS],
+        [BAD_TS, D_TS],
+      ],
+    );
+    assert.lengthOf(
+      (yield* spawned).filter((line) => line.startsWith("tsrs --noEmit")),
+      1,
+    );
+  }).pipe(Effect.provide(Server)),
+);
