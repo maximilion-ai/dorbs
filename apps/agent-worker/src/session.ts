@@ -14,7 +14,7 @@ import {
   type ConnectionId,
   type RequestId,
 } from "./rpc.ts";
-import { transition, Turn, TurnEvent, type RunOutcome, type TurnCommand } from "./Turn.ts";
+import { RunOutcome, transition, Turn, TurnEvent, type TurnCommand } from "./Turn.ts";
 
 /** The session as stored: the client's cwd, and the Pi session once the first prompt made one. */
 export type SessionRecord = { readonly cwd: string; readonly piSession?: string };
@@ -287,8 +287,17 @@ export const makeSession = (host: SessionHost) => {
     for (const content of request.prompt) {
       publish({ sessionUpdate: "user_message_chunk", content }, connection);
     }
-    const run = Effect.promise(() =>
-      host.run(record, promptText(request.prompt), abort.signal, (update) => publish(update)),
+    // A loop that throws ends the turn as failed, so the prompt is still answered.
+    const run = Effect.tryPromise({
+      try: () =>
+        host.run(record, promptText(request.prompt), abort.signal, (update) => publish(update)),
+      catch: (error) => error,
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.succeed(
+          RunOutcome.Failed({ reason: error instanceof Error ? error.message : String(error) }),
+        ),
+      ),
     );
     return Accepted.Started({ ended: finish(connection, run) });
   });

@@ -13,6 +13,10 @@ const ROW_BYTES = 256 * 1024;
 const sessionWith = (
   emitted: ReadonlyArray<SessionUpdate>,
   remember: (message: string) => void,
+  run: SessionHost["run"] = async (_record, _prompt, _signal, emit) => {
+    for (const update of emitted) emit(update);
+    return RunOutcome.Answered();
+  },
 ) => {
   const sent: string[] = [];
   let record: SessionRecord | undefined;
@@ -32,10 +36,7 @@ const sessionWith = (
     send: (_connection, message) => {
       sent.push(message);
     },
-    run: async (_record, _prompt, _signal, emit) => {
-      for (const update of emitted) emit(update);
-      return RunOutcome.Answered();
-    },
+    run,
   };
   const session = makeSession(host);
   session.open(CLIENT, "/project");
@@ -131,5 +132,29 @@ it.effect(
           },
         ],
       );
+    }),
+);
+
+it.effect(
+  "answers the prompt with the error when its agent loop throws, and keeps how it ended",
+  () =>
+    Effect.gen(function* () {
+      const kept: string[] = [];
+      const { prompt } = sessionWith(
+        [],
+        (message) => kept.push(message),
+        async () => {
+          throw new Error("OpenCode: the event stream did not open");
+        },
+      );
+      const { response } = yield* prompt;
+      assert.deepStrictEqual(response.error, {
+        code: -32603,
+        message: "OpenCode: the event stream did not open",
+      });
+      assert.deepStrictEqual(JSON.parse(kept.at(-1) ?? "").params.update, {
+        sessionUpdate: "session_info_update",
+        _meta: { "dorbs/turnEnded": { error: "OpenCode: the event stream did not open" } },
+      });
     }),
 );
