@@ -11,7 +11,10 @@ const TSRS = ToolName.make("tsrs");
 const OXLINT = ToolName.make("oxlint");
 
 // Errors with no file, or in a file outside the project, point at the tsconfig, so a failing check
-// never comes back empty. Outside text is withheld: a tsconfig can pull in any readable file.
+// never comes back empty. Outside text is withheld, continuation lines included: a tsconfig or an
+// import can pull in any readable file, and its errors would quote it.
+const OUTSIDE = "Error in a file outside the project.";
+
 const tsrsDiagnostic = (line: string): Diagnostic | undefined => {
   const located = LOCATED.exec(line);
   if (located) {
@@ -23,7 +26,7 @@ const tsrsDiagnostic = (line: string): Diagnostic | undefined => {
       line: inProject ? Number(row) : 1,
       column: inProject ? Number(column) : 1,
       code,
-      message: inProject ? message : "Error in a file outside the project.",
+      message: inProject ? message : OUTSIDE,
       severity: severity === "warning" ? "warning" : "error",
     };
   }
@@ -47,7 +50,9 @@ export const parseTsrs = (output: string): ReadonlyArray<Diagnostic> => {
   for (const line of output.split("\n")) {
     const last = diagnostics.at(-1);
     if (last && /^\s/.test(line) && line.trim() !== "") {
-      diagnostics[diagnostics.length - 1] = { ...last, message: `${last.message}\n${line}` };
+      if (last.message !== OUTSIDE) {
+        diagnostics[diagnostics.length - 1] = { ...last, message: `${last.message}\n${line}` };
+      }
       continue;
     }
     const diagnostic = tsrsDiagnostic(line);
