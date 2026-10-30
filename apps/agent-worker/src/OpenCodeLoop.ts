@@ -124,9 +124,8 @@ export const makeOpenCodeLoop = (host: LoopHost): Loop => {
     return session.id;
   };
 
-  const run: Loop["run"] = async (record, prompt, signal, emit) => {
+  const run: Loop["run"] = async (record, prompt, operationId, signal, emit) => {
     const session = harness.session(await openCodeSession(record));
-    const operationId = crypto.randomUUID();
     const settled = Promise.withResolvers<RunOutcome>();
     const stream = await session.events();
     let streamed = NOTHING_STREAMED;

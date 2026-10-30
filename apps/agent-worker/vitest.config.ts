@@ -110,6 +110,8 @@ export default defineConfig({
       // The ACP behaviours again with OpenCode as the agent loop, then what only OpenCode has to show.
       harness("opencode", "opencode", ["test/acp.test.ts"]),
       harness("opencode-only", "opencode", ["test/opencode.test.ts"]),
+      // Restarts under both loops, apart from the suites above, whose held typecheck they would release.
+      harness("pi-restart", "pi", ["test/restart.test.ts"]),
     ],
   },
 });

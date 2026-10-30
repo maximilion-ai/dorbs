@@ -17,7 +17,14 @@ import { makeOutbox } from "./Outbox.ts";
 import { makePiLoop } from "./PiLoop.ts";
 import * as Repos from "./Repos.ts";
 import { nameOf, type ConnectionId } from "./rpc.ts";
-import { makeSession, type HarnessName, type SessionHost, type SessionRecord } from "./session.ts";
+import {
+  makeSession,
+  type HarnessName,
+  type OpenPrompt,
+  type SessionHost,
+  type SessionRecord,
+  type StreamedRun,
+} from "./session.ts";
 import type { ToolHost } from "./tools.ts";
 import * as Typecheck from "./Typecheck.ts";
 
@@ -27,6 +34,7 @@ export type ModelLayer = (
 
 const RECORD_KEY = "acp/session";
 const ATTACHED_KEY = "acp/attached";
+const PROMPTS_KEY = "acp/prompts";
 const CLONE_KEY = "workspace/clone";
 /** The Lifecycle job that deletes this session once it has been idle for the retention period. */
 const RETIRE = "retire";
@@ -78,9 +86,17 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
       return Effect.runSync(HarnessConfig.parse(ConfigProvider.fromUnknown(this.env)));
     })();
 
+    readonly prompts = (): ReadonlyArray<OpenPrompt> =>
+      this.ctx.storage.kv.get<ReadonlyArray<OpenPrompt>>(PROMPTS_KEY) ?? [];
+
     readonly loop: Loop = (() => {
       const host: LoopHost = {
         storage: this.ctx.storage,
+        record: () => this.ctx.storage.kv.get<SessionRecord>(RECORD_KEY),
+        rejoining: () => {
+          const [running] = this.prompts();
+          return running?.started === undefined ? undefined : running.operationId;
+        },
         models: () => this.runtime.runPromise(Effect.service(ModelProvider)),
         workspace: this.workspace,
         tools: this.toolHost,
@@ -115,9 +131,28 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
       sql.exec(
         "CREATE TABLE IF NOT EXISTS acp_history (seq INTEGER PRIMARY KEY AUTOINCREMENT, message TEXT NOT NULL)",
       );
+      // The chunks of the streamed run in progress, one row each, until the run is kept as one history row.
+      sql.exec(
+        "CREATE TABLE IF NOT EXISTS acp_stream (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, text TEXT NOT NULL)",
+      );
       return {
         remember: (message: string) => {
           sql.exec("INSERT INTO acp_history (message) VALUES (?)", message);
+        },
+        hold: (kind: StreamedRun["sessionUpdate"], text: string) => {
+          sql.exec("INSERT INTO acp_stream (kind, text) VALUES (?, ?)", kind, text);
+        },
+        release: (): StreamedRun | undefined => {
+          const chunks = sql
+            .exec<{
+              kind: StreamedRun["sessionUpdate"];
+              text: string;
+            }>("SELECT kind, text FROM acp_stream ORDER BY seq")
+            .toArray();
+          const [first] = chunks;
+          if (first === undefined) return undefined;
+          sql.exec("DELETE FROM acp_stream");
+          return { sessionUpdate: first.kind, text: chunks.map((chunk) => chunk.text).join("") };
         },
         /** Every row kept so far, a page at a time, read as the replay asks for it. */
         pages: () => {
@@ -155,17 +190,30 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
       attached: () => this.ctx.storage.kv.get<ConnectionId>(ATTACHED_KEY),
       attach: (connection) => this.ctx.storage.kv.put(ATTACHED_KEY, connection),
       remember: this.history.remember,
+      hold: this.history.hold,
+      release: this.history.release,
+      prompts: this.prompts,
+      savePrompts: (prompts) => {
+        if (prompts.length === 0) this.ctx.storage.kv.delete(PROMPTS_KEY);
+        else this.ctx.storage.kv.put(PROMPTS_KEY, prompts);
+      },
       replay: (connection) => this.outbox.replay(connection, this.history.pages()),
       send: this.outbox.send,
-      run: async (record, prompt, signal, emit) => {
+      run: async (record, prompt, operationId, signal, emit) => {
         try {
-          return await this.loop.run(record, prompt, signal, emit);
+          return await this.loop.run(record, prompt, operationId, signal, emit);
         } finally {
           // A turn can run on after its client is gone; the idle period starts when it ends.
           await this.touch();
         }
       },
     } satisfies SessionHost);
+
+    constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+      super(ctx, env);
+      // A turn a restart cut off runs on and is answered; the loop's wake job is what restarts an evicted object.
+      this.session.resume();
+    }
 
     /** session/new: creates this session and attaches the connection that made it. */
     async open(connection: ConnectionId, cwd: string): Promise<void> {

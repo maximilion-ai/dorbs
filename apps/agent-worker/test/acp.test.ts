@@ -343,19 +343,44 @@ it("resolves a cancelled prompt with cancelled and takes the next prompt", async
   assert.deepStrictEqual(next.result, { stopReason: "end_turn" });
 });
 
-it("rejects a second prompt while the first is running", async () => {
+it("runs a prompt sent while a turn runs once that turn ends, and answers each once", async () => {
+  await double("http://typecheck.test/__hold");
+  try {
+    const client = await connect();
+    const sessionId = await client.newSession();
+    const first = client.request(2, "session/prompt", prompt(sessionId, "typecheck"));
+    await client.until((frame) => frame.params?.update?.toolCallId === "call-typecheck");
+    const second = client.request(3, "session/prompt", prompt(sessionId, "write hello"));
+    await double("http://typecheck.test/__release");
+    assert.deepStrictEqual(
+      [(await first).result, (await second).result],
+      [{ stopReason: "end_turn" }, { stopReason: "end_turn" }],
+    );
+    // The second turn starts once the first has answered, and each prompt is answered once.
+    assert.deepStrictEqual(
+      client.frames.flatMap((frame) => (frame.method === undefined ? [frame.id] : [])),
+      [1, 2, 3],
+    );
+    const answered = client.frames.findIndex((frame) => frame.id === 2);
+    assert.deepStrictEqual(updates(client.frames.slice(answered)), WROTE_HELLO);
+  } finally {
+    await double("http://typecheck.test/__release");
+  }
+});
+
+it("answers a prompt waiting behind a cancelled turn as cancelled too", async () => {
   const client = await connect();
   const sessionId = await client.newSession();
   const first = client.request(2, "session/prompt", prompt(sessionId, "wait for cancel"));
   await client.until((frame) => frame.params?.update?.sessionUpdate === "tool_call");
-  const second = await client.request(3, "session/prompt", prompt(sessionId, "write hello"));
-  assert.deepStrictEqual(second, {
-    jsonrpc: "2.0",
-    id: 3,
-    error: { code: -32600, message: "Prompt 2 is still running in this session" },
-  });
+  const second = client.request(3, "session/prompt", prompt(sessionId, "write hello"));
   client.send({ method: "session/cancel", params: { sessionId } });
-  assert.deepStrictEqual((await first).result, { stopReason: "cancelled" });
+  assert.deepStrictEqual(
+    [(await first).result, (await second).result],
+    [{ stopReason: "cancelled" }, { stopReason: "cancelled" }],
+  );
+  const next = await client.request(4, "session/prompt", prompt(sessionId, "write hello"));
+  assert.deepStrictEqual(next.result, { stopReason: "end_turn" });
 });
 
 it("replays a session's history in order to another connection that loads it, then answers", async () => {

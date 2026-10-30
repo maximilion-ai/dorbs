@@ -12,6 +12,9 @@ export const SYSTEM_PROMPT =
 /** What an agent loop needs from the AcpSession that hosts it. */
 export type LoopHost = {
   readonly storage: DurableObjectStorage;
+  readonly record: () => SessionRecord | undefined;
+  /** The operation of a turn a restart cut off, which the session is about to run on. */
+  readonly rejoining: () => string | undefined;
   readonly models: () => Promise<ModelProvider["Service"]>;
   readonly workspace: Workspace;
   readonly tools: ToolHost;

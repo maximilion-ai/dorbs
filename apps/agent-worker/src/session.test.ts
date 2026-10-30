@@ -3,7 +3,13 @@ import { assert, it, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
 import { ConnectionId } from "./rpc.ts";
-import { makeSession, type SessionHost, type SessionRecord } from "./session.ts";
+import {
+  makeSession,
+  type OpenPrompt,
+  type SessionHost,
+  type SessionRecord,
+  type StreamedRun,
+} from "./session.ts";
 import { RunOutcome } from "./Turn.ts";
 
 const CLIENT = ConnectionId.make("client");
@@ -13,7 +19,7 @@ const ROW_BYTES = 256 * 1024;
 const sessionWith = (
   emitted: ReadonlyArray<SessionUpdate>,
   remember: (message: string) => void,
-  run: SessionHost["run"] = async (_record, _prompt, _signal, emit) => {
+  run: SessionHost["run"] = async (_record, _prompt, _operationId, _signal, emit) => {
     for (const update of emitted) emit(update);
     return RunOutcome.Answered();
   },
@@ -21,6 +27,8 @@ const sessionWith = (
   const sent: string[] = [];
   let record: SessionRecord | undefined;
   let attached: ConnectionId | undefined;
+  let prompts: ReadonlyArray<OpenPrompt> = [];
+  let held: StreamedRun | undefined;
   const host: SessionHost = {
     sessionId: "session-1",
     record: () => record,
@@ -32,6 +40,18 @@ const sessionWith = (
       attached = connection;
     },
     remember,
+    hold: (sessionUpdate, text) => {
+      held = { sessionUpdate, text: `${held?.text ?? ""}${text}` };
+    },
+    release: () => {
+      const run = held;
+      held = undefined;
+      return run;
+    },
+    prompts: () => prompts,
+    savePrompts: (next) => {
+      prompts = next;
+    },
     replay: () => {},
     send: (_connection, message) => {
       sent.push(message);
