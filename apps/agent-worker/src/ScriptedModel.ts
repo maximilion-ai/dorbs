@@ -1,3 +1,8 @@
+import type {
+  LanguageModelV3,
+  LanguageModelV3Prompt,
+  LanguageModelV3StreamPart,
+} from "@ai-sdk/provider";
 import {
   createAssistantMessageEventStream,
   fauxAssistantMessage,
@@ -25,9 +30,14 @@ export const PROXY_CONFIG = "[http]\n\tcorsProxy = http://attacker.test\n";
 const E2E_HELLO = 'export const n: number = "x";\n';
 const E2E_PACKAGE = '{ "name": "dorbs-e2e", "private": true, "type": "module" }\n';
 
+/** What a script reads of a transcript, whichever harness keeps it: the user's prompts and the model's turns. */
+type Said =
+  | { readonly role: "user"; readonly text: string }
+  | { readonly role: "assistant" | "tool" };
+
 type Step = (
   signal: AbortSignal | undefined,
-  messages: ReadonlyArray<Message>,
+  said: ReadonlyArray<Said>,
 ) => AssistantMessage | Promise<AssistantMessage>;
 
 const callTool =
@@ -50,21 +60,11 @@ const untilAborted: Step = (signal) =>
     ),
   );
 
-const userText = (message: Message | undefined): string => {
-  if (message?.role !== "user") return "";
-  return typeof message.content === "string"
-    ? message.content
-    : message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
-};
-
 /** Says every prompt in the transcript, so a test sees the context the model was given. */
-const recall: Step = (_signal, messages) =>
+const recall: Step = (_signal, said) =>
   fauxAssistantMessage([
     fauxText(
-      `Prompts so far: ${messages
-        .filter((message) => message.role === "user")
-        .map(userText)
-        .join(" | ")}.`,
+      `Prompts so far: ${said.flatMap((turn) => (turn.role === "user" ? [turn.text] : [])).join(" | ")}.`,
     ),
   ]);
 
@@ -286,15 +286,30 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
   ],
 };
 
-const lastPrompt = (messages: ReadonlyArray<Message>): string =>
-  userText(messages[messages.findLastIndex((message) => message.role === "user")]);
+const lastPrompt = (said: ReadonlyArray<Said>): string =>
+  said.findLast((turn) => turn.role === "user")?.text ?? "";
 
-const nextStep = (messages: ReadonlyArray<Message>): Step => {
-  const lastUser = messages.findLastIndex((message) => message.role === "user");
-  const script = SCRIPTS[lastPrompt(messages)] ?? [say("No script for this prompt.")];
-  const replies = messages.slice(lastUser + 1).filter((m) => m.role === "assistant").length;
+const nextStep = (said: ReadonlyArray<Said>): Step => {
+  const lastUser = said.findLastIndex((turn) => turn.role === "user");
+  const script = SCRIPTS[lastPrompt(said)] ?? [say("No script for this prompt.")];
+  const replies = said.slice(lastUser + 1).filter((turn) => turn.role === "assistant").length;
   return script[replies] ?? say("Script finished.");
 };
+
+const fromPi = (messages: ReadonlyArray<Message>): Said[] =>
+  messages.map((message) =>
+    message.role !== "user"
+      ? { role: message.role === "assistant" ? "assistant" : "tool" }
+      : {
+          role: "user",
+          text:
+            typeof message.content === "string"
+              ? message.content
+              : message.content
+                  .flatMap((part) => (part.type === "text" ? [part.text] : []))
+                  .join(""),
+        },
+  );
 
 /**
  * Scripts whose answers stream slowly, as a real model's do: each text and thinking block in `parts`, each part sent
@@ -353,16 +368,112 @@ export const scriptedModel = () => {
   // The faux queue drops each response it plays, so the one factory re-queues itself.
   const respond: FauxResponseFactory = (context, options) => {
     faux.appendResponses([respond]);
-    return nextStep(context.messages)(options?.signal, context.messages);
+    const said = fromPi(context.messages);
+    return nextStep(said)(options?.signal, said);
   };
   faux.setResponses([respond]);
   const provider: Provider = {
     ...faux.provider,
     streamSimple: (model, context, options) => {
       const stream = faux.provider.streamSimple(model, context, options);
-      const pace = SLOW.get(lastPrompt(context.messages));
+      const pace = SLOW.get(lastPrompt(fromPi(context.messages)));
       return pace === undefined ? stream : slowly(stream, pace);
     },
   };
   return { provider, model: faux.getModel() };
 };
+
+const fromAiSdk = (prompt: LanguageModelV3Prompt): Said[] =>
+  prompt.flatMap((message): Said[] => {
+    switch (message.role) {
+      case "system":
+        return [];
+      case "user":
+        return [
+          {
+            role: "user",
+            text: message.content
+              .flatMap((part) => (part.type === "text" ? [part.text] : []))
+              .join(""),
+          },
+        ];
+      default:
+        return [{ role: message.role }];
+    }
+  });
+
+const pause = (ms: number, signal: AbortSignal | undefined) =>
+  new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    });
+  });
+
+const USAGE = {
+  inputTokens: { total: 0, noCache: 0, cacheRead: 0, cacheWrite: 0 },
+  outputTokens: { total: 0, text: 0, reasoning: 0 },
+};
+
+/** Streams a scripted answer as an AI SDK model does, at `pace` when the script is slow. */
+async function* streamParts(
+  message: AssistantMessage,
+  pace: Pace | undefined,
+  signal: AbortSignal | undefined,
+): AsyncGenerator<LanguageModelV3StreamPart> {
+  yield { type: "stream-start", warnings: [] };
+  for (const [index, block] of message.content.entries()) {
+    if (block.type === "toolCall") {
+      yield {
+        type: "tool-call",
+        toolCallId: block.id,
+        toolName: block.name,
+        input: JSON.stringify(block.arguments),
+      };
+      continue;
+    }
+    const kind = block.type === "text" ? "text" : "reasoning";
+    const id = `${kind}-${index}`;
+    yield { type: `${kind}-start`, id };
+    const whole = block.type === "text" ? block.text : block.thinking;
+    for (const part of pieces(whole, pace?.parts ?? 1)) {
+      for (const delta of pieces(part, pace?.deltas ?? 1))
+        yield { type: `${kind}-delta`, id, delta };
+      if (pace !== undefined) await pause(pace.pauseMs, signal);
+    }
+    yield { type: `${kind}-end`, id };
+  }
+  yield {
+    type: "finish",
+    usage: USAGE,
+    finishReason:
+      message.stopReason === "toolUse"
+        ? { unified: "tool-calls", raw: "tool_calls" }
+        : { unified: "stop", raw: "stop" },
+  };
+}
+
+/** The same scripts as an AI SDK model, which OpenCode calls. */
+export const scriptedLanguageModel = (): LanguageModelV3 => ({
+  specificationVersion: "v3",
+  provider: "scripted",
+  modelId: "scripted",
+  supportedUrls: {},
+  doGenerate: () => Promise.reject(new Error("The scripted model only streams.")),
+  doStream: async ({ prompt, abortSignal }) => {
+    const said = fromAiSdk(prompt);
+    const message = await nextStep(said)(abortSignal, said);
+    abortSignal?.throwIfAborted();
+    const parts = streamParts(message, SLOW.get(lastPrompt(said)), abortSignal);
+    return {
+      stream: new ReadableStream({
+        async pull(controller) {
+          const next = await parts.next();
+          if (next.done === true) controller.close();
+          else controller.enqueue(next.value);
+        },
+      }),
+    };
+  },
+});
