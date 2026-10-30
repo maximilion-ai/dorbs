@@ -7,6 +7,7 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import {
+  harness,
   muxConnectionsTo,
   ok,
   prompt,
@@ -39,6 +40,7 @@ const run = async () => {
     stopNc,
   } = await startStack({
     repo: REPO,
+    harness: harness(),
     fixture: TS_PROJECT,
     cwd: CWD,
     model: {
@@ -216,7 +218,7 @@ const run = async () => {
     sessionUpdate: "agent_message_chunk",
     content: { type: "text", text: "Prompts so far: e2e | e2e push | read hello." },
   });
-  ok("the model saw the first turn's prompt in the same Pi transcript");
+  ok("the model saw the first turn's prompt in the same transcript");
 
   const long = reloaded.request(4, "session/prompt", prompt(sessionId, "wait for cancel"), 30_000);
   await reloaded.next(

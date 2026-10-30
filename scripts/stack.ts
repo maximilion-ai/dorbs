@@ -262,8 +262,17 @@ export const prompt = (sessionId: string, text: string) => ({
   prompt: [{ type: "text", text }],
 });
 
+/** The agent loop the stack's Worker runs new sessions on: HARNESS, pi unless set. */
+export const harness = (): "pi" | "opencode" => {
+  const name = process.env.HARNESS ?? "pi";
+  if (name !== "pi" && name !== "opencode")
+    throw new Error(`HARNESS must be pi or opencode, not ${name}`);
+  return name;
+};
+
 export type StackOptions = {
   readonly repo: string;
+  readonly harness: "pi" | "opencode";
   readonly fixture: Record<string, FixtureFile>;
   /** The cwd T3 Code would send in session/new; nc starts here. */
   readonly cwd: string;
@@ -319,6 +328,7 @@ export const startStack = async (options: StackOptions) => {
         AGENT_TOKEN: agentToken,
         TYPECHECK_URL: `http://127.0.0.1:${typecheckPort}`,
         TYPECHECK_TOKEN: typecheckToken,
+        HARNESS: options.harness,
         MODEL_PROVIDER: options.model.provider,
         MODEL_ID: options.model.id,
         REPOS: JSON.stringify([{ id: options.repo, url: gitUrl }]),
@@ -332,7 +342,7 @@ export const startStack = async (options: StackOptions) => {
     90_000,
   );
   const workerPort = Number(new URL(workerUrl ?? "").port);
-  ok(`agent Worker runs under alchemy dev at ${workerUrl}`);
+  ok(`agent Worker runs under alchemy dev at ${workerUrl} with HARNESS=${options.harness}`);
 
   const mux = start("acp-mux", process.execPath, ["src/main.ts"], {
     cwd: NodePath.join(ROOT, "apps/acp-mux"),

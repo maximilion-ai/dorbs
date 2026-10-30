@@ -1,10 +1,11 @@
 // Runs the local chain with a real model: DeepSeek v4.1 Flash on OpenRouter.
 //   pnpm live            serve /tmp/dorbs-acp.sock for T3 Code's Local ACP provider until Ctrl-C
 //   pnpm live "<prompt>" send one prompt through nc and print what T3 Code would show
+// HARNESS=opencode runs the sessions on OpenCode instead of Pi.
 
 import * as NodeFS from "node:fs";
 
-import { ok, prompt, runMain, startStack, TS_PROJECT } from "./stack.ts";
+import { harness, ok, prompt, runMain, startStack, TS_PROJECT } from "./stack.ts";
 
 const SOCKET = "/tmp/dorbs-acp.sock";
 const CWD = "/tmp/dorbs-live-project";
@@ -60,6 +61,7 @@ await runMain(async () => {
   NodeFS.mkdirSync(CWD, { recursive: true });
   const stack = await startStack({
     repo: REPO,
+    harness: harness(),
     fixture: TS_PROJECT,
     cwd: CWD,
     socketPath: SOCKET,
