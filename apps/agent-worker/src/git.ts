@@ -16,7 +16,17 @@ export type GitContext = {
 };
 
 // The agent owns the network and the remotes; push is the one way out, and the tool runs it.
-const MANAGED = new Set(["fetch", "pull", "clone", "remote", "config", "credential", "submodule"]);
+// config and init write the git config, which steers where a push sends credentials.
+const MANAGED = new Set([
+  "fetch",
+  "pull",
+  "clone",
+  "remote",
+  "config",
+  "init",
+  "credential",
+  "submodule",
+]);
 const FORCE = new Set(["-f", "--force", "--force-with-lease", "--force-if-includes"]);
 const DELETE = new Set(["-d", "--delete"]);
 const UPSTREAM = new Set(["-u", "--set-upstream"]);
@@ -31,6 +41,10 @@ const cliText = ({ stdout, stderr, exitCode }: GitCliResult): string => {
 };
 
 const failed = (message: string): string => `${message}\nexit 1`;
+
+/** Whether a path names the git directory or something in it, in any case. */
+export const isGitPath = (path: string): boolean =>
+  path.split(/[/=:]/u).some((name) => name.toLowerCase() === ".git");
 
 const push = async (args: ReadonlyArray<string>, context: GitContext): Promise<string> => {
   const { workspace, dir, clone } = context;
@@ -68,6 +82,13 @@ const push = async (args: ReadonlyArray<string>, context: GitContext): Promise<s
   if (context.url === undefined) return failed(`${clone.repo} is no longer a registered repo.`);
   const commit = await workspace.git.revParse({ dir, ref: source }).catch(() => undefined);
   if (commit === undefined) return failed(`error: src refspec ${source} does not match any`);
+  // Computer's push takes no proxy of its own, so isomorphic-git would send the credentials to the config's.
+  const proxy = await workspace.git.configGet({ dir, path: "http.corsProxy" });
+  if (proxy !== undefined) {
+    return failed(
+      "Push refused: the repo's git config sets http.corsProxy, which would send origin's credentials to another host.",
+    );
+  }
   try {
     const headers = await context.headers(context.url);
     const result = await workspace.git.push({
@@ -101,6 +122,10 @@ export const git = async (line: string, context: GitContext): Promise<string> =>
   }
   if (subcommand !== undefined && MANAGED.has(subcommand)) {
     return `git ${subcommand} is not available: the agent manages the network and remotes. Commit your work, then publish it with git push.`;
+  }
+  const gitPath = args.find(isGitPath);
+  if (gitPath !== undefined) {
+    return failed(`git does not take paths in the repo's git directory, such as ${gitPath}.`);
   }
   if (subcommand === "push") return push(args, context);
   return cliText(await context.workspace.git.cli({ argv: [...argv], cwd: context.dir }));

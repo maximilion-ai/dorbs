@@ -14,7 +14,7 @@ import * as Match from "effect/Match";
 import * as Schema from "effect/Schema";
 
 import { gh } from "./gh.ts";
-import { git } from "./git.ts";
+import { git, isGitPath } from "./git.ts";
 import type { GitHub } from "./GitHub.ts";
 import type { Change, Clone } from "./Typecheck.ts";
 
@@ -95,17 +95,47 @@ const readIfPresent = (workspace: Workspace, path: string): Promise<string | und
     throw error;
   });
 
+/**
+ * Where a model write to `path` lands. The git directory is refused in any case, since its config steers where
+ * pushes send credentials, and so is any path through a symbolic link, which could lead there.
+ */
+const writable = async (workspace: Workspace, path: string): Promise<string> => {
+  const target = absolute(path);
+  const names = relative(target).split("/");
+  if (isGitPath(relative(target))) {
+    throw new Error(
+      `${path} is in the repo's git directory, which only the agent writes. Change files with git commands instead.`,
+    );
+  }
+  for (let end = 1; end <= names.length; end += 1) {
+    // Computer 0.8.0's runtime filesystem has lstat but not the lstatOrNull it types.
+    const stat = await workspace.fs
+      .lstat(`${WORKSPACE_ROOT}/${names.slice(0, end).join("/")}`)
+      .catch((error: unknown) => {
+        if (isMissing(error)) return undefined;
+        throw error;
+      });
+    if (stat === undefined) break;
+    if (stat.isSymbolicLink) {
+      throw new Error(
+        `${path} goes through a symbolic link. Write to the file it points to instead.`,
+      );
+    }
+  }
+  return target;
+};
+
 const write = async (
   host: ToolHost,
   path: string,
   newText: string,
 ): Promise<ToolExecutionResult> => {
-  const target = absolute(path);
+  const target = await writable(host.workspace, path);
   const oldText = await readIfPresent(host.workspace, target);
   await host.workspace.fs.mkdir(target.slice(0, target.lastIndexOf("/")), { recursive: true });
   await host.workspace.fs.writeFile(target, newText);
   const change: FileChange = {
-    path: decodePath(path),
+    path: decodePath(relative(target)),
     ...(oldText === undefined ? {} : { oldText }),
     newText,
   };
@@ -186,7 +216,10 @@ const TOOLS = [
     // A rerun would not find oldText it already replaced.
     replay: "unsafe",
     run: async ({ path, oldText, newText }, host) => {
-      const current = await host.workspace.fs.readFile(absolute(path), "utf8");
+      const current = await host.workspace.fs.readFile(
+        await writable(host.workspace, path),
+        "utf8",
+      );
       const at = current.indexOf(oldText);
       if (at === -1 || current.indexOf(oldText, at + 1) !== -1) {
         throw new Error(`oldText must occur exactly once in ${path}`);

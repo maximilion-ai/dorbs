@@ -8,7 +8,7 @@ import * as Effect from "effect/Effect";
 import { connect, open, updates } from "./client.ts";
 import { gh } from "../src/gh.ts";
 import * as GitHub from "../src/GitHub.ts";
-import { COUNT, HELLO, NEW_FILE } from "../src/ScriptedModel.ts";
+import { COUNT, HELLO, NEW_FILE, PROXY_CONFIG } from "../src/ScriptedModel.ts";
 import type { AcpSession } from "./worker.ts";
 
 // Captured from T3 Code 125b619: effect-acp's AcpClient.initialize with provider-acp's client capabilities.
@@ -470,7 +470,9 @@ it("answers the client's close, so acp-mux can tear down both sides", async () =
 
 const toolText = (frames: ReturnType<typeof updates>, toolCallId: string): string =>
   (toolResult(frames, toolCallId)?.content ?? [])
-    .map((item: { content: { text: string } }) => item.content.text)
+    .flatMap((item: { type: string; content: { text: string } }) =>
+      item.type === "content" ? [item.content.text] : [],
+    )
     .join("");
 
 const refOf = (repo: string, ref: string) =>
@@ -553,6 +555,78 @@ it("refuses pushes to the base branch, force pushes, deletes, other remotes and 
     ],
   );
   assert.deepStrictEqual(await refOf("fixture.git", "refs/heads/main"), before);
+});
+
+it("refuses model writes to the clone's git directory, by any spelling or link, and git commands that rewrite it", async () => {
+  const record = await recordSince();
+  const client = await connect();
+  const sessionId = await client.newSession();
+  await client.request(2, "session/prompt", prompt(sessionId, "clone github"));
+  const original = await inSession(sessionId, async (instance) => {
+    await instance.workspace.fs.symlink(".git", "/workspace/meta");
+    await instance.workspace.fs.symlink(".git/config", "/workspace/cfg");
+    return instance.workspace.fs.readFile("/workspace/.git/config", "utf8");
+  });
+  const response = await client.request(3, "session/prompt", prompt(sessionId, "git metadata"));
+  assert.deepStrictEqual(response.result, { stopReason: "end_turn" });
+  const frames = updates(client.frames);
+  const refused = (path: string) =>
+    `<harness>\n[error] ${path} is in the repo's git directory, which only the agent writes. Change files with git commands instead.\n</harness>`;
+  const linked = (path: string) =>
+    `<harness>\n[error] ${path} goes through a symbolic link. Write to the file it points to instead.\n</harness>`;
+  assert.deepStrictEqual(
+    [
+      "call-write",
+      "call-write-case",
+      "call-edit",
+      "call-write-link",
+      "call-write-file-link",
+      "call-config",
+      "call-init",
+      "call-rm-git",
+    ].map((id) => toolText(frames, id)),
+    [
+      refused(".git/config"),
+      refused("./.GIT/config"),
+      refused(".git/config"),
+      linked("meta/config"),
+      linked("cfg"),
+      "git config is not available: the agent manages the network and remotes. Commit your work, then publish it with git push.",
+      "git init is not available: the agent manages the network and remotes. Commit your work, then publish it with git push.",
+      "git does not take paths in the repo's git directory, such as .Git/config.\nexit 1",
+    ],
+  );
+  const config = await inSession(sessionId, (instance) =>
+    instance.workspace.fs.readFile("/workspace/.git/config", "utf8"),
+  );
+  assert.strictEqual(config, original);
+  await client.request(4, "session/prompt", prompt(sessionId, "push github"));
+  assert.deepStrictEqual(
+    (await record.log()).filter((line) => line.startsWith("stray")),
+    [],
+  );
+});
+
+it("sends no credentials through a proxy the repo's git config names", async () => {
+  const record = await recordSince();
+  const client = await connect();
+  const sessionId = await client.newSession();
+  await client.request(2, "session/prompt", prompt(sessionId, "clone github"));
+  await inSession(sessionId, async (instance) => {
+    const config = await instance.workspace.fs.readFile("/workspace/.git/config", "utf8");
+    await instance.workspace.fs.writeFile("/workspace/.git/config", `${config}\n${PROXY_CONFIG}`);
+  });
+  await client.request(3, "session/prompt", prompt(sessionId, "push proxied"));
+  const frames = updates(client.frames);
+  assert.strictEqual(
+    toolText(frames, "call-push"),
+    "Push refused: the repo's git config sets http.corsProxy, which would send origin's credentials to another host.\nexit 1",
+  );
+  assert.deepStrictEqual(
+    (await record.log()).filter((line) => line.startsWith("stray")),
+    [],
+  );
+  assert.isNull(await refOf("test/github.git", "refs/heads/dorbs/proxied"));
 });
 
 /** The App's two calls for a test/github token: find the installation, then mint for that repo alone. */

@@ -183,7 +183,12 @@ export const typecheckDouble = async (request: Request): Promise<Response> => {
   // test/github is private: fetches need a token as well as pushes.
   if (url.host === "github.com") return github.git(request);
   if (url.host === "github-api.test") return githubApi(request, url);
-  if (url.host !== "typecheck.test") return new Response("Tests have no network", { status: 502 });
+  if (url.host !== "typecheck.test") {
+    log.push(
+      `stray ${url.host}${url.pathname}${request.headers.has("authorization") ? " with credentials" : ""}`,
+    );
+    return new Response("Tests have no network", { status: 502 });
+  }
   if (url.pathname === "/__log") return json(log);
   if (url.pathname === "/__actions") return json(actions);
   if (url.pathname === "/__hold") {
