@@ -480,3 +480,32 @@ it.live("answers 502 when a fetch outlives its deadline, and the next check runs
     assert.deepStrictEqual(statuses, [timedOut, timedOut]);
   }).pipe(Effect.provide(TestServer({ fixture: FIXTURE }, { PROCESS_TIMEOUT: "500 millis" }))),
 );
+
+it.live("refuses a check whose program reads a file outside the repo and its packages", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const { dataDir } = yield* Fixtures;
+    // Module resolution climbs past the check into every ancestor's node_modules.
+    const leak = `${dataDir}/../node_modules/leak`;
+    const secret = `hunter2-${NodeCrypto.randomUUID()}`;
+    yield* fs.makeDirectory(leak, { recursive: true });
+    yield* fs.writeFileString(`${leak}/package.json`, '{ "name": "leak", "types": "index.d.ts" }');
+    yield* fs.writeFileString(`${leak}/index.d.ts`, `export declare const SECRET: "${secret}";\n`);
+    const response = yield* checkChange("fixture", {
+      files: { "src/a.ts": 'import { SECRET } from "leak";\nconst n: typeof SECRET = 1;\n' },
+    });
+    assert.deepStrictEqual(response._tag === "ActionResult" && response.diagnostics, [
+      {
+        tool: ToolName.make("typecheck"),
+        path: RelativePath.make("tsconfig.json"),
+        line: 1,
+        column: 1,
+        code: "OutsideModule",
+        message:
+          "The program reads a file outside the repo and its installed packages, so the service withholds its diagnostics.",
+        severity: "error",
+      },
+    ]);
+    assert.notInclude(JSON.stringify(response), secret);
+  }).pipe(Effect.provide(Server)),
+);

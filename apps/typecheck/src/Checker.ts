@@ -17,6 +17,7 @@ import {
   isProtectedPath,
   type Diagnostic,
   type RejectReason,
+  RelativePath,
   ToolchainId,
   ToolName,
 } from "@dorbs/protocol/typecheck";
@@ -58,6 +59,17 @@ const rejected = (reason: RejectReason) => ({ _tag: "Rejected", reason }) as con
 const MODULE_FILE = /\.[cm]?[jt]sx?$/;
 const SERVICE = ToolName.make("typecheck");
 
+const OUTSIDE_PROGRAM: Diagnostic = {
+  tool: SERVICE,
+  path: RelativePath.make("tsconfig.json"),
+  line: 1,
+  column: 1,
+  code: "OutsideModule",
+  message:
+    "The program reads a file outside the repo and its installed packages, so the service withholds its diagnostics.",
+  severity: "error",
+};
+
 const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -91,6 +103,27 @@ const make = Effect.gen(function* () {
     return result;
   });
 
+  // The directory of the default libs tsrs ships, the one place outside a check its program reads.
+  const libDir = yield* Effect.cached(
+    Effect.gen(function* () {
+      const probe = yield* fs.makeTempDirectoryScoped({ directory: checksDir });
+      yield* fs.writeFileString(path.join(probe, "probe.ts"), "");
+      yield* fs.writeFileString(
+        path.join(probe, "tsconfig.json"),
+        JSON.stringify({ compilerOptions: { lib: ["es5"], types: [] }, files: ["probe.ts"] }),
+      );
+      const { stdout } = yield* runTool(
+        probe,
+        "tsrs",
+        ["-p", "tsconfig.json", "--listFilesOnly"],
+        [0],
+      );
+      const lib = stdout.split("\n").find((line) => line.endsWith("/lib.es5.d.ts"));
+      if (lib === undefined) return yield* Effect.die(new Error(`tsrs listed no lib:\n${stdout}`));
+      return path.dirname(lib);
+    }).pipe(Effect.scoped, Effect.orDie),
+  );
+
   const runTools = Effect.fn("Checker.runTools")(function* (
     checkout: Checkout,
     action: Action,
@@ -123,7 +156,12 @@ const make = Effect.gen(function* () {
     }
     const [tsrs, oxlint] = yield* Effect.all(
       [
-        runTool(dir, "tsrs", ["--noEmit", "-p", "tsconfig.json", "--pretty", "false"], [0, 1, 2]),
+        runTool(
+          dir,
+          "tsrs",
+          ["--noEmit", "-p", "tsconfig.json", "--pretty", "false", "--listFiles"],
+          [0, 1, 2],
+        ),
         runTool(
           dir,
           "oxlint",
@@ -142,6 +180,15 @@ const make = Effect.gen(function* () {
       ],
       { concurrency: "unbounded" },
     );
+    // --listFiles prints each file of the program by absolute real path; module resolution can climb
+    // past the check into any ancestor's node_modules, which no scan of the source can see.
+    const roots = [dir, installDir, yield* fs.realPath(dir), yield* fs.realPath(installDir)];
+    const lib = yield* libDir;
+    const read = tsrs.stdout.split("\n").filter((line) => line.startsWith("/"));
+    const outside = read.filter(
+      (file) => path.dirname(file) !== lib && !roots.some((root) => file.startsWith(`${root}/`)),
+    );
+    if (outside.length > 0) return [OUTSIDE_PROGRAM];
     const typeErrors = parseTsrs(tsrs.stdout);
     if (tsrs.exitCode !== 0 && typeErrors.length === 0) {
       return yield* Effect.die(new Error(`tsrs exited ${tsrs.exitCode}: ${tsrs.stdout}`));
