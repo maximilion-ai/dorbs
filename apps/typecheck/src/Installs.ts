@@ -4,6 +4,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Schema from "effect/Schema";
@@ -12,7 +13,8 @@ import * as Semaphore from "effect/Semaphore";
 import { Sha256 } from "@dorbs/protocol/typecheck";
 
 import type { Checkout } from "./Checkouts.ts";
-import { installWorkspace } from "./pnpmWorkspace.ts";
+import { installWorkspace, patchFiles } from "./pnpmWorkspace.ts";
+import { leavesRepo } from "./repoPaths.ts";
 import { runProcess } from "./runProcess.ts";
 import { ServiceConfig } from "./ServiceConfig.ts";
 import * as SingleFlight from "./SingleFlight.ts";
@@ -60,23 +62,46 @@ const make = Effect.gen(function* () {
   const install = Effect.fn("Installs.install")(function* (checkout: Checkout) {
     const dir = path.join(root, checkout.lockfile);
     if (yield* fs.exists(dir).pipe(Effect.orDie)) return dir;
+    const read = (file: string) =>
+      fs
+        .readFileString(path.join(checkout.dir, file))
+        .pipe(Effect.orElseSucceed((): string | undefined => undefined));
+    const workspace = yield* read("pnpm-workspace.yaml");
+    const patches = patchFiles(yield* read("package.json"), workspace);
+    // pnpm reads a patch from where the config says, even outside the install.
+    const outside = patches.filter((patch) => leavesRepo("package.json", patch));
+    if (outside.length > 0) {
+      return yield* new InstallFailed({
+        lockfile: checkout.lockfile,
+        output: `The commit's pnpm config names patch files outside the repo: ${outside.join(", ")}`,
+      });
+    }
     const staging = path.join(root, `.staging-${NodeCrypto.randomUUID()}`);
     yield* Effect.gen(function* () {
       yield* fs.makeDirectory(staging);
+      const copy = (file: string) =>
+        fs
+          .makeDirectory(path.dirname(path.join(staging, file)), { recursive: true })
+          .pipe(
+            Effect.andThen(fs.copyFile(path.join(checkout.dir, file), path.join(staging, file))),
+          );
       // No .npmrc: its registry and pnpmfile settings would steer the shared install.
       for (const manifest of checkout.packages.map((dir) => path.join(dir, "package.json"))) {
-        yield* fs.makeDirectory(path.dirname(path.join(staging, manifest)), { recursive: true });
-        yield* fs.copyFile(path.join(checkout.dir, manifest), path.join(staging, manifest));
+        yield* copy(manifest);
+      }
+      // A missing patch is pnpm's to report.
+      for (const patch of patches) {
+        const info = yield* fs.stat(path.join(checkout.dir, patch)).pipe(Effect.option);
+        if (Option.isSome(info) && info.value.type === "File") yield* copy(patch);
       }
       const lockfile = path.join(checkout.dir, "pnpm-lock.yaml");
       yield* (yield* fs.exists(lockfile))
         ? fs.copyFile(lockfile, path.join(staging, "pnpm-lock.yaml"))
         : fs.writeFileString(path.join(staging, "pnpm-lock.yaml"), "");
-      const workspace = path.join(checkout.dir, "pnpm-workspace.yaml");
-      if (yield* fs.exists(workspace)) {
+      if (workspace !== undefined) {
         yield* fs.writeFileString(
           path.join(staging, "pnpm-workspace.yaml"),
-          installWorkspace(yield* fs.readFileString(workspace)),
+          installWorkspace(workspace),
         );
       }
     }).pipe(Effect.orDie);

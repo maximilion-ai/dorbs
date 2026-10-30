@@ -651,3 +651,64 @@ it.live("treats only a file named package.json as a manifest", () =>
     ),
   ),
 );
+
+const PATCH = "--- a/index.js\n+++ b/index.js\n@@ -1 +1 @@\n-a\n+b\n";
+
+it.live("installs with the patch files the commit's pnpm config names", () =>
+  Effect.gen(function* () {
+    const response = yield* checkChange("patched", {});
+    assert.deepStrictEqual(response._tag === "ActionResult" && response.diagnostics, []);
+  }).pipe(
+    Effect.provide(
+      TestServer({
+        patched: {
+          "package.json": EMPTY_PACKAGE,
+          "pnpm-workspace.yaml":
+            'packages: ["."]\npatchedDependencies:\n  nothing@1.0.0: patches/nothing.patch\n',
+          "pnpm-lock.yaml": `lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+patchedDependencies:
+  nothing@1.0.0: ecca42a505ca8368222ce6cf242af2fa35f9a390cb69a33277731d3fbaef38f0
+
+importers:
+
+  .: {}
+`,
+          "patches/nothing.patch": PATCH,
+          "tsconfig.json": TSCONFIG,
+          "src/a.ts": "export const a = 1;\n",
+        },
+      }),
+    ),
+  ),
+);
+
+it.live("answers 422 for a patch file outside the repo, and installs nothing", () =>
+  Effect.gen(function* () {
+    const response = yield* postCheckRaw("escaping", {});
+    assert.deepStrictEqual(
+      [response.status, (yield* response.text).split("\n").at(-1)],
+      [422, "The commit's pnpm config names patch files outside the repo: ../../outside.patch"],
+    );
+    assert.deepStrictEqual(
+      (yield* spawned).filter((line) => line.startsWith("pnpm")),
+      [],
+    );
+  }).pipe(
+    Effect.provide(
+      TestServer({
+        escaping: {
+          "package.json": EMPTY_PACKAGE,
+          "pnpm-workspace.yaml":
+            'packages: ["."]\npatchedDependencies:\n  nothing@1.0.0: ../../outside.patch\n',
+          "tsconfig.json": TSCONFIG,
+          "src/a.ts": "export const a = 1;\n",
+        },
+      }),
+    ),
+  ),
+);
