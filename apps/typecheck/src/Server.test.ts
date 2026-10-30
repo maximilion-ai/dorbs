@@ -18,14 +18,17 @@ const freePort = Effect.callback<number>((resume) => {
   });
 });
 
-const listeningOn = (env: Record<string, string>) =>
-  Effect.gen(function* () {
+const listeningOn = Effect.fn("test.listeningOn")(
+  function* (_env: Record<string, string>) {
     return HttpServer.formatAddress((yield* HttpServer.HttpServer).address);
-  }).pipe(
-    Effect.provide(
-      Server.layer.pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(env)))),
+  },
+  (effect, env) =>
+    effect.pipe(
+      Effect.provide(
+        Server.layer.pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(env)))),
+      ),
     ),
-  );
+);
 
 it.live("listens on loopback only unless HOST says otherwise", () =>
   Effect.gen(function* () {
