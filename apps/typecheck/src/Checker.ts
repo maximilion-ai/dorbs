@@ -15,8 +15,10 @@ import {
   type ActionResponse,
   type ActionResult,
   isProtectedPath,
+  type Diagnostic,
   type RejectReason,
   ToolchainId,
+  ToolName,
 } from "@dorbs/protocol/typecheck";
 
 import { ActionCache, actionDigest } from "./ActionCache.ts";
@@ -24,6 +26,7 @@ import { BlobStore } from "./BlobStore.ts";
 import { type Checkout, Checkouts, type FetchFailed } from "./Checkouts.ts";
 import { parseOxlint, parseTsrs } from "./diagnostics.ts";
 import { type InstallFailed, Installs } from "./Installs.ts";
+import { outsideModules } from "./moduleSpecifiers.ts";
 import { runProcess } from "./runProcess.ts";
 import { ServiceConfig } from "./ServiceConfig.ts";
 
@@ -50,6 +53,10 @@ const TOOLCHAINS: ReadonlySet<ToolchainId> = new Set([
 ]);
 
 const rejected = (reason: RejectReason) => ({ _tag: "Rejected", reason }) as const;
+
+// The files TypeScript reads as modules, so the ones whose imports can reach another file.
+const MODULE_FILE = /\.[cm]?[jt]sx?$/;
+const SERVICE = ToolName.make("typecheck");
 
 const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -140,6 +147,26 @@ const make = Effect.gen(function* () {
     return [...typeErrors, ...(yield* parseOxlint(oxlint.stdout).pipe(Effect.orDie))];
   }, Effect.orDie);
 
+  // A tool that read an outside file would quote it in its diagnostics, so no tool sees such an import.
+  const outsideImports = Effect.fn("Checker.outsideImports")(function* (action: Action) {
+    const diagnostics: Array<Diagnostic> = [];
+    for (const file of action.files.filter((file) => MODULE_FILE.test(file.path))) {
+      const text = yield* fs.readFileString(blobs.pathOf(file.sha256)).pipe(Effect.orDie);
+      for (const { line, column, specifier } of outsideModules(file.path, text)) {
+        diagnostics.push({
+          tool: SERVICE,
+          path: file.path,
+          line,
+          column,
+          code: "OutsideModule",
+          message: `"${specifier}" can resolve outside the repo. Import only files in the repo or installed packages.`,
+          severity: "error",
+        });
+      }
+    }
+    return diagnostics;
+  });
+
   const run: Checker["Service"]["run"] = Effect.fn("Checker.run")(function* (action) {
     if (!TOOLCHAINS.has(action.toolchain)) return rejected({ _tag: "UnknownToolchain" });
     const repo = repos.get(action.repo);
@@ -152,6 +179,18 @@ const make = Effect.gen(function* () {
     if (cached !== undefined) return { ...cached, cached: true };
     const missing = yield* blobs.missing(action.files.map((file) => file.sha256));
     if (missing.length > 0) return { _tag: "MissingBlobs", sha256s: missing } as const;
+    const outside = yield* outsideImports(action);
+    if (outside.length > 0) {
+      const result: ActionResult = {
+        _tag: "ActionResult",
+        diagnostics: outside,
+        outputs: [],
+        durationMs: 0,
+        cached: false,
+      };
+      yield* cache.put(digest, result);
+      return result;
+    }
     const checkout = yield* checkouts.ensure(repo, action.commit).pipe(
       Effect.map((checkout): Checkout | undefined => checkout),
       Effect.catchTags({ UnknownCommit: () => Effect.succeed(undefined) }),

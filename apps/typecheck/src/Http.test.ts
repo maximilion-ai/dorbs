@@ -431,3 +431,34 @@ it.live(
       ),
     ),
 );
+
+it.live("refuses a changed file that imports from outside the repo, and runs no tool", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const outside = yield* fs.makeTempDirectoryScoped();
+    const secret = `hunter2-${NodeCrypto.randomUUID()}`;
+    yield* fs.writeFileString(`${outside}/secret.ts`, `export const SECRET = "${secret}";\n`);
+    const ranBefore = (yield* spawned).length;
+    const response = yield* checkChange("fixture", {
+      files: {
+        "src/a.ts": `import { SECRET } from "${outside}/secret.ts";\nconst n: typeof SECRET = 1;\n`,
+      },
+    });
+    assert.deepStrictEqual(response._tag === "ActionResult" && response.diagnostics, [
+      {
+        tool: ToolName.make("typecheck"),
+        path: RelativePath.make("src/a.ts"),
+        line: 1,
+        column: 25,
+        code: "OutsideModule",
+        message: `"${outside}/secret.ts" can resolve outside the repo. Import only files in the repo or installed packages.`,
+        severity: "error",
+      },
+    ]);
+    assert.notInclude(JSON.stringify(response), secret);
+    assert.deepStrictEqual(
+      (yield* spawned).slice(ranBefore).filter((line) => line.startsWith("tsrs")),
+      [],
+    );
+  }).pipe(Effect.provide(Server)),
+);
