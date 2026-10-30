@@ -1,4 +1,3 @@
-import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -23,7 +22,7 @@ it.live("kills the whole process group when a process outlives its deadline", ()
     const fs = yield* FileSystem.FileSystem;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const dir = yield* fs.makeTempDirectoryScoped();
-    NodeChildProcess.execFileSync("mkfifo", [`${dir}/child.fifo`]);
+    yield* runProcess(spawner, dir, "mkfifo", ["child.fifo"], { timeout: "10 seconds" });
     const childGone = writersGone(`${dir}/child.fifo`);
     // The shell and its child both ignore SIGTERM, so only SIGKILL ends them.
     const exit = yield* runProcess(
