@@ -43,7 +43,7 @@ pnpm install
 DATA_DIR=/tmp/typecheck REPOS_FILE=repos.json TYPECHECK_TOKEN=dev pnpm --filter @dorbs/typecheck start
 ```
 
-`PORT` defaults to 8080. `pnpm start` puts the npm `tsrs` and `oxlint` launchers on `PATH`. The service also needs `pnpm` and `git` on `PATH`.
+`PORT` defaults to 8080. `HOST` defaults to `127.0.0.1`, so only this machine reaches the service; the Docker image sets `0.0.0.0`. `pnpm start` puts the npm `tsrs` and `oxlint` launchers on `PATH`. The service also needs `pnpm` and `git` on `PATH`.
 
 ## Test
 

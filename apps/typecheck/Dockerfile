@@ -35,7 +35,7 @@ RUN pnpm install --frozen-lockfile --prod --filter @dorbs/typecheck...
 COPY packages/protocol/src packages/protocol/src
 COPY apps/typecheck/src apps/typecheck/src
 
-ENV PORT=8080 DATA_DIR=/data NODE_ENV=production
+ENV HOST=0.0.0.0 PORT=8080 DATA_DIR=/data NODE_ENV=production
 VOLUME /data
 EXPOSE 8080
 WORKDIR /app/apps/typecheck
