@@ -165,6 +165,21 @@ it("writes src/hello.ts and reports the write as a diff under the client cwd", a
   assert.strictEqual(written, HELLO);
 });
 
+it("streams an answer Pi first shows mid-stream exactly once, start included", async () => {
+  const client = await connect();
+  const sessionId = await client.newSession();
+  const response = await client.request(2, "session/prompt", prompt(sessionId, "say slowly"));
+  assert.deepStrictEqual(response.result, { stopReason: "end_turn" });
+  const text = updates(client.frames)
+    .filter((update) => update.sessionUpdate === "agent_message_chunk")
+    .map((update) => update.content.text)
+    .join("");
+  assert.strictEqual(
+    text,
+    "I'll start by cloning the repo.Cloned test/fixture and read its README.",
+  );
+});
+
 it("takes ./ paths and . for the workspace root, as models write them", async () => {
   const client = await connect();
   const sessionId = await client.newSession();

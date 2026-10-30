@@ -73,8 +73,13 @@ const toolResult = (event: Extract<AgentEvent, { type: "tool_execution_end" }>) 
 /** Maps one Pi agent event to the ACP session updates it produces. Paths are reported under the client cwd. */
 export const toSessionUpdates = (sent: Sent, event: AgentEvent, cwd: string): Mapped => {
   switch (event.type) {
-    case "message_start":
-      return [NOTHING_SENT, []];
+    // Pi starts a streamed message with its first committed partial, which may already hold text.
+    case "message_start": {
+      const { message } = event;
+      if (message.role !== "assistant") return [NOTHING_SENT, []];
+      const next = new Map<number, number>();
+      return [next, message.content.flatMap((block, index) => catchUp(next, index, block))];
+    }
     case "message_update":
       return messageUpdate(sent, event.changes);
     case "message_end": {

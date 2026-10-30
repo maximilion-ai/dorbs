@@ -152,3 +152,29 @@ it("streams assistant text once, whether it arrives as a start, a delta, or the 
     ],
   );
 });
+
+it("sends the text of the partial a streamed message starts with, then only what follows", () => {
+  assert.deepStrictEqual(
+    play([
+      { type: "message_start", message: assistant("I'll start by cl") },
+      {
+        type: "message_update",
+        usage: assistant("").usage,
+        changes: [{ type: "text_delta", contentIndex: 0, delta: "oning the repo." }],
+      },
+      {
+        type: "message_end",
+        entry: {
+          id: 9,
+          conversationId: 7,
+          kind: "pi.assistant",
+          model: [assistant("I'll start by cloning the repo.")],
+        },
+      },
+    ]),
+    [
+      { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "I'll start by cl" } },
+      { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "oning the repo." } },
+    ],
+  );
+});
