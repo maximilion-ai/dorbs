@@ -102,19 +102,38 @@ const signingKey = Effect.fn("GitHubApp.signingKey")(function* (app: GitHubApp) 
   });
 });
 
+/** A minted token as a cache keeps it: plain values, so storage can hold it. */
+export type CachedToken = { readonly token: string; readonly refreshAt: number };
+
 /**
- * The installation tokens of `app` with `permissions`: each narrowed to one repo, and reused until
- * five minutes before it expires.
+ * Where minted tokens wait for reuse. Memory by default; storage that outlives the process, such as a Durable
+ * Object's, keeps them across evictions and for every minter that shares it.
+ */
+export type TokenCache = {
+  readonly get: (key: string) => Promise<CachedToken | undefined>;
+  readonly set: (key: string, entry: CachedToken) => Promise<void>;
+};
+
+const memoryCache = (): TokenCache => {
+  const entries = new Map<string, CachedToken>();
+  return {
+    get: async (key) => entries.get(key),
+    set: async (key, entry) => void entries.set(key, entry),
+  };
+};
+
+/**
+ * The installation tokens of `app` with `permissions`: each narrowed to one repo, kept in `cache` until five
+ * minutes before it expires, and minted once for callers that ask at the same time.
  */
 export const installationTokens = Effect.fn("GitHubApp.installationTokens")(function* (
   app: GitHubApp,
   permissions: Permissions,
+  cache: TokenCache = memoryCache(),
 ) {
   const key = yield* Effect.cached(signingKey(app));
-  const cache = new Map<
-    string,
-    { readonly token: Redacted.Redacted; readonly refreshAt: number }
-  >();
+  // Calls waiting on a mint, by cache key; a mint leaves once it settles.
+  const minting = new Map<string, Effect.Effect<Redacted.Redacted, GitHubAppFailed>>();
 
   // GitHub refuses an App JWT that lives over ten minutes; iat sits a minute back for clock drift.
   const jwt = Effect.fn("GitHubApp.jwt")(function* (nowMs: number) {
@@ -167,11 +186,9 @@ export const installationTokens = Effect.fn("GitHubApp.installationTokens")(func
   const unknownShape = (what: string) =>
     new GitHubAppFailed({ reason: `GitHub answered ${what} with an unknown shape` });
 
-  return Effect.fn("GitHubApp.token")(function* (repo: GitHubRepo) {
+  const mint = Effect.fn("GitHubApp.mint")(function* (repo: GitHubRepo, cacheKey: string) {
     const now = yield* Clock.currentTimeMillis;
     const id = `${repo.owner}/${repo.name}`;
-    const cached = cache.get(id);
-    if (cached !== undefined && now < cached.refreshAt) return cached.token;
     const bearer = yield* jwt(now);
     const found = yield* call(
       bearer,
@@ -202,8 +219,29 @@ export const installationTokens = Effect.fn("GitHubApp.installationTokens")(func
     const answer = yield* Effect.fromOption(decodeAccessToken(minted.text)).pipe(
       Effect.mapError(() => unknownShape(`a token for ${id}`)),
     );
-    const token = Redacted.make(answer.token);
-    cache.set(id, { token, refreshAt: Date.parse(answer.expires_at) - REFRESH_MARGIN_MS });
-    return token;
+    yield* Effect.promise(() =>
+      cache.set(cacheKey, {
+        token: answer.token,
+        refreshAt: Date.parse(answer.expires_at) - REFRESH_MARGIN_MS,
+      }),
+    );
+    return Redacted.make(answer.token);
+  });
+
+  return Effect.fn("GitHubApp.token")(function* (repo: GitHubRepo) {
+    // A token for fewer permissions must not answer a call that needs more.
+    const cacheKey = `${repo.owner}/${repo.name} ${JSON.stringify(permissions)}`;
+    const cached = yield* Effect.promise(() => cache.get(cacheKey));
+    if (cached !== undefined && (yield* Clock.currentTimeMillis) < cached.refreshAt) {
+      return Redacted.make(cached.token);
+    }
+    let pending = minting.get(cacheKey);
+    if (pending === undefined) {
+      pending = yield* Effect.cached(
+        mint(repo, cacheKey).pipe(Effect.ensuring(Effect.sync(() => minting.delete(cacheKey)))),
+      );
+      minting.set(cacheKey, pending);
+    }
+    return yield* pending;
   });
 });

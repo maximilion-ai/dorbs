@@ -141,6 +141,18 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
     gh("pr list", "call-list-again"),
     say("Listed twice."),
   ],
+  "gh parallel": [
+    callTool("clone_repo", { repo: "test/github" }, "call-clone"),
+    () =>
+      fauxAssistantMessage(
+        [
+          fauxToolCall("gh", { args: "pr list" }, { id: "call-list" }),
+          fauxToolCall("gh", { args: "pr list --state all" }, { id: "call-list-all" }),
+        ],
+        { stopReason: "toolUse" },
+      ),
+    say("Listed in parallel."),
+  ],
   "clone elsewhere": [
     callTool("clone_repo", { repo: "test/elsewhere" }, "call-clone"),
     say("Not installed."),

@@ -820,6 +820,28 @@ it("mints a fresh token for each call once the cached one is within five minutes
   );
 });
 
+it("mints one token for calls that need one at the same time", async () => {
+  const requests = (await double<unknown[]>("http://github-api.test/__requests")).length;
+  // Each token is due for refresh at once, so each call that finds none in flight mints.
+  await double("http://github-api.test/__lifetime?seconds=240");
+  try {
+    const client = await connect();
+    const sessionId = await client.newSession();
+    const response = await client.request(2, "session/prompt", prompt(sessionId, "gh parallel"));
+    assert.deepStrictEqual(response.result, { stopReason: "end_turn" });
+  } finally {
+    await double("http://github-api.test/__lifetime?seconds=3600");
+  }
+  const after = (await double<{ path: string }[]>("http://github-api.test/__requests")).slice(
+    requests,
+  );
+  assert.deepStrictEqual(
+    after.filter((request) => request.path.endsWith("/access_tokens")).length,
+    2,
+    "one token for the clone, one for both gh calls",
+  );
+});
+
 it("says the GitHub App is not installed on a github.com repo it cannot reach", async () => {
   const client = await connect();
   const sessionId = await client.newSession();
