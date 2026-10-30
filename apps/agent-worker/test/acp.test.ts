@@ -497,7 +497,7 @@ it("replays a history longer than one page of rows in order", async () => {
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 it("deletes a session's history, workspace and Pi session once it has been idle for 30 days", async () => {
-  const start = Date.now();
+  const start = Date.UTC(2030, 0, 1);
   vi.useFakeTimers({ toFake: ["Date"], now: start });
   try {
     const client = await connect();
