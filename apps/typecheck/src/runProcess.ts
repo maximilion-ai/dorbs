@@ -17,7 +17,7 @@ const TOOL_ENV = {
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 
 /** A process that ran past its deadline or wrote more than the service reads; it is killed. */
-export class ProcessFailed extends Schema.TaggedError<ProcessFailed>()("ProcessFailed", {
+class ProcessFailed extends Schema.TaggedError<ProcessFailed>()("ProcessFailed", {
   reason: Schema.String,
 }) {
   override get message(): string {
