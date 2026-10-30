@@ -93,3 +93,17 @@ N concurrent full CLI checks of vitest (CPU-bound):
 - Overlay on ext4 (router, 12,493 tracked files): `cp -r --reflink=auto` with node_modules 17.0 s (falls back to bytes); tracked files only 0.34 s; write 5 files in place and restore them 59 ms.
 
 ## 2-4: see the chat answer.
+
+## Plan
+
+The checker runs on our own Linux box (devbox), in rootless Docker, one container per warm environment. No Cloudflare Containers: the agent runs in Durable Objects and the checker stays on hardware we already have.
+
+Capacity counts environments, not threads. An environment is one repo at one lockfile, and every thread on that repo shares it. The 10-environment run on devbox measured 5.4 changed-file checks per second (about 320 per minute) and 0.85 GB per warm environment, so the 27 GB box holds about 25 environments. 100 threads spread over up to about 25 repos, at one check per thread per minute, fit on that one box. Heavy environments shrink the count: a full pyright run on pydantic-ai needs an 8 GB heap.
+
+Phases:
+
+1. In-place overlay in today's service. Acceptance: a warm repeat check on router spends under 100 ms on file setup.
+2. Recipe, detection and CLI checks in rootless Docker. Acceptance: all 12 spike repos give the same errors as their own CI at HEAD.
+3. Warm language servers and the normalized diagnostics shape, full checks in the background. Acceptance: changed-file diagnostics under 1 s at the median across 10 concurrent environments.
+4. Hardening: registry-only network during setup, none during checks, read-only outside the environment. Acceptance: escape tests for file reads, network and writes all fail.
+5. Eviction and scale. Acceptance: a 100-thread load test stays within the box's memory with no failed checks.
