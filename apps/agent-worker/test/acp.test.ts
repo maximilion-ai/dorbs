@@ -1,6 +1,6 @@
 import { CommitSha, RepoId } from "@dorbs/protocol/typecheck";
-import { assert, it } from "@effect/vitest";
-import { runInDurableObject } from "cloudflare:test";
+import { assert, it, vi } from "@effect/vitest";
+import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
@@ -8,7 +8,7 @@ import * as Effect from "effect/Effect";
 import { connect, open, updates } from "./client.ts";
 import { gh } from "../src/gh.ts";
 import * as GitHub from "../src/GitHub.ts";
-import { COUNT, HELLO, NEW_FILE } from "../src/ScriptedModel.ts";
+import { COUNT, HELLO, LONG_ANSWER, NEW_FILE } from "../src/ScriptedModel.ts";
 import type { AcpSession } from "./worker.ts";
 
 // Captured from T3 Code 125b619: effect-acp's AcpClient.initialize with provider-acp's client capabilities.
@@ -63,6 +63,19 @@ const ended = (stopReason: string) => ({
   sessionUpdate: "session_info_update",
   _meta: { "dorbs/turnEnded": { stopReason } },
 });
+
+const CHUNKS = new Set(["agent_message_chunk", "agent_thought_chunk"]);
+
+/** The thread T3 shows: a run of chunks of one kind reads as one message. */
+const thread = (updates: ReadonlyArray<any>) =>
+  updates.reduce<any[]>((joined, update) => {
+    const last = joined.at(-1);
+    if (CHUNKS.has(update.sessionUpdate) && last?.sessionUpdate === update.sessionUpdate) {
+      const text = `${last.content.text}${update.content.text}`;
+      return [...joined.slice(0, -1), { ...last, content: { type: "text", text } }];
+    }
+    return [...joined, update];
+  }, []);
 
 const double = async <A>(url: string): Promise<A> => (await fetch(url)).json();
 
@@ -444,6 +457,92 @@ it("runs a prompt on after its connection drops, and the next load replays how i
     );
   } finally {
     await double("http://typecheck.test/__release");
+  }
+});
+
+it("keeps a long streamed turn as one history row per message and tool step, and replays the same thread", async () => {
+  const client = await connect();
+  const sessionId = await client.newSession();
+  const response = await client.request(2, "session/prompt", prompt(sessionId, "say at length"));
+  assert.deepStrictEqual(response.result, { stopReason: "end_turn" });
+  const live = updates(client.frames);
+  const rows = await inSession(
+    sessionId,
+    (_instance, state) =>
+      state.storage.sql.exec<{ rows: number }>("SELECT count(*) AS rows FROM acp_history").one()
+        .rows,
+  );
+  const second = await connect();
+  const { replay } = await second.load(1, sessionId);
+  // The prompt; per step a thought, an answer, a tool call and its result; the closing answer; the end.
+  assert.strictEqual(rows, 1 + 3 * 4 + 1 + 1);
+  assert.deepStrictEqual(replay, thread([said("say at length"), ...live, ended("end_turn")]));
+  assert.strictEqual(replay.at(-2)?.content?.text, LONG_ANSWER);
+});
+
+it("replays a history longer than one page of rows in order", async () => {
+  const first = await connect();
+  const sessionId = await first.newSession();
+  const turns: unknown[] = [];
+  for (let id = 2; turns.length < 70; id += 1) {
+    const from = updates(first.frames).length;
+    await first.request(id, "session/prompt", prompt(sessionId, "write hello"));
+    turns.push(said("write hello"), ...updates(first.frames).slice(from), ended("end_turn"));
+  }
+  const second = await connect();
+  const { replay } = await second.load(1, sessionId);
+  assert.deepStrictEqual(replay, turns);
+});
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+it("deletes a session's history, workspace and Pi session once it has been idle for 30 days", async () => {
+  const start = Date.UTC(2030, 0, 1);
+  vi.useFakeTimers({ toFake: ["Date"], now: start });
+  try {
+    const client = await connect();
+    const sessionId = await client.newSession();
+    await client.request(2, "session/prompt", prompt(sessionId, "write hello"));
+    vi.setSystemTime(start + 10 * DAY_MS);
+    await client.request(3, "session/prompt", prompt(sessionId, "read hello"));
+    const stub = env.AcpSession.getByName(sessionId);
+    const kept = () =>
+      inSession(sessionId, async (instance, state) => ({
+        record: state.storage.kv.get("acp/session") !== undefined,
+        history: state.storage.sql
+          .exec<{ rows: number }>("SELECT count(*) AS rows FROM acp_history")
+          .one().rows,
+        workspace: await instance.workspace.fs.readFile("/workspace/src/hello.ts", "utf8").then(
+          () => true,
+          () => false,
+        ),
+        pi: state.storage.sql
+          .exec<{ tables: number }>(
+            "SELECT count(*) AS tables FROM sqlite_master WHERE type = 'table' AND name LIKE 'pi_%'",
+          )
+          .one().tables,
+      }));
+    const before = await kept();
+    assert.deepStrictEqual(
+      [before.record, before.history > 0, before.workspace, before.pi > 0],
+      [true, true, true, true],
+    );
+
+    // Thirty days after the first prompt, the second one ten days later still holds it.
+    vi.setSystemTime(start + 39 * DAY_MS);
+    await runDurableObjectAlarm(stub);
+    assert.deepStrictEqual(await kept(), before);
+
+    vi.setSystemTime(start + 40 * DAY_MS + 1);
+    await runDurableObjectAlarm(stub).catch(() => "the object resets itself after deleting");
+    assert.deepStrictEqual(await kept(), { record: false, history: 0, workspace: false, pi: 0 });
+    const { response } = await (await connect()).load(1, sessionId);
+    assert.deepStrictEqual(response.error, {
+      code: -32002,
+      message: `Unknown session ${sessionId}`,
+    });
+  } finally {
+    vi.useRealTimers();
   }
 });
 

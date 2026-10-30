@@ -28,6 +28,8 @@ export const Worker = Cloudflare.Worker("AgentWorker", {
     GITHUB_API_URL: Config.String("GITHUB_API_URL").pipe(
       Config.withDefault("https://api.github.com"),
     ),
+    // Days a session may sit idle before its history, workspace and Pi session are deleted.
+    SESSION_RETENTION_DAYS: Config.String("SESSION_RETENTION_DAYS").pipe(Config.withDefault("30")),
     ALCHEMY_DEV: Alchemy.ALCHEMY_DEV,
   },
   dev: { port: 8787 },
