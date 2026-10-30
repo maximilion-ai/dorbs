@@ -64,6 +64,9 @@ export const outsideModules = (path: string, text: string): ReadonlyArray<Outsid
     const found = all(needle);
     return found[rank(found, from)] ?? text.length;
   };
+  // TypeScript ends a line, and so a line comment or a string, at any of these.
+  const lineEnd = (from: number): number =>
+    Math.min(next("\n", from), next("\r", from), next("\u2028", from), next("\u2029", from));
 
   // Where the whitespace and comments that start at each index end, filled right to left, so a
   // long gap is walked once however many keywords lead into it.
@@ -72,22 +75,22 @@ export const outsideModules = (path: string, text: string): ReadonlyArray<Outsid
     if (WHITESPACE.test(text.charAt(i))) gapEnd[i] = gapEnd[i + 1] ?? text.length;
     else if (text.startsWith("/*", i)) {
       gapEnd[i] = gapEnd[Math.min(text.length, next("*/", i + 2) + 2)] ?? text.length;
-    } else if (text.startsWith("//", i)) gapEnd[i] = gapEnd[next("\n", i + 2)] ?? text.length;
+    } else if (text.startsWith("//", i)) gapEnd[i] = gapEnd[lineEnd(i + 2)] ?? text.length;
     else gapEnd[i] = i;
   }
   const skipGap = (from: number): number => gapEnd[from] ?? text.length;
 
   // The text of the string literal that opens at `open`, or undefined when none does. An
-  // unterminated string reads to the end of its line, since TypeScript may resolve that too.
+  // unterminated string reads to its line end, since TypeScript may resolve that too.
   const quoted = (open: number): string | undefined => {
     const quote = text.charAt(open);
     if (quote !== '"' && quote !== "'" && quote !== "`") return undefined;
     const close = next(quote, open + 1);
-    const newline = next("\n", open + 1);
+    const newline = lineEnd(open + 1);
     const stop = quote !== "`" && newline < close ? newline : close;
-    const value = text.slice(open + 1, Math.min(stop, open + 2 + MAX_SPECIFIER)).replace(/\r$/, "");
-    if (value.length > MAX_SPECIFIER) return TOO_LONG;
-    // A backslash before the newline continues the string on the next line.
+    if (stop - open - 1 > MAX_SPECIFIER) return TOO_LONG;
+    const value = text.slice(open + 1, stop);
+    // A backslash before the line end continues the string on the next line.
     return stop === newline && value.endsWith("\\") ? CONTINUED : value;
   };
 

@@ -35,6 +35,9 @@ it("finds every module specifier that can resolve outside the repo, wherever Typ
     'import("/etc/\\',
     't");',
     'import "/etc/u',
+    'import // comment\r"/etc/v"',
+    'import "./a/../../../..\u2028v"',
+    `import "${"a/".repeat(2049)}"`,
   ].join("\n");
   assert.deepStrictEqual(at(text), [
     [1, 20, "/Users/op/secret"],
@@ -56,6 +59,9 @@ it("finds every module specifier that can resolve outside the repo, wherever Typ
     [22, 28, "/etc/s"],
     [23, 9, "a string continued on the next line"],
     [25, 9, "/etc/u"],
+    [26, 20, "/etc/v"],
+    [27, 9, "./a/../../../.."],
+    [28, 9, "a specifier over 4096 characters"],
   ]);
 });
 
