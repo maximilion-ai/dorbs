@@ -195,6 +195,28 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
     git("push origin dorbs/proxied", "call-push"),
     say("Pushed."),
   ],
+  "push shared": [
+    callTool("clone_repo", { repo: "test/fixture" }, "call-clone"),
+    git("checkout -b dorbs/shared", "call-checkout"),
+    git("push origin dorbs/shared", "call-push"),
+    say("Pushed dorbs/shared."),
+  ],
+  "push others": [
+    callTool("clone_repo", { repo: "test/fixture" }, "call-clone"),
+    callTool("write_file", { path: "src/hello.ts", content: HELLO }, "call-write"),
+    git("add -A", "call-add"),
+    git('commit -m "add hello"', "call-commit"),
+    git("push origin HEAD:dorbs/shared", "call-push-taken"),
+    git("push origin HEAD:release", "call-push-release"),
+    say("Refused."),
+  ],
+  "push shared again": [
+    callTool("write_file", { path: "src/new.ts", content: NEW_FILE }, "call-write"),
+    git("add -A", "call-add"),
+    git('commit -m "add new"', "call-commit"),
+    git("push", "call-push-again"),
+    say("Pushed dorbs/shared again."),
+  ],
   "e2e push": [
     git("checkout -b dorbs/e2e", "call-checkout"),
     git("add -A", "call-add"),

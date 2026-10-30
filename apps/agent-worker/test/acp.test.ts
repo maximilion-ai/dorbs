@@ -557,6 +557,38 @@ it("refuses pushes to the base branch, force pushes, deletes, other remotes and 
   assert.deepStrictEqual(await refOf("fixture.git", "refs/heads/main"), before);
 });
 
+it("pushes only branches under dorbs/ that are new on origin or that the session created", async () => {
+  const main = await refOf("fixture.git", "refs/heads/main");
+  const owner = await connect();
+  const ownerSession = await owner.newSession();
+  await owner.request(2, "session/prompt", prompt(ownerSession, "push shared"));
+  assert.strictEqual(
+    toolText(updates(owner.frames), "call-push"),
+    `Pushed dorbs/shared to origin at ${main?.commit}`,
+  );
+
+  const other = await connect();
+  const otherSession = await other.newSession();
+  await other.request(2, "session/prompt", prompt(otherSession, "push others"));
+  assert.deepStrictEqual(
+    ["call-push-taken", "call-push-release"].map((id) => toolText(updates(other.frames), id)),
+    [
+      "dorbs/shared already exists on origin, and this session did not create it. Push to a new branch, such as git push origin HEAD:dorbs/my-change.",
+      "Push to a branch under dorbs/, such as git push origin HEAD:dorbs/my-change; release is not one.",
+    ],
+  );
+  assert.strictEqual((await refOf("fixture.git", "refs/heads/dorbs/shared"))?.commit, main?.commit);
+  assert.isNull(await refOf("fixture.git", "refs/heads/release"));
+
+  await owner.request(3, "session/prompt", prompt(ownerSession, "push shared again"));
+  const moved = await refOf("fixture.git", "refs/heads/dorbs/shared");
+  assert.strictEqual(
+    toolText(updates(owner.frames), "call-push-again"),
+    `Pushed dorbs/shared to origin at ${moved?.commit}`,
+  );
+  assert.notStrictEqual(moved?.commit, main?.commit);
+});
+
 it("refuses model writes to the clone's git directory, by any spelling or link, and git commands that rewrite it", async () => {
   const record = await recordSince();
   const client = await connect();

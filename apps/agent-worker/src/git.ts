@@ -9,6 +9,7 @@ export type GitContext = {
   readonly workspace: Workspace;
   readonly dir: string;
   readonly clone: Clone;
+  readonly saveClone: (clone: Clone) => void;
   /** Origin's registered url, or undefined once the repo is no longer registered. */
   readonly url: string | undefined;
   /** Credentials for origin's url; see GitHub's headers. */
@@ -41,6 +42,22 @@ const cliText = ({ stdout, stderr, exitCode }: GitCliResult): string => {
 };
 
 const failed = (message: string): string => `${message}\nexit 1`;
+
+// The agent's pushes go to branches of their own, so none moves a branch whose CI runs with secrets.
+const BRANCH_PREFIX = "dorbs/";
+
+/** The branches origin advertises to a push, from its smart HTTP ref advertisement. */
+const remoteBranches = async (
+  url: string,
+  headers: Readonly<Record<string, string>> | undefined,
+): Promise<ReadonlySet<string>> => {
+  const response = await fetch(`${url}/info/refs?service=git-receive-pack`, {
+    headers: { "user-agent": "git/dorbs", ...headers },
+  });
+  if (!response.ok) throw new Error(`origin answered HTTP ${response.status} to a ref listing`);
+  const advertised = (await response.text()).matchAll(/[0-9a-f]{40} refs\/heads\/([^\0\n]+)/gu);
+  return new Set([...advertised].flatMap(([, branch]) => branch ?? []));
+};
 
 /** Whether a path names the git directory or something in it, in any case. */
 export const isGitPath = (path: string): boolean =>
@@ -79,6 +96,9 @@ const push = async (args: ReadonlyArray<string>, context: GitContext): Promise<s
   if (target === clone.branch) {
     return `The base branch ${clone.branch} is protected. Create a branch with git checkout -b <name>, commit, then push it.`;
   }
+  if (!target.startsWith(BRANCH_PREFIX)) {
+    return `Push to a branch under ${BRANCH_PREFIX}, such as git push origin HEAD:${BRANCH_PREFIX}my-change; ${target} is not one.`;
+  }
   if (context.url === undefined) return failed(`${clone.repo} is no longer a registered repo.`);
   const commit = await workspace.git.revParse({ dir, ref: source }).catch(() => undefined);
   if (commit === undefined) return failed(`error: src refspec ${source} does not match any`);
@@ -89,8 +109,12 @@ const push = async (args: ReadonlyArray<string>, context: GitContext): Promise<s
       "Push refused: the repo's git config sets http.corsProxy, which would send origin's credentials to another host.",
     );
   }
+  const created = clone.created ?? [];
   try {
     const headers = await context.headers(context.url);
+    if (!created.includes(target) && (await remoteBranches(context.url, headers)).has(target)) {
+      return `${target} already exists on origin, and this session did not create it. Push to a new branch, such as git push origin HEAD:${BRANCH_PREFIX}my-change.`;
+    }
     const result = await workspace.git.push({
       dir,
       url: context.url,
@@ -105,6 +129,7 @@ const push = async (args: ReadonlyArray<string>, context: GitContext): Promise<s
   } catch (error) {
     return failed(error instanceof Error ? error.message : String(error));
   }
+  if (!created.includes(target)) context.saveClone({ ...clone, created: [...created, target] });
   return `Pushed ${target} to origin at ${commit}`;
 };
 

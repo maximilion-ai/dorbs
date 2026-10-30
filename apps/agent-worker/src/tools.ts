@@ -326,7 +326,8 @@ const TOOLS = [
     kind: "execute",
     description:
       "Run git in the cloned repo, one command per call, without shell operators. " +
-      "The base branch is protected: commit on a new branch and push it to origin. " +
+      "Commit on a new branch under dorbs/, such as dorbs/add-x, and push it to origin; " +
+      "pushes to other branches are refused. " +
       "fetch, pull, clone, remote and config are not available.",
     parameters: Args("git", 'status, commit -m "Add x" or push -u origin my-branch'),
     replay: "unsafe",
@@ -337,7 +338,14 @@ const TOOLS = [
       }
       const [url, { headers }] = await Promise.all([urlOf(host, clone), host.github()]);
       return text(
-        await git(args, { workspace: host.workspace, dir: WORKSPACE_ROOT, clone, url, headers }),
+        await git(args, {
+          workspace: host.workspace,
+          dir: WORKSPACE_ROOT,
+          clone,
+          saveClone: host.saveClone,
+          url,
+          headers,
+        }),
       );
     },
   }),
