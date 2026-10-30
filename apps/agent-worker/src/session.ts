@@ -29,7 +29,7 @@ export type SessionHost = {
   /** The connection this session's updates go to. */
   readonly attached: () => ConnectionId | undefined;
   readonly attach: (connection: ConnectionId) => void;
-  /** Keeps one session/update message for every later load to replay. */
+  /** Keeps one session/update message for every later load to replay; streamed text arrives joined into runs. */
   readonly remember: (message: string) => void;
   /** Every kept message, oldest first. */
   readonly history: () => ReadonlyArray<string>;
@@ -55,6 +55,16 @@ const Accepted = Data.taggedEnum<Accepted>();
  * when the prompt failed. ACP v1 has no update that ends a turn; the prompt's response does that live.
  */
 const TURN_ENDED = "dorbs/turnEnded";
+
+type Streamed = "agent_message_chunk" | "agent_thought_chunk";
+
+const isStreamed = (
+  update: Acp.SessionUpdate,
+): update is Extract<Acp.SessionUpdate, { sessionUpdate: Streamed }> =>
+  update.sessionUpdate === "agent_message_chunk" || update.sessionUpdate === "agent_thought_chunk";
+
+/** The most streamed text one history row keeps, in characters; JSON escaping keeps a row well under 2 MB. */
+const RUN_CHARS = 32 * 1024;
 
 const decodeLoad = Schema.decodeUnknownEffect(Acp.LoadSessionRequest);
 const decodePrompt = Schema.decodeUnknownEffect(Acp.PromptRequest);
@@ -107,15 +117,51 @@ export const makeSession = (host: SessionHost) => {
     return Result.succeed(command);
   };
 
+  const message = (update: Acp.SessionUpdate) =>
+    encodeNotification({ sessionId: host.sessionId, update }).pipe(
+      Effect.map((params) => toMessage({ jsonrpc: "2.0", method: "session/update", params })),
+    );
+
+  // Streamed text is kept as one row per run of chunks of one kind, not one per chunk.
+  let run: { readonly sessionUpdate: Streamed; text: string } | undefined;
+
+  const flush = () => {
+    if (run === undefined) return;
+    const { sessionUpdate, text } = run;
+    run = undefined;
+    host.remember(
+      Effect.runSync(
+        message({ sessionUpdate, content: { type: "text", text } }).pipe(Effect.orDie),
+      ),
+    );
+  };
+
+  const keep = (update: Acp.SessionUpdate, encoded: string) => {
+    if (isStreamed(update) && update.content.type === "text") {
+      const { text } = update.content;
+      if (
+        run?.sessionUpdate === update.sessionUpdate &&
+        run.text.length + text.length <= RUN_CHARS
+      ) {
+        run.text += text;
+        return;
+      }
+      flush();
+      run = { sessionUpdate: update.sessionUpdate, text };
+      return;
+    }
+    flush();
+    host.remember(encoded);
+  };
+
   /** Keeps an update for replay and sends it to the attached connection, unless that one is `except`. */
   const publish = (update: Acp.SessionUpdate, except?: ConnectionId) =>
     Effect.runSync(
-      encodeNotification({ sessionId: host.sessionId, update }).pipe(
-        Effect.map((params) => {
-          const message = toMessage({ jsonrpc: "2.0", method: "session/update", params });
-          host.remember(message);
+      message(update).pipe(
+        Effect.map((encoded) => {
+          keep(update, encoded);
           const attached = host.attached();
-          if (attached !== undefined && attached !== except) host.send(attached, message);
+          if (attached !== undefined && attached !== except) host.send(attached, encoded);
         }),
         Effect.catchTags({
           SchemaError: (error) => Effect.logError("Dropped an invalid session/update", error),
@@ -151,6 +197,7 @@ export const makeSession = (host: SessionHost) => {
     yield* decodeLoad(params).pipe(Effect.mapError(invalidParams));
     yield* stored;
     host.attach(connection);
+    flush();
     for (const message of host.history()) host.send(connection, message);
     return Accepted.Answered({ result: yield* encodeLoadResponse({}).pipe(Effect.orDie) });
   });

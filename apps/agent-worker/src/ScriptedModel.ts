@@ -3,6 +3,7 @@ import {
   fauxAssistantMessage,
   fauxProvider,
   fauxText,
+  fauxThinking,
   fauxToolCall,
   type AssistantMessage,
   type AssistantMessageEventStream,
@@ -14,6 +15,11 @@ import type { Provider } from "@earendil-works/pi-ai/models";
 export const HELLO = "export const hello = (name: string): string => `Hello, ${name}!`;\n";
 export const COUNT = 'export const count: number = "three";\n';
 export const NEW_FILE = "export const fresh = true;\n";
+/** A long answer, which the faux provider streams as hundreds of deltas. */
+export const LONG_ANSWER = Array.from(
+  { length: 200 },
+  (_, line) => `Line ${line + 1} of a long answer.`,
+).join("\n");
 const E2E_HELLO = 'export const n: number = "x";\n';
 const E2E_PACKAGE = '{ "name": "dorbs-e2e", "private": true, "type": "module" }\n';
 
@@ -167,6 +173,22 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
       ),
     say("Cloned test/fixture and read its README."),
   ],
+  // Three steps of a thought, an answer and a tool call, then a closing answer, each streamed in many deltas.
+  "say at length": [
+    ...["call-list-1", "call-list-2", "call-list-3"].map(
+      (id): Step =>
+        () =>
+          fauxAssistantMessage(
+            [
+              fauxThinking(LONG_ANSWER),
+              fauxText(LONG_ANSWER),
+              fauxToolCall("list_files", {}, { id }),
+            ],
+            { stopReason: "toolUse" },
+          ),
+    ),
+    say(LONG_ANSWER),
+  ],
   "e2e push": [
     git("checkout -b dorbs/e2e", "call-checkout"),
     git("add -A", "call-add"),
@@ -186,40 +208,50 @@ const nextStep = (messages: ReadonlyArray<Message>): Step => {
   return script[replies] ?? say("Script finished.");
 };
 
-/** Scripts whose answers stream slowly, as a real model's do. */
-const SLOW = new Set(["say slowly"]);
-
-// Longer than Pi's 100 ms partial interval, so Pi commits the answer while it is still streaming.
-const PAUSE_MS = 250;
-
-const pause = () => new Promise((resolve) => setTimeout(resolve, PAUSE_MS));
-
 /**
- * Replays the scripted answer with each text block in two halves and a pause after each, so Pi commits the first
- * half as the partial that starts the message and the second as a delta.
+ * Scripts whose answers stream slowly, as a real model's do: each text and thinking block in `parts`, each part sent
+ * as `deltas` deltas, with a pause after each part longer than Pi's 100 ms partial interval, so Pi commits the answer
+ * while it is still streaming.
  */
-const slowly = (fast: AssistantMessageEventStream): AssistantMessageEventStream => {
+const SLOW = new Map([
+  // Pi commits the first half as the partial that starts the message and the second as a delta.
+  ["say slowly", { parts: 2, deltas: 1, pauseMs: 250 }],
+  ["say at length", { parts: 4, deltas: 8, pauseMs: 150 }],
+]);
+
+type Pace = typeof SLOW extends Map<string, infer P> ? P : never;
+
+const pieces = (text: string, count: number): string[] => {
+  const size = Math.ceil(text.length / count);
+  return Array.from({ length: count }, (_, i) => text.slice(i * size, (i + 1) * size));
+};
+
+/** Replays the scripted answer at `pace`. */
+const slowly = (fast: AssistantMessageEventStream, pace: Pace): AssistantMessageEventStream => {
   const slow = createAssistantMessageEventStream();
   void (async () => {
     const message = await fast.result();
     const content: AssistantMessage["content"] = [];
     for (const [contentIndex, block] of message.content.entries()) {
-      if (block.type !== "text") {
+      if (block.type === "toolCall") {
         content.push(block);
         continue;
       }
-      const half = Math.ceil(block.text.length / 2);
-      const text = { type: "text" as const, text: "" };
-      content.push(text);
-      for (const delta of [block.text.slice(0, half), block.text.slice(half)]) {
-        text.text += delta;
-        slow.push({
-          type: "text_delta",
-          contentIndex,
-          delta,
-          partial: structuredClone({ ...message, content }),
-        });
-        await pause();
+      const streamed = block.type === "text" ? { ...block, text: "" } : { ...block, thinking: "" };
+      content.push(streamed);
+      const whole = block.type === "text" ? block.text : block.thinking;
+      for (const part of pieces(whole, pace.parts)) {
+        for (const delta of pieces(part, pace.deltas)) {
+          if (streamed.type === "text") streamed.text += delta;
+          else streamed.thinking += delta;
+          slow.push({
+            type: streamed.type === "text" ? "text_delta" : "thinking_delta",
+            contentIndex,
+            delta,
+            partial: structuredClone({ ...message, content }),
+          });
+        }
+        await new Promise((resolve) => setTimeout(resolve, pace.pauseMs));
       }
     }
     slow.end(message);
@@ -240,7 +272,8 @@ export const scriptedModel = () => {
     ...faux.provider,
     streamSimple: (model, context, options) => {
       const stream = faux.provider.streamSimple(model, context, options);
-      return SLOW.has(lastPrompt(context.messages)) ? slowly(stream) : stream;
+      const pace = SLOW.get(lastPrompt(context.messages));
+      return pace === undefined ? stream : slowly(stream, pace);
     },
   };
   return { provider, model: faux.getModel() };
