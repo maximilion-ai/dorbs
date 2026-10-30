@@ -130,6 +130,16 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
     gh("pr merge 1", "call-pr-merge"),
     say("Opened a pull request."),
   ],
+  "gh twice": [
+    callTool("clone_repo", { repo: "test/github" }, "call-clone"),
+    gh("pr list", "call-list"),
+    gh("pr list", "call-list-again"),
+    say("Listed twice."),
+  ],
+  "clone elsewhere": [
+    callTool("clone_repo", { repo: "test/elsewhere" }, "call-clone"),
+    say("Not installed."),
+  ],
   "gh off github": [
     callTool("clone_repo", { repo: "test/fixture" }, "call-clone"),
     gh("pr view", "call-gh"),

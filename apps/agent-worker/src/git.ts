@@ -1,5 +1,5 @@
 import type { Workspace } from "@cloudflare/computer";
-import type { AuthCallback, GitCliResult } from "@cloudflare/computer/git";
+import type { GitCliResult } from "@cloudflare/computer/git";
 
 import { parseArgv } from "./argv.ts";
 import type { Clone } from "./Typecheck.ts";
@@ -11,7 +11,8 @@ export type GitContext = {
   readonly clone: Clone;
   /** Origin's registered url, or undefined once the repo is no longer registered. */
   readonly url: string | undefined;
-  readonly onAuth: AuthCallback;
+  /** Credentials for origin's url; see GitHub's headers. */
+  readonly headers: (url: string) => Promise<Readonly<Record<string, string>> | undefined>;
 };
 
 // The agent owns the network and the remotes; push is the one way out, and the tool runs it.
@@ -68,12 +69,13 @@ const push = async (args: ReadonlyArray<string>, context: GitContext): Promise<s
   const commit = await workspace.git.revParse({ dir, ref: source }).catch(() => undefined);
   if (commit === undefined) return failed(`error: src refspec ${source} does not match any`);
   try {
+    const headers = await context.headers(context.url);
     const result = await workspace.git.push({
       dir,
       url: context.url,
       ref: source,
       remoteRef: `refs/heads/${target}`,
-      onAuth: context.onAuth,
+      ...(headers === undefined ? {} : { headers: { ...headers } }),
     });
     if (!result.ok) {
       const refErrors = Object.values(result.refs).flatMap((ref) => ref.error ?? []);

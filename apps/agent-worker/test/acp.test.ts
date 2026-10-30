@@ -223,7 +223,7 @@ it("refuses to clone a repo that is not registered", async () => {
         type: "content",
         content: {
           type: "text",
-          text: "<harness>\n[error] evil/repo is not a registered repo. Registered: test/fixture, test/github\n</harness>",
+          text: "<harness>\n[error] evil/repo is not a registered repo. Registered: test/fixture, test/github, test/elsewhere\n</harness>",
         },
       },
     ],
@@ -498,7 +498,7 @@ it("commits on a new branch and pushes it to origin, as git on a command line", 
   assert.deepStrictEqual(
     (await record.log()).filter((line) => line.includes("with credentials")),
     [],
-    "GITHUB_TOKEN goes to github.com remotes only",
+    "GitHub credentials go to github.com remotes only",
   );
 });
 
@@ -540,7 +540,25 @@ it("refuses pushes to the base branch, force pushes, deletes, other remotes and 
   assert.deepStrictEqual(await refOf("fixture.git", "refs/heads/main"), before);
 });
 
-it("pushes to github.com with GITHUB_TOKEN and opens a pull request with gh", async () => {
+/** The App's two calls for a test/github token: find the installation, then mint for that repo alone. */
+const MINT_GITHUB_TOKEN = [
+  { method: "GET", path: "/repos/test/github/installation", body: null },
+  {
+    method: "POST",
+    path: "/app/installations/1/access_tokens",
+    body: {
+      repositories: ["github"],
+      permissions: {
+        contents: "write",
+        pull_requests: "write",
+        issues: "read",
+        metadata: "read",
+      },
+    },
+  },
+];
+
+it("clones, pushes and opens a pull request with one token the GitHub App mints for the repo alone", async () => {
   const requests = (await double<unknown[]>("http://github-api.test/__requests")).length;
   const client = await connect();
   const sessionId = await client.newSession();
@@ -579,6 +597,7 @@ it("pushes to github.com with GITHUB_TOKEN and opens a pull request with gh", as
   assert.deepStrictEqual(
     (await double<unknown[]>("http://github-api.test/__requests")).slice(requests),
     [
+      ...MINT_GITHUB_TOKEN,
       {
         method: "POST",
         path: "/repos/test/github/pulls",
@@ -606,8 +625,52 @@ it("pushes to github.com with GITHUB_TOKEN and opens a pull request with gh", as
     instance.workspace.fs.readFile("/workspace/.git/config", "utf8"),
   );
   assert.include(config, "url = https://github.com/test/github.git");
-  assert.notInclude(config, "github-token");
-  assert.notInclude(JSON.stringify(client.frames), "github-token");
+  const tokens = await double<string[]>("http://github-api.test/__tokens");
+  assert.isNotEmpty(tokens);
+  for (const token of tokens) {
+    assert.notInclude(config, token);
+    assert.notInclude(JSON.stringify(client.frames), token);
+  }
+});
+
+it("mints a fresh token for each call once the cached one is within five minutes of expiry", async () => {
+  const requests = (await double<unknown[]>("http://github-api.test/__requests")).length;
+  await double("http://github-api.test/__lifetime?seconds=240");
+  try {
+    const client = await connect();
+    const sessionId = await client.newSession();
+    const response = await client.request(2, "session/prompt", prompt(sessionId, "gh twice"));
+    assert.deepStrictEqual(response.result, { stopReason: "end_turn" });
+    assert.deepStrictEqual(
+      ["call-clone", "call-list", "call-list-again"].map(
+        (id) => toolResult(updates(client.frames), id)?.status,
+      ),
+      ["completed", "completed", "completed"],
+    );
+  } finally {
+    await double("http://github-api.test/__lifetime?seconds=3600");
+  }
+  const list = {
+    method: "GET",
+    path: "/repos/test/github/pulls?state=open&per_page=30",
+    body: null,
+  };
+  assert.deepStrictEqual(
+    (await double<unknown[]>("http://github-api.test/__requests")).slice(requests),
+    [...MINT_GITHUB_TOKEN, ...MINT_GITHUB_TOKEN, list, ...MINT_GITHUB_TOKEN, list],
+  );
+});
+
+it("says the GitHub App is not installed on a github.com repo it cannot reach", async () => {
+  const client = await connect();
+  const sessionId = await client.newSession();
+  await client.request(2, "session/prompt", prompt(sessionId, "clone elsewhere"));
+  const result = toolResult(updates(client.frames), "call-clone");
+  assert.strictEqual(result?.status, "failed");
+  assert.strictEqual(
+    toolText(updates(client.frames), "call-clone"),
+    "<harness>\n[error] The GitHub App is not installed on test/elsewhere. Install it on the repo to give the agent access.\n</harness>",
+  );
 });
 
 it("says gh is not configured for a repo that is not on github.com", async () => {
@@ -620,24 +683,29 @@ it("says gh is not configured for a repo that is not on github.com", async () =>
   );
 });
 
-it.effect("says gh is not configured when the Worker has no GITHUB_TOKEN", () =>
-  Effect.gen(function* () {
-    const { api } = yield* GitHub.GitHub;
-    const said = yield* Effect.promise(() =>
-      gh("pr view", {
-        clone: {
-          repo: RepoId.make("test/github"),
-          commit: CommitSha.make("0".repeat(40)),
-          branch: "main",
-        },
-        url: "https://github.com/test/github.git",
-        api,
-        currentBranch: async () => "dorbs/pr",
-      }),
-    );
-    assert.strictEqual(said, "gh is not configured: the agent has no GITHUB_TOKEN.");
-  }).pipe(
-    Effect.provide(GitHub.layer),
-    Effect.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({}))),
-  ),
+it.effect(
+  "sends no credentials and says gh is not configured when the Worker has no GitHub App",
+  () =>
+    Effect.gen(function* () {
+      const { api, headers } = yield* GitHub.GitHub;
+      assert.isUndefined(
+        yield* Effect.promise(() => headers("https://github.com/test/github.git")),
+      );
+      const said = yield* Effect.promise(() =>
+        gh("pr view", {
+          clone: {
+            repo: RepoId.make("test/github"),
+            commit: CommitSha.make("0".repeat(40)),
+            branch: "main",
+          },
+          url: "https://github.com/test/github.git",
+          api,
+          currentBranch: async () => "dorbs/pr",
+        }),
+      );
+      assert.strictEqual(said, "gh is not configured: the agent has no GitHub App.");
+    }).pipe(
+      Effect.provide(GitHub.layer),
+      Effect.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({}))),
+    ),
 );

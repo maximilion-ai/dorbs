@@ -248,7 +248,7 @@ const TOOLS = [
         if (cloned.repo !== id) throw new Error(`The workspace already holds ${cloned.repo}.`);
         return text(`${id} is already cloned at ${cloned.commit} into the workspace root.`);
       }
-      const headers = (await host.github()).headers(url);
+      const headers = await (await host.github()).headers(url);
       await host.workspace.git.clone({
         url,
         dir: WORKSPACE_ROOT,
@@ -302,9 +302,9 @@ const TOOLS = [
       if (clone === undefined) {
         return text("No repo is cloned, so there is no git repository. Call clone_repo first.");
       }
-      const [url, { onAuth }] = await Promise.all([urlOf(host, clone), host.github()]);
+      const [url, { headers }] = await Promise.all([urlOf(host, clone), host.github()]);
       return text(
-        await git(args, { workspace: host.workspace, dir: WORKSPACE_ROOT, clone, url, onAuth }),
+        await git(args, { workspace: host.workspace, dir: WORKSPACE_ROOT, clone, url, headers }),
       );
     },
   }),

@@ -1,6 +1,6 @@
 // Runs in the vitest process as the Worker's outbound fetch: the typecheck service at typecheck.test,
 // the registered repo test/fixture at git.test, test/github at github.com, and GitHub's REST API at
-// github-api.test.
+// github-api.test. The GitHub App is installed on test/github only.
 
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
@@ -11,9 +11,9 @@ import { Action } from "@dorbs/protocol/typecheck";
 import * as Schema from "effect/Schema";
 
 import { makeRepo, serveGit } from "../../../scripts/gitFixture.ts";
+import { githubDouble, makeAppKey } from "../../../scripts/githubFixture.ts";
 
 const TOKEN = "typecheck-token";
-const GITHUB_TOKEN = "github-token";
 const decodeAction = Schema.decodeUnknownSync(Schema.fromJsonString(Action));
 const blobs = new Map<string, string>();
 const log: string[] = [];
@@ -36,6 +36,14 @@ NodeFS.mkdirSync(NodePath.join(gitRoot, "test"));
 makeRepo(NodePath.join(gitRoot, "test/github.git"), FIXTURE);
 const git = serveGit(gitRoot);
 
+/** The GitHub App's key pair; vitest.config.ts binds the private key. */
+export const APP_KEY = makeAppKey();
+const github = githubDouble({
+  publicKey: APP_KEY.publicKey,
+  installations: { "test/github": 1 },
+  gitRoot,
+});
+
 /** A ref of a bare repo under gitRoot: its commit and the files of its tree, or null when it is absent. */
 const readRef = (repo: string, ref: string) => {
   const run = (...args: string[]) =>
@@ -54,9 +62,6 @@ const readRef = (repo: string, ref: string) => {
   }
 };
 
-const basic = (username: string, password: string) =>
-  `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
-
 type PullRequest = {
   number: number;
   title: string;
@@ -73,7 +78,6 @@ const pulls: PullRequest[] = [];
 const githubRequests: { method: string; path: string; body: unknown }[] = [];
 
 const GITHUB_HEADERS = {
-  authorization: `Bearer ${GITHUB_TOKEN}`,
   accept: "application/vnd.github+json",
   "x-github-api-version": "2022-11-28",
   "user-agent": "dorbs",
@@ -81,7 +85,12 @@ const GITHUB_HEADERS = {
 
 const githubApi = async (request: Request, url: URL): Promise<Response> => {
   if (url.pathname === "/__requests") return json(githubRequests);
-  const text = await request.text();
+  if (url.pathname === "/__tokens") return json(github.issued().map((grant) => grant.token));
+  if (url.pathname === "/__lifetime") {
+    github.setLifetime(Number(url.searchParams.get("seconds")));
+    return json(true);
+  }
+  const text = await request.clone().text();
   githubRequests.push({
     method: request.method,
     path: `${url.pathname}${url.search}`,
@@ -91,6 +100,9 @@ const githubApi = async (request: Request, url: URL): Promise<Response> => {
     ([name, value]) => request.headers.get(name) !== value,
   );
   if (wrong !== undefined) return json({ message: `Bad ${wrong[0]}` }, 401);
+  const answered = await github.app(request);
+  if (answered !== undefined) return answered;
+  if (!github.authorizes(request, "test/github")) return json({ message: "Bad credentials" }, 401);
   if (url.pathname !== "/repos/test/github/pulls") return json({ message: "Not Found" }, 404);
   if (request.method === "GET") {
     const head = url.searchParams.get("head")?.replace(/^test:/u, "");
@@ -168,16 +180,8 @@ export const typecheckDouble = async (request: Request): Promise<Response> => {
     }
     return git(request);
   }
-  if (url.host === "github.com") {
-    // test/github is private: fetches need the token as well as pushes.
-    if (request.headers.get("authorization") !== basic("x-access-token", GITHUB_TOKEN)) {
-      return new Response("Authentication required", {
-        status: 401,
-        headers: { "www-authenticate": 'Basic realm="GitHub"' },
-      });
-    }
-    return git(request);
-  }
+  // test/github is private: fetches need a token as well as pushes.
+  if (url.host === "github.com") return github.git(request);
   if (url.host === "github-api.test") return githubApi(request, url);
   if (url.host !== "typecheck.test") return new Response("Tests have no network", { status: 502 });
   if (url.pathname === "/__log") return json(log);

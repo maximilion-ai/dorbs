@@ -1,7 +1,8 @@
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vite-plus";
 
-import { typecheckDouble } from "./test/typecheck-double.ts";
+import { GITHUB_APP_ID } from "../../scripts/githubFixture.ts";
+import { APP_KEY, typecheckDouble } from "./test/typecheck-double.ts";
 
 export default defineConfig({
   plugins: [
@@ -21,8 +22,10 @@ export default defineConfig({
           REPOS: JSON.stringify([
             { id: "test/fixture", url: "http://git.test/fixture.git" },
             { id: "test/github", url: "https://github.com/test/github.git" },
+            { id: "test/elsewhere", url: "https://github.com/test/elsewhere.git" },
           ]),
-          GITHUB_TOKEN: "github-token",
+          GITHUB_APP_ID,
+          GITHUB_APP_PRIVATE_KEY: APP_KEY.privateKey,
           GITHUB_API_URL: "http://github-api.test",
           MODEL_PROVIDER: "scripted",
           MODEL_ID: "scripted",

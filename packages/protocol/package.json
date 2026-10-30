@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./github-app": {
+      "types": "./src/githubApp.ts",
+      "import": "./src/githubApp.ts"
+    },
     "./acp": {
       "types": "./src/acp.ts",
       "import": "./src/acp.ts"

@@ -1,5 +1,11 @@
-import type { AuthCallback } from "@cloudflare/computer/git";
-import * as Config from "effect/Config";
+import {
+  GitHubAppConfig,
+  gitHubRepo,
+  installationTokens,
+  type GitHubAppFailed,
+  type GitHubRepo,
+  type Permissions,
+} from "@dorbs/protocol/github-app";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -15,30 +21,35 @@ export class GitHubFailed extends Schema.TaggedError<GitHubFailed>()("GitHubFail
   }
 }
 
-/** One call to GitHub's REST API; resolves with the decoded JSON body of a 2xx answer. */
+/** One call to GitHub's REST API under /repos/{owner}/{name}; resolves with the decoded JSON body of a 2xx answer. */
 export type GitHubApi = (
+  repo: GitHubRepo,
   method: "GET" | "POST",
   path: string,
   body?: unknown,
 ) => Effect.Effect<unknown, GitHubFailed>;
 
-/** GITHUB_TOKEN as the agent may use it: git credentials for github.com remotes, and the REST API. */
+/** The GitHub App as the agent may use it: per-repo credentials for github.com remotes, and the REST API. */
 export class GitHub extends Context.Service<
   GitHub,
   {
-    /** Credentials for a github.com remote, and none for any other host. */
-    readonly onAuth: AuthCallback;
-    /** The same credentials as request headers, for clone, which takes no onAuth. */
-    readonly headers: (url: string) => Readonly<Record<string, string>> | undefined;
-    /** GitHub's REST API, or undefined without a GITHUB_TOKEN. */
+    /**
+     * Credentials for a github.com repo as request headers, for clone and push; none for any other
+     * host or without the App. Rejects with GitHubFailed when the App cannot reach the repo.
+     */
+    readonly headers: (url: string) => Promise<Readonly<Record<string, string>> | undefined>;
+    /** GitHub's REST API, or undefined without a GitHub App. */
     readonly api: GitHubApi | undefined;
   }
 >()("dorbs/agent-worker/GitHub") {}
 
-const GitHubConfig = Config.all({
-  token: Config.option(Config.Redacted("GITHUB_TOKEN")),
-  apiUrl: Config.URL("GITHUB_API_URL").pipe(Config.withDefault(new URL("https://api.github.com"))),
-});
+// The agent pushes branches and opens pull requests; it only reads issues.
+const PERMISSIONS: Permissions = {
+  contents: "write",
+  pull_requests: "write",
+  issues: "read",
+  metadata: "read",
+};
 
 const decodeJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
 
@@ -70,60 +81,52 @@ const failure = (status: number, text: string): GitHubFailed => {
 };
 
 const make = Effect.gen(function* () {
-  const config = yield* GitHubConfig;
-  // A deploy without the secret binds it empty.
-  const token = Option.filter(config.token, (secret) => Redacted.value(secret) !== "");
-  const base = config.apiUrl.href.replace(/\/$/, "");
+  const app = yield* GitHubAppConfig;
+  if (Option.isNone(app)) return { headers: async () => undefined, api: undefined };
+  const mint = yield* installationTokens(app.value, PERMISSIONS);
+  const token = (repo: GitHubRepo) =>
+    mint(repo).pipe(Effect.mapError(({ reason }: GitHubAppFailed) => new GitHubFailed({ reason })));
+  const base = app.value.apiUrl;
 
-  const onAuth: AuthCallback = (url) =>
-    Option.isSome(token) && new URL(url).hostname === "github.com"
-      ? { username: "x-access-token", password: Redacted.value(token.value) }
-      : undefined;
-
-  const headers = (url: string) => {
-    const auth = onAuth(url, {});
-    return auth === undefined || auth instanceof Promise
-      ? undefined
-      : { authorization: `Basic ${btoa(`${auth.username}:${auth.password}`)}` };
+  const headers = async (url: string) => {
+    const repo = gitHubRepo(url);
+    if (repo === undefined) return undefined;
+    const secret = await Effect.runPromise(token(repo));
+    return { authorization: `Basic ${btoa(`x-access-token:${Redacted.value(secret)}`)}` };
   };
 
-  const api = Option.map(
-    token,
-    (secret): GitHubApi =>
-      (method, path, body) =>
-        Effect.tryPromise({
-          try: async () => {
-            const response = await fetch(`${base}${path}`, {
-              method,
-              headers: {
-                accept: "application/vnd.github+json",
-                authorization: `Bearer ${Redacted.value(secret)}`,
-                "user-agent": "dorbs",
-                "x-github-api-version": "2022-11-28",
-                ...(body === undefined ? {} : { "content-type": "application/json" }),
-              },
-              ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-            });
-            return { status: response.status, ok: response.ok, text: await response.text() };
+  const api: GitHubApi = Effect.fn("GitHub.api")(function* (repo, method, path, body) {
+    const secret = yield* token(repo);
+    const { status, ok, text } = yield* Effect.tryPromise({
+      try: async () => {
+        const response = await fetch(`${base}/repos/${repo.owner}/${repo.name}${path}`, {
+          method,
+          headers: {
+            accept: "application/vnd.github+json",
+            authorization: `Bearer ${Redacted.value(secret)}`,
+            "user-agent": "dorbs",
+            "x-github-api-version": "2022-11-28",
+            ...(body === undefined ? {} : { "content-type": "application/json" }),
           },
-          catch: (cause) =>
-            new GitHubFailed({
-              reason: `${base} did not answer: ${cause instanceof Error ? cause.message : String(cause)}`,
-            }),
-        }).pipe(
-          Effect.flatMap(({ status, ok, text }) => {
-            if (!ok) return Effect.fail(failure(status, text));
-            return Option.match(decodeJson(text), {
-              onNone: () =>
-                Effect.fail(new GitHubFailed({ reason: `${method} ${path} sent invalid JSON` })),
-              onSome: Effect.succeed,
-            });
-          }),
-        ),
-  );
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+        return { status: response.status, ok: response.ok, text: await response.text() };
+      },
+      catch: (cause) =>
+        new GitHubFailed({
+          reason: `${base} did not answer: ${cause instanceof Error ? cause.message : String(cause)}`,
+        }),
+    });
+    if (!ok) return yield* failure(status, text);
+    return yield* Option.match(decodeJson(text), {
+      onNone: () =>
+        Effect.fail(new GitHubFailed({ reason: `${method} ${path} sent invalid JSON` })),
+      onSome: Effect.succeed,
+    });
+  });
 
-  return { onAuth, headers, api: Option.getOrUndefined(api) };
+  return { headers, api };
 });
 
-/** Reads GITHUB_TOKEN, optional, and GITHUB_API_URL, https://api.github.com by default. */
+/** Reads GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY, optional, and GITHUB_API_URL, https://api.github.com by default. */
 export const layer = Layer.effect(GitHub, make);

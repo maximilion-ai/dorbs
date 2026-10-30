@@ -20,8 +20,11 @@ export const Worker = Cloudflare.Worker("AgentWorker", {
     MODEL_PROVIDER: Config.String("MODEL_PROVIDER"),
     MODEL_ID: Config.String("MODEL_ID"),
     OPENROUTER_API_KEY: Config.Redacted("OPENROUTER_API_KEY"),
-    // Optional; an empty token means none, since an undefined default sends alchemy's env inference into a loop.
-    GITHUB_TOKEN: Config.Redacted("GITHUB_TOKEN").pipe(Config.withDefault(Redacted.make(""))),
+    // Optional; empty means no GitHub App, since an undefined default sends alchemy's env inference into a loop.
+    GITHUB_APP_ID: Config.String("GITHUB_APP_ID").pipe(Config.withDefault("")),
+    GITHUB_APP_PRIVATE_KEY: Config.Redacted("GITHUB_APP_PRIVATE_KEY").pipe(
+      Config.withDefault(Redacted.make("")),
+    ),
     GITHUB_API_URL: Config.String("GITHUB_API_URL").pipe(
       Config.withDefault("https://api.github.com"),
     ),

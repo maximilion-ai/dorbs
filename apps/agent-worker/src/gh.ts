@@ -1,3 +1,4 @@
+import { gitHubRepo, type GitHubRepo } from "@dorbs/protocol/github-app";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
@@ -57,8 +58,6 @@ const Repo = Schema.Struct({
 });
 
 const Comment = Schema.Struct({ html_url: Schema.String });
-
-const GITHUB_URL = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/u;
 
 type Flags = Readonly<Record<string, string | true>>;
 
@@ -125,8 +124,8 @@ const viewText = (
     body ?? "",
   ].join("\n");
 
-const make = (context: GhContext, owner: string, name: string, api: GitHubApi, base: string) => {
-  const repo = `/repos/${owner}/${name}`;
+const make = (context: GhContext, repo: GitHubRepo, api: GitHubApi, base: string) => {
+  const { owner, name } = repo;
 
   const call = <S extends Schema.Constraint>(
     schema: S,
@@ -134,7 +133,7 @@ const make = (context: GhContext, owner: string, name: string, api: GitHubApi, b
     path: string,
     body?: unknown,
   ) =>
-    api(method, `${repo}${path}`, body).pipe(
+    api(repo, method, path, body).pipe(
       Effect.flatMap(Schema.decodeUnknownEffect(schema)),
       Effect.mapError((error) =>
         Schema.isSchemaError(error)
@@ -257,20 +256,17 @@ const make = (context: GhContext, owner: string, name: string, api: GitHubApi, b
 /** Runs one gh command line against the cloned GitHub repo and returns what the model reads. */
 export const gh = async (line: string, context: GhContext): Promise<string> => {
   const { clone, url, api } = context;
-  const match = url === undefined ? null : GITHUB_URL.exec(url);
-  const [, owner, name] = match ?? [];
+  const repo = url === undefined ? undefined : gitHubRepo(url);
   if (clone === undefined) return "gh is not configured: no repo is cloned. Call clone_repo first.";
-  if (owner === undefined || name === undefined) {
-    return `gh is not configured: ${clone.repo} is not a github.com repo.`;
-  }
-  if (api === undefined) return "gh is not configured: the agent has no GITHUB_TOKEN.";
+  if (repo === undefined) return `gh is not configured: ${clone.repo} is not a github.com repo.`;
+  if (api === undefined) return "gh is not configured: the agent has no GitHub App.";
   let argv: ReadonlyArray<string>;
   try {
     argv = parseArgv(line);
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
-  const command = make(context, owner, name, api, clone.branch)[argv.slice(0, 2).join(" ")];
+  const command = make(context, repo, api, clone.branch)[argv.slice(0, 2).join(" ")];
   if (command === undefined) {
     return `gh ${line.trim()} is not supported. Supported commands:\n${SUPPORTED.join("\n")}`;
   }
