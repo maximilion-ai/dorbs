@@ -79,6 +79,8 @@ One DO per ACP session instead of per connection, plus `session/load`. A reconne
 - **History.** Every `session/update` the session sends, plus each prompt as `user_message_chunk` and each turn's end as `session_info_update` with `_meta["dorbs/turnEnded"] = {stopReason} | {error}`, in one SQLite table. ACP v1 has no update that ends a turn, so the end is a `_meta` extension.
 - **Load.** Attach, replay the history as `session/update` notifications, then answer `{}`. An unknown session answers `-32002 Unknown session <id>`. A second load replays the same history again.
 - **Dropped connection.** The turn runs on. Its later updates go to the history and to whoever attaches. When it ends, the end goes to the history, and to the attached connection as the `turnEnded` notification if that connection did not send the prompt.
+- **Open prompts.** The session keeps each prompt it has not answered (request id, connection, operation id, content) in storage and runs them one at a time. A prompt sent while a turn runs waits for that turn. `session/cancel` ends the running turn and answers the waiting prompts as `cancelled`.
+- **Restart.** A restarted `AcpSession` runs its first open prompt on, as the same operation. The loop's wake job restarts an evicted object within a 30 s heartbeat. Pi resumes its tasks on open; the session watches them from before that and rejoins the operation by id. OpenCode resumes the turn while it boots; the session catches up from OpenCode's durable log and skips what it sent before. The thread shows `(Restarted; resuming this turn.)` where the turn picks up. The end goes to the history and to the connection that sent the prompt. A streamed run in progress is kept chunk by chunk, so a restart does not lose it from the replay.
 - **Order.** A session takes each frame and returns before a prompt's turn ends; the connection hands frames on one at a time, so a cancel never overtakes its prompt.
 - **Unit 4.** A DO-initiated frame such as `_dorbs/runTurn` goes out through the same `deliver`. acp-mux's response comes back to the `AcpConnection`, which today drops responses; Unit 4 routes them to the session that sent the request.
 
@@ -88,5 +90,5 @@ How T3 sees a reconnect (T3 `125b619`):
 2. T3 sends `initialize`, sees `loadSession: true`, and sends `session/load` with the thread's stored sessionId.
 3. T3 drops every `session/update` for the loading session while the load runs, so the replay never shows twice in the thread.
 4. T3 sends the user's next prompt. The model sees the earlier turns, including any that finished after the drop, and the workspace keeps every file. Updates of a turn that finished while nc was gone show in T3 only through the model's next answer.
-5. If that earlier turn still runs, the new prompt gets `-32600 Prompt <id> is still running in this session`.
+5. If that earlier turn still runs, the new prompt waits for it. Its updates show in T3 as part of the new prompt's turn, then the new prompt runs.
 6. If the session is unknown, T3 starts a fresh runtime with `session/new` and reports the load failure for the old session.
