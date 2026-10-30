@@ -15,6 +15,22 @@ import type { AcpSession } from "./worker.ts";
 const T3_INITIALIZE_LINE =
   '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":2,"info":{"name":"t3-code","version":"0.0.0"},"capabilities":{"elicitation":{"form":{}}},"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false,"elicitation":{"form":{}}},"clientInfo":{"name":"t3-code","version":"0.0.0"}},"id":1073741824,"traceId":"a895982fd0f222068500d20ac5e4f5e4","spanId":"2715004bf08acd5c","sampled":true}\n';
 
+/** This project's agent loop, which vitest.config.ts runs the suite under once each. */
+const HARNESS = env.HARNESS;
+
+/** A thrown tool error as the loop reports it: Pi wraps it for the model, OpenCode passes the message. */
+const thrown = (message: string) =>
+  HARNESS === "opencode" ? message : `<harness>\n[error] ${message}\n</harness>`;
+
+/** How many tables the agent loop keeps in a session's SQLite. */
+const loopTables = (state: DurableObjectState) =>
+  state.storage.sql
+    .exec<{ tables: number }>(
+      "SELECT count(*) AS tables FROM sqlite_master WHERE type = 'table' AND name LIKE ?",
+      `${HARNESS}_%`,
+    )
+    .one().tables;
+
 const prompt = (sessionId: string, text: string) => ({
   sessionId,
   prompt: [{ type: "text", text }],
@@ -156,14 +172,11 @@ it("offers the deployment's one model in session/new, where T3 fills its model p
   ]);
 });
 
-it("creates a session without opening Pi", async () => {
+it("creates a session without opening its agent loop", async () => {
   const client = await connect();
   const sessionId = await client.newSession();
   assert.match(sessionId, /^[0-9a-f-]{36}$/);
-  const piTables = await inSession(sessionId, (_instance, state) =>
-    state.storage.sql.exec("SELECT name FROM sqlite_master WHERE name LIKE 'pi_%'").toArray(),
-  );
-  assert.deepStrictEqual(piTables, []);
+  assert.strictEqual(await inSession(sessionId, (_instance, state) => loopTables(state)), 0);
 });
 
 it("writes src/hello.ts and reports the write as a diff under the client cwd", async () => {
@@ -178,7 +191,7 @@ it("writes src/hello.ts and reports the write as a diff under the client cwd", a
   assert.strictEqual(written, HELLO);
 });
 
-it("streams an answer Pi first shows mid-stream exactly once, start included", async () => {
+it("streams an answer the loop first shows mid-stream exactly once, start included", async () => {
   const client = await connect();
   const sessionId = await client.newSession();
   const response = await client.request(2, "session/prompt", prompt(sessionId, "say slowly"));
@@ -251,7 +264,9 @@ it("refuses to clone a repo that is not registered", async () => {
         type: "content",
         content: {
           type: "text",
-          text: "<harness>\n[error] evil/repo is not a registered repo. Registered: test/fixture, test/github, test/elsewhere\n</harness>",
+          text: thrown(
+            "evil/repo is not a registered repo. Registered: test/fixture, test/github, test/elsewhere",
+          ),
         },
       },
     ],
@@ -356,7 +371,7 @@ it("replays a session's history in order to another connection that loads it, th
   assert.deepStrictEqual(response.result, {});
 });
 
-it("keeps the workspace and the Pi transcript for the connection that loads the session", async () => {
+it("keeps the workspace and the transcript for the connection that loads the session", async () => {
   const first = await connect();
   const sessionId = await first.newSession();
   await first.request(2, "session/prompt", prompt(sessionId, "write hello"));
@@ -496,7 +511,7 @@ it("replays a history longer than one page of rows in order", async () => {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-it("deletes a session's history, workspace and Pi session once it has been idle for 30 days", async () => {
+it("deletes a session's history, workspace and agent loop session once it has been idle for 30 days", async () => {
   const start = Date.UTC(2030, 0, 1);
   vi.useFakeTimers({ toFake: ["Date"], now: start });
   try {
@@ -516,15 +531,11 @@ it("deletes a session's history, workspace and Pi session once it has been idle 
           () => true,
           () => false,
         ),
-        pi: state.storage.sql
-          .exec<{ tables: number }>(
-            "SELECT count(*) AS tables FROM sqlite_master WHERE type = 'table' AND name LIKE 'pi_%'",
-          )
-          .one().tables,
+        loop: loopTables(state),
       }));
     const before = await kept();
     assert.deepStrictEqual(
-      [before.record, before.history > 0, before.workspace, before.pi > 0],
+      [before.record, before.history > 0, before.workspace, before.loop > 0],
       [true, true, true, true],
     );
 
@@ -535,7 +546,7 @@ it("deletes a session's history, workspace and Pi session once it has been idle 
 
     vi.setSystemTime(start + 40 * DAY_MS + 1);
     await runDurableObjectAlarm(stub).catch(() => "the object resets itself after deleting");
-    assert.deepStrictEqual(await kept(), { record: false, history: 0, workspace: false, pi: 0 });
+    assert.deepStrictEqual(await kept(), { record: false, history: 0, workspace: false, loop: 0 });
     const { response } = await (await connect()).load(1, sessionId);
     assert.deepStrictEqual(response.error, {
       code: -32002,
@@ -757,9 +768,11 @@ it("refuses model writes to the clone's git directory, by any spelling or link, 
   assert.deepStrictEqual(response.result, { stopReason: "end_turn" });
   const frames = updates(client.frames);
   const refused = (path: string) =>
-    `<harness>\n[error] ${path} is in the repo's git directory, which only the agent writes. Change files with git commands instead.\n</harness>`;
+    thrown(
+      `${path} is in the repo's git directory, which only the agent writes. Change files with git commands instead.`,
+    );
   const linked = (path: string) =>
-    `<harness>\n[error] ${path} goes through a symbolic link. Write to the file it points to instead.\n</harness>`;
+    thrown(`${path} goes through a symbolic link. Write to the file it points to instead.`);
   assert.deepStrictEqual(
     [
       "call-write",
@@ -966,7 +979,9 @@ it("says the GitHub App is not installed on a github.com repo it cannot reach", 
   assert.strictEqual(result?.status, "failed");
   assert.strictEqual(
     toolText(updates(client.frames), "call-clone"),
-    "<harness>\n[error] The GitHub App is not installed on test/elsewhere. Install it on the repo to give dorbs access.\n</harness>",
+    thrown(
+      "The GitHub App is not installed on test/elsewhere. Install it on the repo to give dorbs access.",
+    ),
   );
 });
 

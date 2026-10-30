@@ -8,7 +8,7 @@ import { build, type Plugin } from "esbuild";
 import { defineConfig } from "vite-plus";
 
 import { GITHUB_APP_ID } from "../../scripts/githubFixture.ts";
-import { APP_KEY, typecheckDouble } from "./test/typecheck-double.ts";
+import { APP_KEY, makeTypecheckDouble } from "./test/typecheck-double.ts";
 
 /** Bundled CommonJS `require`s Node built-ins; ESM imports them, as wrangler's nodejs_compat bundling does. */
 const builtins: Plugin = {
@@ -58,8 +58,8 @@ const openCodeBundle = async (): Promise<string> => {
   return outfile;
 };
 
-export default defineConfig({
-  define: { __OPENCODE_BUNDLE__: JSON.stringify(await openCodeBundle()) },
+const harness = (name: "pi" | "opencode", include: ReadonlyArray<string>) => ({
+  extends: true,
   plugins: [
     cloudflareTest({
       main: "./test/worker.ts",
@@ -82,14 +82,20 @@ export default defineConfig({
           GITHUB_APP_ID,
           GITHUB_APP_PRIVATE_KEY: APP_KEY.privateKey,
           GITHUB_API_URL: "http://github-api.test",
+          HARNESS: name,
           MODEL_PROVIDER: "scripted",
           MODEL_ID: "scripted",
           ALCHEMY_DEV: "true",
         },
-        outboundService: typecheckDouble,
+        outboundService: makeTypecheckDouble(),
       },
     }),
   ],
+  test: { name, include: [...include] },
+});
+
+export default defineConfig({
+  define: { __OPENCODE_BUNDLE__: JSON.stringify(await openCodeBundle()) },
   resolve: {
     alias: {
       "@opencode/sdk/workerd": NodePath.join(import.meta.dirname, "test/opencode-native.ts"),
@@ -97,5 +103,11 @@ export default defineConfig({
     // One copy of each Pi package, so the harness and the faux provider share module state.
     dedupe: ["@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable"],
   },
-  test: { include: ["src/**/*.test.ts", "test/**/*.test.ts"] },
+  test: {
+    projects: [
+      harness("pi", ["src/**/*.test.ts", "test/acp.test.ts"]),
+      // The ACP behaviours again, and OpenCode's own, with OpenCode as the agent loop.
+      harness("opencode", ["test/acp.test.ts", "test/opencode.test.ts"]),
+    ],
+  },
 });
