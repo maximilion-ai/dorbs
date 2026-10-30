@@ -84,7 +84,11 @@ const make = Effect.gen(function* () {
   const caches = path.join(dataDir, "git");
   const trees = path.join(dataDir, "checkouts");
   yield* fs.makeDirectory(trees, { recursive: true });
-  const once = yield* SingleFlight.make<Checkout, UnknownCommit | FetchFailed>(Infinity);
+  const once = yield* SingleFlight.make<Checkout, UnknownCommit | FetchFailed>({
+    keep: 256,
+    // Eviction may have removed the tree since.
+    valid: (checkout) => fs.exists(checkout.dir).pipe(Effect.orElseSucceed(() => false)),
+  });
   // Fetches into one repo's cache take turns, because git locks the cache's shallow file.
   const fetchTurns = new Map<RepoId, Semaphore.Semaphore>();
   const fetchTurn = (repo: RepoId) => {

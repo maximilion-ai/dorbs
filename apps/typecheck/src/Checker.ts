@@ -99,7 +99,7 @@ const make = Effect.gen(function* () {
   const flights = yield* SingleFlight.make<
     ActionResponse,
     InstallFailed | FetchFailed | UnsafeConfig
-  >(0);
+  >({ keep: 0 });
   const budget = toolBudget(NodeOS.availableParallelism());
   const slots = yield* Semaphore.make(budget.checks);
 

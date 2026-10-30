@@ -42,7 +42,11 @@ const make = Effect.gen(function* () {
   const root = path.join(dataDir, "installs");
   const storeDir = path.join(dataDir, "pnpm-store");
   yield* fs.makeDirectory(root, { recursive: true });
-  const once = yield* SingleFlight.make<string, InstallFailed>(Infinity);
+  const once = yield* SingleFlight.make<string, InstallFailed>({
+    keep: 256,
+    // Eviction may have removed the install since.
+    valid: (dir) => fs.exists(dir).pipe(Effect.orElseSucceed(() => false)),
+  });
   // Installs run before a check takes its slot, so they get their own bound.
   const slots = yield* Semaphore.make(2);
 
