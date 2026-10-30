@@ -30,8 +30,13 @@ const PROMPT = (n: number) =>
 const percentile = (sorted: ReadonlyArray<number>, p: number) =>
   sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))] ?? 0;
 
+/** This checkout's workerd processes; other projects on the machine run their own. */
 const workerds = () =>
-  NodeChildProcess.spawnSync("/usr/bin/pgrep", ["-x", "workerd"], { encoding: "utf8" })
+  NodeChildProcess.spawnSync(
+    "/usr/bin/pgrep",
+    ["-f", `${NodePath.resolve(import.meta.dirname, "..")}/node_modules/.*/bin/workerd `],
+    { encoding: "utf8" },
+  )
     .stdout.split("\n")
     .filter(Boolean)
     .map(Number);
