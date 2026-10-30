@@ -7,6 +7,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 
 import { Sha256 } from "@dorbs/protocol/typecheck";
 
@@ -42,6 +43,8 @@ const make = Effect.gen(function* () {
   const storeDir = path.join(dataDir, "pnpm-store");
   yield* fs.makeDirectory(root, { recursive: true });
   const once = yield* SingleFlight.make<string, InstallFailed>();
+  // Installs run before a check takes its slot, so they get their own bound.
+  const slots = yield* Semaphore.make(2);
 
   const install = Effect.fn("Installs.install")(function* (checkout: Checkout) {
     const dir = path.join(root, checkout.lockfile);
@@ -100,7 +103,7 @@ const make = Effect.gen(function* () {
   });
 
   const ensure: Installs["Service"]["ensure"] = (checkout) =>
-    once(checkout.lockfile, install(checkout));
+    once(checkout.lockfile, slots.withPermit(install(checkout)));
 
   return Installs.of({ ensure });
 });

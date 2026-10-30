@@ -45,6 +45,11 @@ export class SpawnLog extends Context.Service<SpawnLog, Ref.Ref<ReadonlyArray<st
   "dorbs/typecheck/test/SpawnLog",
 ) {}
 
+/** For each command name, how many of its processes ran at once at most. */
+export class PeakRunning extends Context.Service<PeakRunning, Map<string, number>>()(
+  "dorbs/typecheck/test/PeakRunning",
+) {}
+
 /** Every line the service logged. */
 export class LogLines extends Context.Service<LogLines, Array<string>>()(
   "dorbs/typecheck/test/LogLines",
@@ -76,7 +81,19 @@ const RecordingSpawner = Layer.effect(
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const log = yield* SpawnLog;
+    const peaks = yield* PeakRunning;
     const { githubUrl } = yield* Fixtures;
+    const running = new Map<string, number>();
+    // Counts a process as running until the scope that spawned it closes.
+    const track = (name: string) =>
+      Effect.acquireRelease(
+        Effect.sync(() => {
+          const now = (running.get(name) ?? 0) + 1;
+          running.set(name, now);
+          peaks.set(name, Math.max(peaks.get(name) ?? 0, now));
+        }),
+        () => Effect.sync(() => running.set(name, (running.get(name) ?? 1) - 1)),
+      );
     return ChildProcessSpawner.make((command) =>
       Ref.update(log, (lines) => [
         ...lines,
@@ -94,6 +111,9 @@ const RecordingSpawner = Layer.effect(
                 )
               : command,
           ),
+        ),
+        Effect.tap(() =>
+          command._tag === "StandardCommand" ? track(command.command) : Effect.void,
         ),
       ),
     );
@@ -242,6 +262,7 @@ export const TestServer = (
     Layer.provide(RecordingSpawner),
     Layer.provideMerge(FixtureConfig(repos, env)),
     Layer.provideMerge(Layer.effect(SpawnLog, Ref.make<ReadonlyArray<string>>([]))),
+    Layer.provideMerge(Layer.sync(PeakRunning, () => new Map<string, number>())),
     Layer.provideMerge(CapturedLogs),
     Layer.provideMerge(NodeHttpServer.layerTest),
     Layer.provide(NodeServices.layer),

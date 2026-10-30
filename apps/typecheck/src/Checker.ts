@@ -30,6 +30,7 @@ import { type InstallFailed, Installs } from "./Installs.ts";
 import { outsideModules } from "./moduleSpecifiers.ts";
 import { runProcess } from "./runProcess.ts";
 import { ServiceConfig } from "./ServiceConfig.ts";
+import { toolBudget } from "./toolBudget.ts";
 
 export class UnsafeConfig extends Schema.TaggedError<UnsafeConfig>()("UnsafeConfig", {
   options: Schema.Array(Schema.String),
@@ -84,15 +85,18 @@ const make = Effect.gen(function* () {
   // A client .oxlintrc.json could load jsPlugins, which run as code; only this config applies.
   const oxlintConfig = path.join(dataDir, "oxlintrc.json");
   yield* fs.writeFileString(oxlintConfig, "{}");
-  const slots = yield* Semaphore.make(NodeOS.availableParallelism());
+  const budget = toolBudget(NodeOS.availableParallelism());
+  const slots = yield* Semaphore.make(budget.checks);
 
   const runTool = Effect.fn("Checker.runTool")(function* (
     cwd: string,
     command: string,
     args: ReadonlyArray<string>,
     okExitCodes: ReadonlyArray<number>,
+    env: Record<string, string> = {},
   ) {
     const result = yield* runProcess(spawner, cwd, command, args, {
+      env,
       timeout: processTimeout,
     }).pipe(Effect.orDie);
     if (!okExitCodes.includes(result.exitCode)) {
@@ -161,6 +165,8 @@ const make = Effect.gen(function* () {
           "tsrs",
           ["--noEmit", "-p", "tsconfig.json", "--pretty", "false", "--listFiles"],
           [0, 1, 2],
+          // tsrs sizes its rayon pool from this.
+          { RAYON_NUM_THREADS: String(budget.tsrsThreads) },
         ),
         runTool(
           dir,
@@ -174,6 +180,8 @@ const make = Effect.gen(function* () {
             "json",
             "--ignore-pattern",
             "**/node_modules/**",
+            "--threads",
+            String(budget.oxlintThreads),
           ],
           [0, 1],
         ),

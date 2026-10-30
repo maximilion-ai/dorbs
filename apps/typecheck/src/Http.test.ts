@@ -14,6 +14,7 @@ import {
   EMPTY_PACKAGE,
   Fixtures,
   LogLines,
+  PeakRunning,
   PRIVATE_TOKEN,
   SpawnLog,
   TestServer,
@@ -525,4 +526,30 @@ it.live("answers 413 for a body over 5 MiB and stores nothing", () =>
     const check = yield* postCheck("fixture", { files: { "src/big.ts": content } });
     assert.deepStrictEqual(check, { _tag: "MissingBlobs", sha256s: [Sha256.make(sha256)] });
   }).pipe(Effect.provide(Server)),
+);
+
+// Three lockfiles that differ only in a comment, so each needs its own install.
+const lockfileRepo = (n: number) => ({
+  "package.json": EMPTY_PACKAGE,
+  "pnpm-lock.yaml": `# ${n}\nlockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n`,
+  "tsconfig.json": TSCONFIG,
+  "src/a.ts": "export const a = 1;\n",
+});
+
+it.live("runs at most two installs at once", () =>
+  Effect.gen(function* () {
+    const responses = yield* Effect.all(
+      ["one", "two", "three"].map((fixture) => checkChange(fixture, {})),
+      { concurrency: "unbounded" },
+    );
+    assert.deepStrictEqual(
+      responses.map((response) => response._tag === "ActionResult" && response.diagnostics),
+      [[], [], []],
+    );
+    assert.strictEqual((yield* PeakRunning).get("pnpm"), 2);
+  }).pipe(
+    Effect.provide(
+      TestServer({ one: lockfileRepo(1), two: lockfileRepo(2), three: lockfileRepo(3) }),
+    ),
+  ),
 );
