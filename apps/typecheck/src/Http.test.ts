@@ -633,3 +633,21 @@ it.live("evicts what was used least recently past CACHE_MAX_BYTES, and rebuilds 
     ),
   ),
 );
+
+// SvelteKit's tests have a route directory named package.json.
+it.live("treats only a file named package.json as a manifest", () =>
+  Effect.gen(function* () {
+    const response = yield* checkChange("routes", {});
+    assert.deepStrictEqual(response._tag === "ActionResult" && response.diagnostics, []);
+  }).pipe(
+    Effect.provide(
+      TestServer({
+        routes: {
+          "package.json": EMPTY_PACKAGE,
+          "tsconfig.json": TSCONFIG,
+          "src/routes/package.json/page.ts": "export const page = 1;\n",
+        },
+      }),
+    ),
+  ),
+);

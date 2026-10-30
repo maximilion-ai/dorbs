@@ -194,10 +194,16 @@ const make = Effect.gen(function* () {
         }),
       );
     const entries = yield* fs.readDirectory(dir, { recursive: true }).pipe(Effect.orDie);
-    const packages = entries
-      .filter((entry) => path.basename(entry) === "package.json")
-      .filter((entry) => !entry.split(path.sep).includes("node_modules"))
-      .map((entry) => path.dirname(entry));
+    // A directory may carry the name too, such as a SvelteKit route.
+    const packages = yield* Effect.filter(
+      entries
+        .filter((entry) => path.basename(entry) === "package.json")
+        .filter((entry) => !entry.split(path.sep).includes("node_modules")),
+      (entry) => fs.stat(path.join(dir, entry)).pipe(Effect.map((info) => info.type === "File")),
+    ).pipe(
+      Effect.map((manifests) => manifests.map((entry) => path.dirname(entry))),
+      Effect.orDie,
+    );
     const lockfile = sha256((yield* read("pnpm-lock.yaml")) ?? new Uint8Array());
     const chain = yield* tsconfigChain((file) =>
       read(file).pipe(
