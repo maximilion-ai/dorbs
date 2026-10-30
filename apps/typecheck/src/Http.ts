@@ -75,6 +75,8 @@ const routes = HttpRouter.use(
             Effect.succeed(HttpServerResponse.text(error.message, { status: 400 })),
           InstallFailed: (error) =>
             Effect.succeed(HttpServerResponse.text(error.message, { status: 422 })),
+          UnsupportedPackageManager: (error) =>
+            Effect.succeed(HttpServerResponse.text(error.message, { status: 422 })),
           UnsafeConfig: (error) =>
             Effect.succeed(HttpServerResponse.text(error.message, { status: 422 })),
           FetchFailed: (error) =>

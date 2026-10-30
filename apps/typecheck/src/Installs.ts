@@ -29,11 +29,22 @@ export class InstallFailed extends Schema.TaggedError<InstallFailed>()("InstallF
   }
 }
 
+export class UnsupportedPackageManager extends Schema.TaggedError<UnsupportedPackageManager>()(
+  "UnsupportedPackageManager",
+  { name: Schema.String },
+) {
+  override get message(): string {
+    return `The commit pins the package manager ${this.name}; the service installs with pnpm only.`;
+  }
+}
+
 export class Installs extends Context.Service<
   Installs,
   {
     /** Returns the directory holding node_modules for the checkout's lockfile. */
-    readonly ensure: (checkout: Checkout) => Effect.Effect<string, InstallFailed>;
+    readonly ensure: (
+      checkout: Checkout,
+    ) => Effect.Effect<string, InstallFailed | UnsupportedPackageManager>;
   }
 >()("dorbs/typecheck/Installs") {}
 
@@ -118,7 +129,9 @@ const make = Effect.gen(function* () {
         "--store-dir",
         storeDir,
       ],
-      { timeout: processTimeout },
+      // pnpm runs the version the commit's packageManager pins, also when the host's config says
+      // otherwise. An older pnpm it switches to ignores the variable.
+      { env: { pnpm_config_pm_on_fail: "download" }, timeout: processTimeout },
     ).pipe(
       Effect.catchTags({
         PlatformError: (error) =>
@@ -140,7 +153,11 @@ const make = Effect.gen(function* () {
   });
 
   const ensure: Installs["Service"]["ensure"] = (checkout) =>
-    once(checkout.lockfile, slots.withPermit(install(checkout))).pipe(Effect.tap(storage.touch));
+    checkout.packageManager !== undefined && checkout.packageManager !== "pnpm"
+      ? Effect.fail(new UnsupportedPackageManager({ name: checkout.packageManager }))
+      : once(checkout.lockfile, slots.withPermit(install(checkout))).pipe(
+          Effect.tap(storage.touch),
+        );
 
   return Installs.of({ ensure });
 });

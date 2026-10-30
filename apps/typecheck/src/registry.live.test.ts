@@ -1,9 +1,10 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 
 import { RelativePath, ToolName } from "@dorbs/protocol/typecheck";
 
-import { TestServer, TSCONFIG, checkChange } from "./testServer.ts";
+import { Fixtures, TestServer, TSCONFIG, checkChange } from "./testServer.ts";
 
 const ZOD_PACKAGE = `{
   "name": "fixture",
@@ -68,6 +69,36 @@ it.live.skipIf(process.env["TYPECHECK_OFFLINE"] === "1")(
         TestServer({
           zod: {
             "package.json": ZOD_PACKAGE,
+            "pnpm-lock.yaml": ZOD_LOCKFILE,
+            "tsconfig.json": TSCONFIG,
+            "src/index.ts": "export {};\n",
+          },
+        }),
+      ),
+    ),
+  { timeout: 60_000 },
+);
+
+// The host's pnpm is newer; the install records the version that ran it.
+it.live.skipIf(process.env["TYPECHECK_OFFLINE"] === "1")(
+  "installs with the pnpm version the commit pins",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const response = yield* checkChange("pinned", {});
+      assert.strictEqual(response._tag, "ActionResult");
+      const installs = `${(yield* Fixtures).dataDir}/installs`;
+      const [install] = yield* fs.readDirectory(installs);
+      const modules = yield* fs.readFileString(`${installs}/${install}/node_modules/.modules.yaml`);
+      assert.include(modules, "pnpm@10.33.4");
+    }).pipe(
+      Effect.provide(
+        TestServer({
+          pinned: {
+            "package.json": ZOD_PACKAGE.replace(
+              '"private": true,',
+              '"private": true,\n  "packageManager": "pnpm@10.33.4",',
+            ),
             "pnpm-lock.yaml": ZOD_LOCKFILE,
             "tsconfig.json": TSCONFIG,
             "src/index.ts": "export {};\n",

@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Predicate from "effect/Predicate";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
@@ -47,6 +48,8 @@ export type Checkout = {
   readonly tsconfigs: ReadonlySet<RelativePath>;
   /** Options in those files that write files or reach outside the repo, as `path: option`. */
   readonly unsafeConfig: ReadonlyArray<string>;
+  /** The package manager the root package.json's `packageManager` pins, by name. */
+  readonly packageManager: string | undefined;
 };
 
 export class Checkouts extends Context.Service<
@@ -205,6 +208,17 @@ const make = Effect.gen(function* () {
       Effect.orDie,
     );
     const lockfile = sha256((yield* read("pnpm-lock.yaml")) ?? new Uint8Array());
+    const manifest = yield* read("package.json");
+    const pinned = Effect.try(() =>
+      manifest === undefined ? undefined : JSON.parse(Buffer.from(manifest).toString()),
+    ).pipe(
+      Effect.map((json: unknown) =>
+        Predicate.hasProperty(json, "packageManager") && typeof json.packageManager === "string"
+          ? json.packageManager.replace(/@.*$/, "")
+          : undefined,
+      ),
+      Effect.orElseSucceed(() => undefined),
+    );
     const chain = yield* tsconfigChain((file) =>
       read(file).pipe(
         Effect.map((content) =>
@@ -212,7 +226,14 @@ const make = Effect.gen(function* () {
         ),
       ),
     );
-    return { dir, packages, lockfile, tsconfigs: chain.files, unsafeConfig: chain.unsafe };
+    return {
+      dir,
+      packages,
+      lockfile,
+      tsconfigs: chain.files,
+      unsafeConfig: chain.unsafe,
+      packageManager: yield* pinned,
+    };
   });
 
   const ensure: Checkouts["Service"]["ensure"] = (repo, commit) =>

@@ -27,7 +27,7 @@ import { ActionCache, actionDigest } from "./ActionCache.ts";
 import { BlobStore } from "./BlobStore.ts";
 import { type Checkout, Checkouts, type FetchFailed } from "./Checkouts.ts";
 import { parseOxlint, parseTsrs } from "./diagnostics.ts";
-import { type InstallFailed, Installs } from "./Installs.ts";
+import { type InstallFailed, Installs, type UnsupportedPackageManager } from "./Installs.ts";
 import { outsideModules } from "./moduleSpecifiers.ts";
 import { runProcess } from "./runProcess.ts";
 import { sandboxProfile, toolchainPaths } from "./sandbox.ts";
@@ -49,7 +49,10 @@ export class Checker extends Context.Service<
   {
     readonly run: (
       action: Action,
-    ) => Effect.Effect<ActionResponse, InstallFailed | FetchFailed | UnsafeConfig>;
+    ) => Effect.Effect<
+      ActionResponse,
+      InstallFailed | UnsupportedPackageManager | FetchFailed | UnsafeConfig
+    >;
   }
 >()("dorbs/typecheck/Checker") {}
 
@@ -106,7 +109,7 @@ const make = Effect.gen(function* () {
   // The action cache keeps results, so a flight keeps none once it lands.
   const flights = yield* SingleFlight.make<
     ActionResponse,
-    InstallFailed | FetchFailed | UnsafeConfig
+    InstallFailed | UnsupportedPackageManager | FetchFailed | UnsafeConfig
   >({ keep: 0 });
   const budget = toolBudget(NodeOS.availableParallelism());
   const slots = yield* Semaphore.make(budget.checks);

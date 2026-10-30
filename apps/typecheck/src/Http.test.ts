@@ -712,3 +712,27 @@ it.live("answers 422 for a patch file outside the repo, and installs nothing", (
     ),
   ),
 );
+
+it.live("answers 422 naming the package manager for a commit that pins another", () =>
+  Effect.gen(function* () {
+    const response = yield* postCheckRaw("yarn", {});
+    assert.deepStrictEqual(
+      [response.status, yield* response.text],
+      [422, "The commit pins the package manager yarn; the service installs with pnpm only."],
+    );
+    assert.deepStrictEqual(
+      (yield* spawned).filter((line) => line.startsWith("pnpm")),
+      [],
+    );
+  }).pipe(
+    Effect.provide(
+      TestServer({
+        yarn: {
+          "package.json": '{ "name": "fixture", "packageManager": "yarn@1.22.22" }\n',
+          "tsconfig.json": TSCONFIG,
+          "src/a.ts": "export const a = 1;\n",
+        },
+      }),
+    ),
+  ),
+);
