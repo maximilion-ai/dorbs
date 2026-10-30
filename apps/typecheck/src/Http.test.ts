@@ -509,3 +509,20 @@ it.live("refuses a check whose program reads a file outside the repo and its pac
     assert.notInclude(JSON.stringify(response), secret);
   }).pipe(Effect.provide(Server)),
 );
+
+it.live("answers 413 for a body over 5 MiB and stores nothing", () =>
+  Effect.gen(function* () {
+    const client = yield* HttpClient.HttpClient;
+    const content = "a".repeat(5 * 1024 * 1024 + 1);
+    const sha256 = NodeCrypto.createHash("sha256").update(content).digest("hex");
+    const response = yield* client.execute(
+      HttpClientRequest.put(`/blobs/${sha256}`).pipe(
+        HttpClientRequest.bearerToken(TOKEN),
+        HttpClientRequest.bodyText(content, "application/octet-stream"),
+      ),
+    );
+    assert.strictEqual(response.status, 413);
+    const check = yield* postCheck("fixture", { files: { "src/big.ts": content } });
+    assert.deepStrictEqual(check, { _tag: "MissingBlobs", sha256s: [Sha256.make(sha256)] });
+  }).pipe(Effect.provide(Server)),
+);

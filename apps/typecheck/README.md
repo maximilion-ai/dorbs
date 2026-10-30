@@ -4,7 +4,7 @@ One shared HTTP service that type-checks and lints agent workspaces, so each age
 
 ## API
 
-Every route requires `Authorization: Bearer $TYPECHECK_TOKEN` and answers 401 otherwise.
+Every route requires `Authorization: Bearer $TYPECHECK_TOKEN` and answers 401 otherwise. A request body over 5 MiB gets 413.
 
 - `PUT /blobs/:sha256` stores the request body under its SHA-256. A body that hashes to anything else gets 422. Repeating an upload is harmless.
 - `POST /actions` takes an `Action`: a kind (`check` is the only one), a toolchain, a registered repo, a commit, the files that differ from that commit, and the files deleted from it. The answer is one of these:
