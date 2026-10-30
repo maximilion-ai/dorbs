@@ -48,7 +48,7 @@ export type Checkout = {
   readonly tsconfigs: ReadonlySet<RelativePath>;
   /** Options in those files that write files or reach outside the repo, as `path: option`. */
   readonly unsafeConfig: ReadonlyArray<string>;
-  /** The package manager the root package.json's `packageManager` pins, by name. */
+  /** The root package.json's `packageManager`, such as `pnpm@10.33.4`. */
   readonly packageManager: string | undefined;
 };
 
@@ -214,7 +214,7 @@ const make = Effect.gen(function* () {
     ).pipe(
       Effect.map((json: unknown) =>
         Predicate.hasProperty(json, "packageManager") && typeof json.packageManager === "string"
-          ? json.packageManager.replace(/@.*$/, "")
+          ? json.packageManager
           : undefined,
       ),
       Effect.orElseSucceed(() => undefined),

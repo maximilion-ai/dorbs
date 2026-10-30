@@ -14,7 +14,6 @@ import { Sha256 } from "@dorbs/protocol/typecheck";
 
 import type { Checkout } from "./Checkouts.ts";
 import { installWorkspace, patchFiles } from "./pnpmWorkspace.ts";
-import { leavesRepo } from "./repoPaths.ts";
 import { runProcess } from "./runProcess.ts";
 import { ServiceConfig } from "./ServiceConfig.ts";
 import * as SingleFlight from "./SingleFlight.ts";
@@ -70,8 +69,8 @@ const make = Effect.gen(function* () {
   // Installs run before a check takes its slot, so they get their own bound.
   const slots = yield* Semaphore.make(2);
 
-  const install = Effect.fn("Installs.install")(function* (checkout: Checkout) {
-    const dir = path.join(root, checkout.lockfile);
+  const install = Effect.fn("Installs.install")(function* (checkout: Checkout, key: string) {
+    const dir = path.join(root, key);
     if (yield* fs.exists(dir).pipe(Effect.orDie)) return dir;
     const read = (file: string) =>
       fs
@@ -79,12 +78,10 @@ const make = Effect.gen(function* () {
         .pipe(Effect.orElseSucceed((): string | undefined => undefined));
     const workspace = yield* read("pnpm-workspace.yaml");
     const patches = patchFiles(yield* read("package.json"), workspace);
-    // pnpm reads a patch from where the config says, even outside the install.
-    const outside = patches.filter((patch) => leavesRepo("package.json", patch));
-    if (outside.length > 0) {
+    if (patches.refused.length > 0) {
       return yield* new InstallFailed({
         lockfile: checkout.lockfile,
-        output: `The commit's pnpm config names patch files outside the repo: ${outside.join(", ")}`,
+        output: `The commit's pnpm config names patches the service does not stage: ${patches.refused.join(", ")}`,
       });
     }
     const staging = path.join(root, `.staging-${NodeCrypto.randomUUID()}`);
@@ -101,7 +98,7 @@ const make = Effect.gen(function* () {
         yield* copy(manifest);
       }
       // A missing patch is pnpm's to report.
-      for (const patch of patches) {
+      for (const patch of patches.files) {
         const info = yield* fs.stat(path.join(checkout.dir, patch)).pipe(Effect.option);
         if (Option.isSome(info) && info.value.type === "File") yield* copy(patch);
       }
@@ -152,12 +149,17 @@ const make = Effect.gen(function* () {
     return dir;
   });
 
-  const ensure: Installs["Service"]["ensure"] = (checkout) =>
-    checkout.packageManager !== undefined && checkout.packageManager !== "pnpm"
-      ? Effect.fail(new UnsupportedPackageManager({ name: checkout.packageManager }))
-      : once(checkout.lockfile, slots.withPermit(install(checkout))).pipe(
-          Effect.tap(storage.touch),
-        );
+  const ensure: Installs["Service"]["ensure"] = (checkout) => {
+    const manager = checkout.packageManager?.replace(/@.*$/, "");
+    if (manager !== undefined && manager !== "pnpm") {
+      return Effect.fail(new UnsupportedPackageManager({ name: manager }));
+    }
+    // The pinned pnpm runs the install, so one lockfile under two pins makes two installs.
+    const key = NodeCrypto.createHash("sha256")
+      .update(`${checkout.lockfile}\n${checkout.packageManager ?? ""}`)
+      .digest("hex");
+    return once(key, slots.withPermit(install(checkout, key))).pipe(Effect.tap(storage.touch));
+  };
 
   return Installs.of({ ensure });
 });

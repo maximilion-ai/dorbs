@@ -79,21 +79,33 @@ it.live.skipIf(process.env["TYPECHECK_OFFLINE"] === "1")(
   { timeout: 60_000 },
 );
 
-// The host's pnpm is newer; the install records the version that ran it.
+// The host's pnpm is newer; each install records the version that ran it.
 it.live.skipIf(process.env["TYPECHECK_OFFLINE"] === "1")(
-  "installs with the pnpm version the commit pins",
+  "installs with the pnpm version the commit pins, apart from the same lockfile unpinned",
   () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const response = yield* checkChange("pinned", {});
-      assert.strictEqual(response._tag, "ActionResult");
+      const responses = [yield* checkChange("pinned", {}), yield* checkChange("zod", {})];
+      assert.deepStrictEqual(
+        responses.map((response) => response._tag),
+        ["ActionResult", "ActionResult"],
+      );
       const installs = `${(yield* Fixtures).dataDir}/installs`;
-      const [install] = yield* fs.readDirectory(installs);
-      const modules = yield* fs.readFileString(`${installs}/${install}/node_modules/.modules.yaml`);
-      assert.include(modules, "pnpm@10.33.4");
+      const versions = yield* Effect.forEach(yield* fs.readDirectory(installs), (install) =>
+        fs
+          .readFileString(`${installs}/${install}/node_modules/.modules.yaml`)
+          .pipe(Effect.map((modules) => modules.includes("pnpm@10.33.4"))),
+      );
+      assert.deepStrictEqual(versions.toSorted(), [false, true]);
     }).pipe(
       Effect.provide(
         TestServer({
+          zod: {
+            "package.json": ZOD_PACKAGE,
+            "pnpm-lock.yaml": ZOD_LOCKFILE,
+            "tsconfig.json": TSCONFIG,
+            "src/index.ts": "export {};\n",
+          },
           pinned: {
             "package.json": ZOD_PACKAGE.replace(
               '"private": true,',

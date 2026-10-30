@@ -687,30 +687,36 @@ importers:
   ),
 );
 
-it.live("answers 422 for a patch file outside the repo, and installs nothing", () =>
-  Effect.gen(function* () {
-    const response = yield* postCheckRaw("escaping", {});
-    assert.deepStrictEqual(
-      [response.status, (yield* response.text).split("\n").at(-1)],
-      [422, "The commit's pnpm config names patch files outside the repo: ../../outside.patch"],
-    );
-    assert.deepStrictEqual(
-      (yield* spawned).filter((line) => line.startsWith("pnpm")),
-      [],
-    );
-  }).pipe(
-    Effect.provide(
-      TestServer({
-        escaping: {
-          "package.json": EMPTY_PACKAGE,
-          "pnpm-workspace.yaml":
-            'packages: ["."]\npatchedDependencies:\n  nothing@1.0.0: ../../outside.patch\n',
-          "tsconfig.json": TSCONFIG,
-          "src/a.ts": "export const a = 1;\n",
-        },
-      }),
+it.live(
+  "answers 422 for a patch path outside the repo or of pnpm's config, and installs nothing",
+  () =>
+    Effect.gen(function* () {
+      const response = yield* postCheckRaw("escaping", {});
+      assert.deepStrictEqual(
+        [response.status, (yield* response.text).split("\n").at(-1)],
+        [
+          422,
+          "The commit's pnpm config names patches the service does not stage: a: ../../outside.patch, b: .npmrc",
+        ],
+      );
+      assert.deepStrictEqual(
+        (yield* spawned).filter((line) => line.startsWith("pnpm")),
+        [],
+      );
+    }).pipe(
+      Effect.provide(
+        TestServer({
+          escaping: {
+            "package.json": EMPTY_PACKAGE,
+            "pnpm-workspace.yaml":
+              'packages: ["."]\npatchedDependencies:\n  a: ../../outside.patch\n  b: .npmrc\n',
+            ".npmrc": "registry=http://127.0.0.1:9/\n",
+            "tsconfig.json": TSCONFIG,
+            "src/a.ts": "export const a = 1;\n",
+          },
+        }),
+      ),
     ),
-  ),
 );
 
 it.live("answers 422 naming the package manager for a commit that pins another", () =>
