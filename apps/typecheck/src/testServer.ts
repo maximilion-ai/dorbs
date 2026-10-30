@@ -45,16 +45,20 @@ export class SpawnLog extends Context.Service<SpawnLog, Ref.Ref<ReadonlyArray<st
   "dorbs/typecheck/test/SpawnLog",
 ) {}
 
+/** For each command name, how many of its processes ran at once at most. */
+export class PeakRunning extends Context.Service<PeakRunning, Map<string, number>>()(
+  "dorbs/typecheck/test/PeakRunning",
+) {}
+
 /** Every line the service logged. */
 export class LogLines extends Context.Service<LogLines, Array<string>>()(
   "dorbs/typecheck/test/LogLines",
 ) {}
 
 /**
- * The commit of each fixture repo, registered as test/<name> with a file:// url, and the
- * Authorization headers that test/private's server received. That server refuses every request.
- * The fixture repo is also on github.com, registered as test/github, where the GitHub App is
- * installed; test/uninstalled is a github.com repo it is not installed on.
+ * The fixture repos' commits, registered as test/<name>, and the Authorization headers that
+ * test/private's refusing server got. test/github is the fixture on github.com, where the App is
+ * installed, test/uninstalled is not, and test/hanging's server never answers.
  */
 export class Fixtures extends Context.Service<
   Fixtures,
@@ -77,7 +81,19 @@ const RecordingSpawner = Layer.effect(
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const log = yield* SpawnLog;
+    const peaks = yield* PeakRunning;
     const { githubUrl } = yield* Fixtures;
+    const running = new Map<string, number>();
+    // Counts a process as running until the scope that spawned it closes.
+    const track = (name: string) =>
+      Effect.acquireRelease(
+        Effect.sync(() => {
+          const now = (running.get(name) ?? 0) + 1;
+          running.set(name, now);
+          peaks.set(name, Math.max(peaks.get(name) ?? 0, now));
+        }),
+        () => Effect.sync(() => running.set(name, (running.get(name) ?? 1) - 1)),
+      );
     return ChildProcessSpawner.make((command) =>
       Ref.update(log, (lines) => [
         ...lines,
@@ -95,6 +111,9 @@ const RecordingSpawner = Layer.effect(
                 )
               : command,
           ),
+        ),
+        Effect.tap(() =>
+          command._tag === "StandardCommand" ? track(command.command) : Effect.void,
         ),
       ),
     );
@@ -137,7 +156,23 @@ const refusingServer = Effect.acquireRelease(
     }),
 );
 
-const FixtureConfig = (repos: Readonly<Record<string, Record<string, FixtureFile>>>) =>
+// Accepts every connection and never answers, like a git host that hangs.
+const hangingServer = Effect.acquireRelease(
+  Effect.callback<NodeHttp.Server>((resume) => {
+    const server = NodeHttp.createServer(() => {});
+    server.listen(0, "127.0.0.1", () => resume(Effect.succeed(server)));
+  }),
+  (server) =>
+    Effect.callback<void>((resume) => {
+      server.closeAllConnections();
+      server.close(() => resume(Effect.void));
+    }),
+);
+
+const FixtureConfig = (
+  repos: Readonly<Record<string, Record<string, FixtureFile>>>,
+  env: Readonly<Record<string, string>>,
+) =>
   Layer.unwrap(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -151,6 +186,7 @@ const FixtureConfig = (repos: Readonly<Record<string, Record<string, FixtureFile
       );
       const refusing = yield* refusingServer;
       const port = portOf(refusing.server);
+      const hanging = portOf(yield* hangingServer);
       const github = githubDouble({
         publicKey: APP_KEY.publicKey,
         installations: { "test/fixture": 7 },
@@ -171,6 +207,7 @@ const FixtureConfig = (repos: Readonly<Record<string, Record<string, FixtureFile
             url: `http://127.0.0.1:${port}/private.git`,
             tokenEnv: "PRIVATE_TOKEN",
           },
+          { id: "test/hanging", url: `http://127.0.0.1:${hanging}/hanging.git` },
           { id: "test/github", url: "https://github.com/test/fixture.git" },
           { id: "test/uninstalled", url: "https://github.com/test/uninstalled.git" },
         ]),
@@ -185,6 +222,7 @@ const FixtureConfig = (repos: Readonly<Record<string, Record<string, FixtureFile
             GITHUB_APP_ID,
             GITHUB_APP_PRIVATE_KEY: APP_KEY.privateKey,
             GITHUB_API_URL: githubUrl,
+            ...env,
           }),
         ),
         Layer.succeed(Fixtures, {
@@ -212,12 +250,19 @@ const CapturedLogs = Layer.unwrap(
   }),
 );
 
-/** The real routes on a random port, a client pointed at them, and these repos registered. */
-export const TestServer = (repos: Readonly<Record<string, Record<string, FixtureFile>>>) =>
+/**
+ * The real routes on a random port, a client pointed at them, and these repos registered.
+ * `env` adds to or overrides the service's environment.
+ */
+export const TestServer = (
+  repos: Readonly<Record<string, Record<string, FixtureFile>>>,
+  env: Readonly<Record<string, string>> = {},
+) =>
   HttpRouter.serve(App.layer, { disableLogger: true }).pipe(
     Layer.provide(RecordingSpawner),
-    Layer.provideMerge(FixtureConfig(repos)),
+    Layer.provideMerge(FixtureConfig(repos, env)),
     Layer.provideMerge(Layer.effect(SpawnLog, Ref.make<ReadonlyArray<string>>([]))),
+    Layer.provideMerge(Layer.sync(PeakRunning, () => new Map<string, number>())),
     Layer.provideMerge(CapturedLogs),
     Layer.provideMerge(NodeHttpServer.layerTest),
     Layer.provide(NodeServices.layer),

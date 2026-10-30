@@ -10,6 +10,7 @@ import * as Schema from "effect/Schema";
 import { type Action, ActionResult, Sha256 } from "@dorbs/protocol/typecheck";
 
 import { ServiceConfig } from "./ServiceConfig.ts";
+import { Storage } from "./Storage.ts";
 
 const byPath = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
@@ -46,11 +47,26 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const dir = path.join((yield* ServiceConfig).dataDir, "actions");
   yield* fs.makeDirectory(dir, { recursive: true });
+  const storage = yield* Storage;
+  yield* storage.adopt(
+    (yield* fs.readDirectory(dir))
+      .filter((name) => !name.startsWith("."))
+      .map((name) => path.join(dir, name)),
+  );
 
   const get: ActionCache["Service"]["get"] = Effect.fn("ActionCache.get")(function* (digest) {
     const file = path.join(dir, `${digest}.json`);
-    if (!(yield* fs.exists(file))) return undefined;
-    return yield* decodeResult(yield* fs.readFileString(file));
+    // Eviction may remove the file between any two reads, so a missing one is a miss.
+    const text = yield* fs.readFileString(file).pipe(
+      Effect.map((content): string | undefined => content),
+      Effect.catchTags({
+        PlatformError: (error) =>
+          error.reason._tag === "NotFound" ? Effect.succeed(undefined) : Effect.fail(error),
+      }),
+    );
+    if (text === undefined) return undefined;
+    yield* storage.touch(file);
+    return yield* decodeResult(text);
   }, Effect.orDie);
 
   const put: ActionCache["Service"]["put"] = Effect.fn("ActionCache.put")(function* (
@@ -61,6 +77,7 @@ const make = Effect.gen(function* () {
     const staging = path.join(dir, `.${digest}.${NodeCrypto.randomUUID()}`);
     yield* fs.writeFileString(staging, yield* encodeResult(result));
     yield* fs.rename(staging, path.join(dir, `${digest}.json`));
+    yield* storage.record(path.join(dir, `${digest}.json`));
   }, Effect.orDie);
 
   return ActionCache.of({ get, put });

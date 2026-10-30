@@ -1,3 +1,6 @@
+import * as NodeCrypto from "node:crypto";
+import * as NodeOS from "node:os";
+
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -5,12 +8,19 @@ import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as Ref from "effect/Ref";
 
-import { type Diagnostic, RelativePath, Sha256, ToolName } from "@dorbs/protocol/typecheck";
+import {
+  type ActionResponse,
+  type Diagnostic,
+  RelativePath,
+  Sha256,
+  ToolName,
+} from "@dorbs/protocol/typecheck";
 
 import {
   EMPTY_PACKAGE,
   Fixtures,
   LogLines,
+  PeakRunning,
   PRIVATE_TOKEN,
   SpawnLog,
   TestServer,
@@ -383,4 +393,243 @@ it.live("answers 401 on every route without the right bearer token", () =>
     );
     assert.deepStrictEqual(statuses, [401, 401, 401, 401, 401]);
   }).pipe(Effect.provide(Server)),
+);
+
+const BUILD_INFO = `${NodeOS.tmpdir()}/typecheck-escape-${NodeCrypto.randomUUID()}.tsbuildinfo`;
+
+it.live(
+  "answers 422 before any tool runs when the commit's tsconfig writes outside the check",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const response = yield* postCheckRaw("buildinfo", {});
+      assert.deepStrictEqual(
+        { status: response.status, body: yield* response.text },
+        {
+          status: 422,
+          body:
+            "The commit's tsconfig sets options the service does not run: " +
+            "config/base.json: compilerOptions.incremental, " +
+            "config/base.json: compilerOptions.tsBuildInfoFile",
+        },
+      );
+      assert.isFalse(yield* fs.exists(BUILD_INFO));
+      assert.deepStrictEqual(
+        (yield* spawned).filter((line) => !line.startsWith("git ")),
+        [],
+        "no install and no tool ran",
+      );
+    }).pipe(
+      Effect.provide(
+        TestServer({
+          buildinfo: {
+            "package.json": EMPTY_PACKAGE,
+            "tsconfig.json": '{ "extends": "./config/base.json", "include": ["src"] }\n',
+            "config/base.json": JSON.stringify({
+              compilerOptions: {
+                ...JSON.parse(TSCONFIG).compilerOptions,
+                incremental: true,
+                tsBuildInfoFile: BUILD_INFO,
+              },
+            }),
+            "src/a.ts": "export const a = 1;\n",
+          },
+        }),
+      ),
+    ),
+);
+
+it.live("refuses a changed file that imports from outside the repo, and runs no tool", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const outside = yield* fs.makeTempDirectoryScoped();
+    const secret = `hunter2-${NodeCrypto.randomUUID()}`;
+    yield* fs.writeFileString(`${outside}/secret.ts`, `export const SECRET = "${secret}";\n`);
+    const ranBefore = (yield* spawned).length;
+    const response = yield* checkChange("fixture", {
+      files: {
+        "src/a.ts": `import { SECRET } from "${outside}/secret.ts";\nconst n: typeof SECRET = 1;\n`,
+      },
+    });
+    assert.deepStrictEqual(response._tag === "ActionResult" && response.diagnostics, [
+      {
+        tool: ToolName.make("typecheck"),
+        path: RelativePath.make("src/a.ts"),
+        line: 1,
+        column: 25,
+        code: "OutsideModule",
+        message: `"${outside}/secret.ts" can resolve outside the repo. Import only files in the repo or installed packages.`,
+        severity: "error",
+      },
+    ]);
+    assert.notInclude(JSON.stringify(response), secret);
+    assert.deepStrictEqual(
+      (yield* spawned).slice(ranBefore).filter((line) => line.startsWith("tsrs")),
+      [],
+    );
+  }).pipe(Effect.provide(Server)),
+);
+
+it.live("answers 502 when a fetch outlives its deadline, and the next check runs again", () =>
+  Effect.gen(function* () {
+    const statuses = [];
+    for (const _ of [1, 2]) {
+      const response = yield* postCheckRaw("fixture", {
+        repo: "test/hanging",
+        commit: "0000000000000000000000000000000000000001",
+      });
+      statuses.push({ status: response.status, body: yield* response.text });
+    }
+    const timedOut = {
+      status: 502,
+      body: "git fetch from test/hanging failed:\ngit timed out after 500ms",
+    };
+    assert.deepStrictEqual(statuses, [timedOut, timedOut]);
+  }).pipe(Effect.provide(TestServer({ fixture: FIXTURE }, { PROCESS_TIMEOUT: "500 millis" }))),
+);
+
+it.live("refuses a check whose program reads a file outside the repo and its packages", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const { dataDir } = yield* Fixtures;
+    // Module resolution climbs past the check into every ancestor's node_modules.
+    const leak = `${dataDir}/../node_modules/leak`;
+    const secret = `hunter2-${NodeCrypto.randomUUID()}`;
+    yield* fs.makeDirectory(leak, { recursive: true });
+    yield* fs.writeFileString(`${leak}/package.json`, '{ "name": "leak", "types": "index.d.ts" }');
+    yield* fs.writeFileString(`${leak}/index.d.ts`, `export declare const SECRET: "${secret}";\n`);
+    const response = yield* checkChange("fixture", {
+      files: { "src/a.ts": 'import { SECRET } from "leak";\nconst n: typeof SECRET = 1;\n' },
+    });
+    assert.deepStrictEqual(response._tag === "ActionResult" && response.diagnostics, [
+      {
+        tool: ToolName.make("typecheck"),
+        path: RelativePath.make("tsconfig.json"),
+        line: 1,
+        column: 1,
+        code: "OutsideModule",
+        message:
+          "The program reads a file outside the repo and its installed packages, so the service withholds its diagnostics.",
+        severity: "error",
+      },
+    ]);
+    assert.notInclude(JSON.stringify(response), secret);
+  }).pipe(Effect.provide(Server)),
+);
+
+it.live("answers 413 for a body over 5 MiB and stores nothing", () =>
+  Effect.gen(function* () {
+    const client = yield* HttpClient.HttpClient;
+    const content = "a".repeat(5 * 1024 * 1024 + 1);
+    const sha256 = NodeCrypto.createHash("sha256").update(content).digest("hex");
+    const response = yield* client.execute(
+      HttpClientRequest.put(`/blobs/${sha256}`).pipe(
+        HttpClientRequest.bearerToken(TOKEN),
+        HttpClientRequest.bodyText(content, "application/octet-stream"),
+      ),
+    );
+    assert.strictEqual(response.status, 413);
+    const check = yield* postCheck("fixture", { files: { "src/big.ts": content } });
+    assert.deepStrictEqual(check, { _tag: "MissingBlobs", sha256s: [Sha256.make(sha256)] });
+  }).pipe(Effect.provide(Server)),
+);
+
+// Three lockfiles that differ only in a comment, so each needs its own install.
+const lockfileRepo = (n: number) => ({
+  "package.json": EMPTY_PACKAGE,
+  "pnpm-lock.yaml": `# ${n}\nlockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n`,
+  "tsconfig.json": TSCONFIG,
+  "src/a.ts": "export const a = 1;\n",
+});
+
+it.live("runs at most two installs at once", () =>
+  Effect.gen(function* () {
+    const responses = yield* Effect.all(
+      ["one", "two", "three"].map((fixture) => checkChange(fixture, {})),
+      { concurrency: "unbounded" },
+    );
+    assert.deepStrictEqual(
+      responses.map((response) => response._tag === "ActionResult" && response.diagnostics),
+      [[], [], []],
+    );
+    assert.strictEqual((yield* PeakRunning).get("pnpm"), 2);
+  }).pipe(
+    Effect.provide(
+      TestServer({ one: lockfileRepo(1), two: lockfileRepo(2), three: lockfileRepo(3) }),
+    ),
+  ),
+);
+
+it.live("runs the tools once for identical concurrent actions", () =>
+  Effect.gen(function* () {
+    const change = { files: { "src/d.ts": 'export const d: number = "d";\n' } };
+    yield* upload(change.files["src/d.ts"]);
+    const responses = yield* Effect.all(
+      [1, 2, 3].map(() => postCheck("fixture", change)),
+      { concurrency: "unbounded" },
+    );
+    const D_TS = { ...BAD_TS, path: RelativePath.make("src/d.ts") };
+    assert.deepStrictEqual(
+      responses.map((response) => response._tag === "ActionResult" && response.diagnostics),
+      [
+        [BAD_TS, D_TS],
+        [BAD_TS, D_TS],
+        [BAD_TS, D_TS],
+      ],
+    );
+    assert.lengthOf(
+      (yield* spawned).filter((line) => line.startsWith("tsrs --noEmit")),
+      1,
+    );
+  }).pipe(Effect.provide(Server)),
+);
+
+it.live("clones the checkout into each check instead of copying its bytes", () =>
+  Effect.gen(function* () {
+    const response = yield* checkChange("fixture", { files: { "src/e.ts": "export {};\n" } });
+    assert.strictEqual(response._tag, "ActionResult");
+    const clone = process.platform === "darwin" ? "cp -cR " : "cp -R --reflink=auto ";
+    assert.lengthOf(
+      (yield* spawned).filter((line) => line.startsWith(clone)),
+      1,
+    );
+  }).pipe(Effect.provide(Server)),
+);
+
+it.live("evicts what was used least recently past CACHE_MAX_BYTES, and rebuilds it on demand", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const { dataDir, commits } = yield* Fixtures;
+    const tree = (name: string) => fs.exists(`${dataDir}/checkouts/test/${name}/${commits[name]}`);
+    const diagnosticsOf = (response: ActionResponse) =>
+      response._tag === "ActionResult" && {
+        diagnostics: response.diagnostics,
+        cached: response.cached,
+      };
+    const first = yield* checkChange("first", {});
+    const second = yield* checkChange("second", {});
+    // A check evicts before it runs, so the second check removed only what the first left.
+    assert.deepStrictEqual([yield* tree("first"), yield* tree("second")], [false, true]);
+    const again = yield* checkChange("first", {});
+    assert.deepStrictEqual([yield* tree("first"), yield* tree("second")], [true, false]);
+    assert.deepStrictEqual([first, second, again].map(diagnosticsOf), [
+      { diagnostics: [BAD_TS], cached: false },
+      { diagnostics: [], cached: false },
+      { diagnostics: [BAD_TS], cached: false },
+    ]);
+  }).pipe(
+    Effect.provide(
+      TestServer(
+        {
+          first: FIXTURE,
+          second: {
+            "package.json": EMPTY_PACKAGE,
+            "tsconfig.json": TSCONFIG,
+            "src/a.ts": "export {};\n",
+          },
+        },
+        { CACHE_MAX_BYTES: "1" },
+      ),
+    ),
+  ),
 );

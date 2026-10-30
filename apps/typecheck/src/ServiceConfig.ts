@@ -1,5 +1,6 @@
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -29,6 +30,12 @@ export class ServiceConfig extends Context.Service<
     readonly dataDir: string;
     readonly token: Redacted.Redacted;
     readonly repos: ReadonlyMap<RepoId, Repo>;
+    /** How long any process the service spawns may run: git, pnpm or a tool. */
+    readonly processTimeout: Duration.Duration;
+    /** How many bytes of blobs, results, checkouts and installs to keep before evicting. */
+    readonly cacheMaxBytes: number;
+    /** Whether tsrs and oxlint run in a macOS sandbox that confines their reads and writes. */
+    readonly confine: boolean;
   }
 >()("dorbs/typecheck/ServiceConfig") {}
 
@@ -53,6 +60,11 @@ const make = Effect.gen(function* () {
     dataDir: Config.NonEmptyString("DATA_DIR"),
     token: Config.schema(Schema.Redacted(Schema.NonEmptyString), "TYPECHECK_TOKEN"),
     reposFile: Config.NonEmptyString("REPOS_FILE"),
+    processTimeout: Config.Duration("PROCESS_TIMEOUT").pipe(
+      Config.withDefault(Duration.minutes(10)),
+    ),
+    cacheMaxBytes: Config.Number("CACHE_MAX_BYTES").pipe(Config.withDefault(20 * 1024 ** 3)),
+    confine: Config.Boolean("TYPECHECK_CONFINE").pipe(Config.withDefault(false)),
   });
   const registrations = yield* decodeRegistrations(
     yield* (yield* FileSystem.FileSystem).readFileString(config.reposFile),
@@ -77,6 +89,9 @@ const make = Effect.gen(function* () {
     dataDir: config.dataDir,
     token: config.token,
     repos: new Map(repos.map((repo) => [repo.id, repo])),
+    processTimeout: config.processTimeout,
+    cacheMaxBytes: config.cacheMaxBytes,
+    confine: config.confine,
   };
 });
 

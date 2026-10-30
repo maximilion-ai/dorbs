@@ -1,6 +1,8 @@
 import * as NodeCrypto from "node:crypto";
 
+import * as ByteSize from "effect/ByteSize";
 import * as Effect from "effect/Effect";
+import * as HttpIncomingMessage from "effect/http/HttpIncomingMessage";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
@@ -16,9 +18,13 @@ import * as Checker from "./Checker.ts";
 import * as Checkouts from "./Checkouts.ts";
 import * as Installs from "./Installs.ts";
 import * as ServiceConfig from "./ServiceConfig.ts";
+import * as Storage from "./Storage.ts";
 
 const BlobParams = Schema.Struct({ sha256: Sha256 });
 const encodeActionResponse = HttpServerResponse.schemaJson(ActionResponse);
+
+// A source file or an action's file list fits easily; the service reads no larger body.
+const MAX_BODY = ByteSize.mebibytes(5);
 
 const digest = (value: string) => NodeCrypto.createHash("sha256").update(value).digest();
 
@@ -35,7 +41,7 @@ const routes = HttpRouter.use(
         if (!NodeCrypto.timingSafeEqual(presented, expected)) {
           return HttpServerResponse.empty({ status: 401 });
         }
-        return yield* app;
+        return yield* app.pipe(Effect.provideService(HttpIncomingMessage.MaxBodySize, MAX_BODY));
       }),
     );
 
@@ -69,6 +75,8 @@ const routes = HttpRouter.use(
             Effect.succeed(HttpServerResponse.text(error.message, { status: 400 })),
           InstallFailed: (error) =>
             Effect.succeed(HttpServerResponse.text(error.message, { status: 422 })),
+          UnsafeConfig: (error) =>
+            Effect.succeed(HttpServerResponse.text(error.message, { status: 422 })),
           FetchFailed: (error) =>
             Effect.succeed(HttpServerResponse.text(error.message, { status: 502 })),
         }),
@@ -83,6 +91,7 @@ export const layer = routes.pipe(
     Checker.layer.pipe(
       Layer.provideMerge(Layer.mergeAll(ActionCache.layer, Checkouts.layer, Installs.layer)),
       Layer.provideMerge(BlobStore.layer),
+      Layer.provideMerge(Storage.layer),
       Layer.provideMerge(ServiceConfig.layer),
     ),
   ),

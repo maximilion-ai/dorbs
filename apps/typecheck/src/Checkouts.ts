@@ -15,6 +15,7 @@ import { CommitSha, RelativePath, RepoId, Sha256 } from "@dorbs/protocol/typeche
 import { runProcess } from "./runProcess.ts";
 import { type Repo, ServiceConfig } from "./ServiceConfig.ts";
 import * as SingleFlight from "./SingleFlight.ts";
+import { Storage } from "./Storage.ts";
 import { tsconfigChain } from "./tsconfigChain.ts";
 
 export class UnknownCommit extends Schema.TaggedError<UnknownCommit>()("UnknownCommit", {
@@ -44,6 +45,8 @@ export type Checkout = {
   readonly lockfile: Sha256;
   /** The tsconfig files the commit's tsconfig.json extends or references, by any name. */
   readonly tsconfigs: ReadonlySet<RelativePath>;
+  /** Options in those files that write files or reach outside the repo, as `path: option`. */
+  readonly unsafeConfig: ReadonlyArray<string>;
 };
 
 export class Checkouts extends Context.Service<
@@ -78,11 +81,28 @@ const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const { dataDir } = yield* ServiceConfig;
+  const { dataDir, processTimeout } = yield* ServiceConfig;
   const caches = path.join(dataDir, "git");
   const trees = path.join(dataDir, "checkouts");
   yield* fs.makeDirectory(trees, { recursive: true });
-  const once = yield* SingleFlight.make<Checkout, UnknownCommit | FetchFailed>();
+  const storage = yield* Storage;
+  // A tree sits at checkouts/<owner>/<name>/<commit>, since a repo id has one slash.
+  const listed = (dir: string) =>
+    fs
+      .readDirectory(dir)
+      .pipe(
+        Effect.map((names) =>
+          names.filter((name) => !name.startsWith(".")).map((name) => path.join(dir, name)),
+        ),
+      );
+  const owners = yield* listed(trees);
+  const names = (yield* Effect.forEach(owners, listed)).flat();
+  yield* storage.adopt((yield* Effect.forEach(names, listed)).flat());
+  const once = yield* SingleFlight.make<Checkout, UnknownCommit | FetchFailed>({
+    keep: 256,
+    // Eviction may have removed the tree since.
+    valid: (checkout) => fs.exists(checkout.dir).pipe(Effect.orElseSucceed(() => false)),
+  });
   // Fetches into one repo's cache take turns, because git locks the cache's shallow file.
   const fetchTurns = new Map<RepoId, Semaphore.Semaphore>();
   const fetchTurn = (repo: RepoId) => {
@@ -97,7 +117,10 @@ const make = Effect.gen(function* () {
     args: ReadonlyArray<string>,
     env: Record<string, string> = {},
   ) {
-    const result = yield* runProcess(spawner, cwd, command, args, env).pipe(Effect.orDie);
+    const result = yield* runProcess(spawner, cwd, command, args, {
+      env,
+      timeout: processTimeout,
+    }).pipe(Effect.orDie);
     if (result.exitCode !== 0) {
       yield* Effect.die(
         new Error(`${command} ${args[0]} exited ${result.exitCode}: ${result.stderr}`),
@@ -122,8 +145,14 @@ const make = Effect.gen(function* () {
       cache,
       "git",
       ["fetch", "--quiet", "--depth", "1", "--no-tags", "--no-write-fetch-head", repo.url, commit],
-      gitEnv(token),
-    ).pipe(Effect.orDie);
+      { env: gitEnv(token), timeout: processTimeout },
+    ).pipe(
+      Effect.catchTags({
+        PlatformError: Effect.die,
+        ProcessFailed: (error) =>
+          Effect.fail(new FetchFailed({ repo: repo.id, output: error.message })),
+      }),
+    );
     if (result.exitCode !== 0) {
       yield* Effect.fail(
         result.stderr.includes("not our ref")
@@ -151,6 +180,7 @@ const make = Effect.gen(function* () {
       yield* fs.makeDirectory(path.dirname(dir), { recursive: true });
       yield* fs.rename(staging, dir);
     }).pipe(Effect.orDie);
+    yield* storage.record(dir);
     return dir;
   });
 
@@ -169,18 +199,20 @@ const make = Effect.gen(function* () {
       .filter((entry) => !entry.split(path.sep).includes("node_modules"))
       .map((entry) => path.dirname(entry));
     const lockfile = sha256((yield* read("pnpm-lock.yaml")) ?? new Uint8Array());
-    const tsconfigs = yield* tsconfigChain((file) =>
+    const chain = yield* tsconfigChain((file) =>
       read(file).pipe(
         Effect.map((content) =>
           content === undefined ? undefined : Buffer.from(content).toString(),
         ),
       ),
     );
-    return { dir, packages, lockfile, tsconfigs };
+    return { dir, packages, lockfile, tsconfigs: chain.files, unsafeConfig: chain.unsafe };
   });
 
   const ensure: Checkouts["Service"]["ensure"] = (repo, commit) =>
-    once(`${repo.id}@${commit}`, materialize(repo, commit).pipe(Effect.flatMap(describe)));
+    once(`${repo.id}@${commit}`, materialize(repo, commit).pipe(Effect.flatMap(describe))).pipe(
+      Effect.tap((checkout) => storage.touch(checkout.dir)),
+    );
 
   return Checkouts.of({ ensure });
 });

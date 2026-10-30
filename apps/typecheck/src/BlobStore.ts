@@ -10,6 +10,7 @@ import * as Schema from "effect/Schema";
 import { Sha256 } from "@dorbs/protocol/typecheck";
 
 import { ServiceConfig } from "./ServiceConfig.ts";
+import { Storage } from "./Storage.ts";
 
 export class BlobHashMismatch extends Schema.TaggedError<BlobHashMismatch>()("BlobHashMismatch", {
   expected: Sha256,
@@ -34,6 +35,12 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const dir = path.join((yield* ServiceConfig).dataDir, "blobs");
   yield* fs.makeDirectory(dir, { recursive: true });
+  const storage = yield* Storage;
+  yield* storage.adopt(
+    (yield* fs.readDirectory(dir))
+      .filter((name) => !name.startsWith("."))
+      .map((name) => path.join(dir, name)),
+  );
 
   const pathOf = (sha256: Sha256) => path.join(dir, sha256);
 
@@ -43,7 +50,8 @@ const make = Effect.gen(function* () {
     // Write then rename, so a reader never sees a half-written blob under its hash.
     const staging = path.join(dir, `.${sha256}.${NodeCrypto.randomUUID()}`);
     yield* fs.writeFile(staging, content).pipe(Effect.orDie);
-    return yield* fs.rename(staging, pathOf(sha256)).pipe(Effect.orDie);
+    yield* fs.rename(staging, pathOf(sha256)).pipe(Effect.orDie);
+    return yield* storage.record(pathOf(sha256));
   });
 
   const missing: BlobStore["Service"]["missing"] = Effect.fn("BlobStore.missing")(

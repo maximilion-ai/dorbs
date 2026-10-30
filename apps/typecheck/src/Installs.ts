@@ -7,6 +7,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 
 import { Sha256 } from "@dorbs/protocol/typecheck";
 
@@ -15,6 +16,7 @@ import { installWorkspace } from "./pnpmWorkspace.ts";
 import { runProcess } from "./runProcess.ts";
 import { ServiceConfig } from "./ServiceConfig.ts";
 import * as SingleFlight from "./SingleFlight.ts";
+import { Storage } from "./Storage.ts";
 
 export class InstallFailed extends Schema.TaggedError<InstallFailed>()("InstallFailed", {
   lockfile: Sha256,
@@ -37,11 +39,23 @@ const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const { dataDir } = yield* ServiceConfig;
+  const { dataDir, processTimeout } = yield* ServiceConfig;
   const root = path.join(dataDir, "installs");
   const storeDir = path.join(dataDir, "pnpm-store");
   yield* fs.makeDirectory(root, { recursive: true });
-  const once = yield* SingleFlight.make<string, InstallFailed>();
+  const storage = yield* Storage;
+  yield* storage.adopt(
+    (yield* fs.readDirectory(root))
+      .filter((name) => !name.startsWith("."))
+      .map((name) => path.join(root, name)),
+  );
+  const once = yield* SingleFlight.make<string, InstallFailed>({
+    keep: 256,
+    // Eviction may have removed the install since.
+    valid: (dir) => fs.exists(dir).pipe(Effect.orElseSucceed(() => false)),
+  });
+  // Installs run before a check takes its slot, so they get their own bound.
+  const slots = yield* Semaphore.make(2);
 
   const install = Effect.fn("Installs.install")(function* (checkout: Checkout) {
     const dir = path.join(root, checkout.lockfile);
@@ -66,17 +80,25 @@ const make = Effect.gen(function* () {
         );
       }
     }).pipe(Effect.orDie);
-    const result = yield* runProcess(spawner, staging, "pnpm", [
-      "install",
-      "--frozen-lockfile",
-      "--ignore-scripts",
-      // A pnpmfile's hooks would run as code in the service.
-      "--ignore-pnpmfile",
-      "--store-dir",
-      storeDir,
-    ]).pipe(
+    const result = yield* runProcess(
+      spawner,
+      staging,
+      "pnpm",
+      [
+        "install",
+        "--frozen-lockfile",
+        "--ignore-scripts",
+        // A pnpmfile's hooks would run as code in the service.
+        "--ignore-pnpmfile",
+        "--store-dir",
+        storeDir,
+      ],
+      { timeout: processTimeout },
+    ).pipe(
       Effect.catchTags({
         PlatformError: (error) =>
+          Effect.succeed({ exitCode: -1, stdout: "", stderr: error.message }),
+        ProcessFailed: (error) =>
           Effect.succeed({ exitCode: -1, stdout: "", stderr: error.message }),
       }),
     );
@@ -88,11 +110,12 @@ const make = Effect.gen(function* () {
       });
     }
     yield* fs.rename(staging, dir).pipe(Effect.orDie);
+    yield* storage.record(dir);
     return dir;
   });
 
   const ensure: Installs["Service"]["ensure"] = (checkout) =>
-    once(checkout.lockfile, install(checkout));
+    once(checkout.lockfile, slots.withPermit(install(checkout))).pipe(Effect.tap(storage.touch));
 
   return Installs.of({ ensure });
 });
