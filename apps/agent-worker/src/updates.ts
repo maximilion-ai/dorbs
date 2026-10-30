@@ -16,6 +16,53 @@ const isFileChange = Schema.is(FileChange);
 
 const underCwd = (cwd: string, path: string): string => `${cwd.replace(/\/+$/, "")}/${path}`;
 
+/** A tool call starting, as T3 shows it: its title and kind, and the file it names. */
+export const toolCall = (
+  toolCallId: string,
+  name: string,
+  args: { readonly [key: string]: Schema.Json },
+  cwd: string,
+): SessionUpdate => {
+  const path = typeof args["path"] === "string" ? args["path"] : undefined;
+  return {
+    sessionUpdate: "tool_call",
+    toolCallId,
+    ...toolPresentation(name, args),
+    status: "in_progress",
+    rawInput: args,
+    ...(path === undefined ? {} : { locations: [{ path: underCwd(cwd, path) }] }),
+  };
+};
+
+/** A tool call's result: its text, and a write's diff from the result's `details`. */
+export const toolCallEnd = (
+  toolCallId: string,
+  failed: boolean,
+  texts: ReadonlyArray<string>,
+  details: unknown,
+  cwd: string,
+): SessionUpdate => {
+  const content: ToolCallContent[] = texts.map((text) => ({
+    type: "content",
+    content: { type: "text", text },
+  }));
+  if (isFileChange(details)) {
+    const { path, oldText, newText } = details;
+    content.push({
+      type: "diff",
+      path: underCwd(cwd, path),
+      ...(oldText === undefined ? {} : { oldText }),
+      newText,
+    });
+  }
+  return {
+    sessionUpdate: "tool_call_update",
+    toolCallId,
+    status: failed ? "failed" : "completed",
+    content,
+  };
+};
+
 const blockText = (block: Block): string | undefined =>
   block.type === "text" ? block.text : block.type === "thinking" ? block.thinking : undefined;
 
@@ -88,22 +135,8 @@ export const toSessionUpdates = (sent: Sent, event: AgentEvent, cwd: string): Ma
       const next = new Map(sent);
       return [NOTHING_SENT, message.content.flatMap((block, index) => catchUp(next, index, block))];
     }
-    case "tool_execution_start": {
-      const path = typeof event.args["path"] === "string" ? event.args["path"] : undefined;
-      return [
-        sent,
-        [
-          {
-            sessionUpdate: "tool_call",
-            toolCallId: event.toolCallId,
-            ...toolPresentation(event.toolName, event.args),
-            status: "in_progress",
-            rawInput: event.args,
-            ...(path === undefined ? {} : { locations: [{ path: underCwd(cwd, path) }] }),
-          },
-        ],
-      ];
-    }
+    case "tool_execution_start":
+      return [sent, [toolCall(event.toolCallId, event.toolName, event.args, cwd)]];
     case "tool_execution_end": {
       const result = toolResult(event);
       if (result === undefined) {
@@ -112,31 +145,8 @@ export const toSessionUpdates = (sent: Sent, event: AgentEvent, cwd: string): Ma
           [{ sessionUpdate: "tool_call_update", toolCallId: event.toolCallId, status: "failed" }],
         ];
       }
-      const content: ToolCallContent[] = result.content.flatMap((item): ToolCallContent[] =>
-        item.type === "text"
-          ? [{ type: "content", content: { type: "text", text: item.text } }]
-          : [],
-      );
-      if (isFileChange(result.details)) {
-        const { path, oldText, newText } = result.details;
-        content.push({
-          type: "diff",
-          path: underCwd(cwd, path),
-          ...(oldText === undefined ? {} : { oldText }),
-          newText,
-        });
-      }
-      return [
-        sent,
-        [
-          {
-            sessionUpdate: "tool_call_update",
-            toolCallId: event.toolCallId,
-            status: result.isError ? "failed" : "completed",
-            content,
-          },
-        ],
-      ];
+      const texts = result.content.flatMap((item) => (item.type === "text" ? [item.text] : []));
+      return [sent, [toolCallEnd(event.toolCallId, result.isError, texts, result.details, cwd)]];
     }
     default:
       return [sent, []];
