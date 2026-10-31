@@ -1,0 +1,21 @@
+{
+  "name": "@dorbs/checker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.ts",
+    "test": "vp test run --config ../../vite.config.ts --dir .",
+    "typecheck": "tsrs --noEmit"
+  },
+  "dependencies": {
+    "@dorbs/protocol": "workspace:*",
+    "@effect/platform-node": "catalog:",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "@types/node": "catalog:",
+    "tsrs": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}
