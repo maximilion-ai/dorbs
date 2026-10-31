@@ -17,6 +17,8 @@ export const DEFAULT_ALLOW: ReadonlyArray<string> = [
   "static.crates.io",
   "proxy.golang.org",
   "sum.golang.org",
+  // The Go module proxy redirects downloads to its bucket.
+  "storage.googleapis.com",
   "dl.google.com",
   "nodejs.org",
   // uv's Python builds and git dependencies come from GitHub releases.
