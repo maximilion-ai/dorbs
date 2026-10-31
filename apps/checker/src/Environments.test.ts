@@ -38,6 +38,7 @@ const fakeDocker = (options: {
   readonly containers?: ReadonlyArray<{ name: string; env: string; running: boolean }>;
 }) => {
   const calls: Array<string> = [];
+  const removed = new Set<string>();
   let running = 0;
   let peak = 0;
   const docker = Docker.of({
@@ -59,7 +60,12 @@ const fakeDocker = (options: {
             }
           : { stdout: "", stderr: "", exitCode: 0, timedOut: false, truncated: false };
       }),
-    create: (name) => Effect.sync(() => (calls.push(`create ${name}`), "7")),
+    create: (name) =>
+      Effect.sync(() => {
+        calls.push(`create ${name}`);
+        removed.delete(name);
+        return "7";
+      }),
     exec: Effect.fn("FakeDocker.exec")(function* (container, spec) {
       calls.push(`exec ${container} ${spec.run}`);
       running += 1;
@@ -69,9 +75,14 @@ const fakeDocker = (options: {
       return { stdout: "ok", stderr: "", exitCode: 0, timedOut: false, truncated: false };
     }),
     reap: () => Effect.succeed(true),
-    start: (name) => Effect.sync(() => (calls.push(`start ${name}`), "7")),
+    start: (name) =>
+      Effect.sync(() => (calls.push(`start ${name}`), removed.has(name) ? undefined : "7")),
     stop: (name) => Effect.sync(() => void calls.push(`stop ${name}`)),
-    remove: (name) => Effect.sync(() => void calls.push(`remove ${name}`)),
+    remove: (name) =>
+      Effect.sync(() => {
+        calls.push(`remove ${name}`);
+        removed.add(name);
+      }),
     list: Effect.sync(() => options.containers ?? []),
   });
   return { docker, calls, peak: () => peak };
@@ -240,37 +251,42 @@ it.effect("stops an idle environment's container and starts it for the next run"
   });
 });
 
-it.effect("comes back after a restart with its environments stopped and strays removed", () => {
-  const { gitDir, commit, dataDir } = repoFixture();
-  return Effect.gen(function* () {
-    const first = fakeDocker({});
-    yield* Effect.flatMap(Environments, (envs) =>
-      envs.use(spec(gitDir, "k1"), commit, NO_CHANGE, () => Effect.void),
-    ).pipe(Effect.provide(environments(first.docker, settings(dataDir))));
-    NodeFS.mkdirSync(NodePath.join(dataDir, "envs/half-set-up"));
-    const second = fakeDocker({
-      containers: [
-        { name: "dorbs-env-k1", env: "k1", running: true },
-        { name: "dorbs-env-gone", env: "gone", running: true },
-      ],
+it.effect(
+  "comes back after a restart with its environments idle and every container made anew",
+  () => {
+    const { gitDir, commit, dataDir } = repoFixture();
+    return Effect.gen(function* () {
+      const first = fakeDocker({});
+      yield* Effect.flatMap(Environments, (envs) =>
+        envs.use(spec(gitDir, "k1"), commit, NO_CHANGE, () => Effect.void),
+      ).pipe(Effect.provide(environments(first.docker, settings(dataDir))));
+      NodeFS.mkdirSync(NodePath.join(dataDir, "envs/half-set-up"));
+      const second = fakeDocker({
+        containers: [
+          { name: "dorbs-env-k1", env: "k1", running: true },
+          { name: "dorbs-env-gone", env: "gone", running: true },
+        ],
+      });
+      yield* Effect.gen(function* () {
+        const envs = yield* Environments;
+        assert.deepStrictEqual(
+          (yield* envs.list).map((env) => [env.key, env.state]),
+          [["k1", "Idle"]],
+        );
+        const ran = yield* envs.use(spec(gitDir, "k1"), commit, NO_CHANGE, (session) =>
+          session.exec({ cwd: ".", run: "check", timeout: "1 minute" }),
+        );
+        assert.strictEqual(ran._tag, "Used");
+      }).pipe(Effect.provide(environments(second.docker, settings(dataDir))));
+      // A container made before the restart may have older limits; the next run makes a new one.
+      assert.deepStrictEqual(second.calls, [
+        "remove dorbs-env-k1",
+        "remove dorbs-env-gone",
+        "start dorbs-env-k1",
+        "create dorbs-env-k1",
+        "exec dorbs-env-k1 check",
+      ]);
+      assert.isFalse(NodeFS.existsSync(NodePath.join(dataDir, "envs/half-set-up")));
     });
-    yield* Effect.gen(function* () {
-      const envs = yield* Environments;
-      assert.deepStrictEqual(
-        (yield* envs.list).map((env) => [env.key, env.state]),
-        [["k1", "Idle"]],
-      );
-      const ran = yield* envs.use(spec(gitDir, "k1"), commit, NO_CHANGE, (session) =>
-        session.exec({ cwd: ".", run: "check", timeout: "1 minute" }),
-      );
-      assert.strictEqual(ran._tag, "Used");
-    }).pipe(Effect.provide(environments(second.docker, settings(dataDir))));
-    assert.deepStrictEqual(second.calls, [
-      "stop dorbs-env-k1",
-      "remove dorbs-env-gone",
-      "start dorbs-env-k1",
-      "exec dorbs-env-k1 check",
-    ]);
-    assert.isFalse(NodeFS.existsSync(NodePath.join(dataDir, "envs/half-set-up")));
-  });
-});
+  },
+);

@@ -64,7 +64,7 @@ export const Diagnostic = Schema.Struct({
 export type Diagnostic = typeof Diagnostic.Type;
 
 /** How a run ended: exit 0, another exit, killed at its deadline, or not started. */
-export const RunStatus = Schema.Literals(["passed", "failed", "timed_out", "skipped"]);
+const RunStatus = Schema.Literals(["passed", "failed", "timed_out", "skipped"]);
 export type RunStatus = typeof RunStatus.Type;
 
 export const CheckRun = Schema.Struct({
@@ -92,7 +92,7 @@ const Timings = {
   overlayMs: Schema.Finite,
 };
 
-export const CheckResult = Schema.TaggedStruct("CheckResult", {
+const CheckResult = Schema.TaggedStruct("CheckResult", {
   ...Timings,
   /** repo: the checks covered the whole repo. changed: some only looked at the changed files. */
   scope: Schema.Literals(["repo", "changed"]),
@@ -102,7 +102,7 @@ export const CheckResult = Schema.TaggedStruct("CheckResult", {
 });
 export type CheckResult = typeof CheckResult.Type;
 
-export const TestResult = Schema.TaggedStruct("TestResult", {
+const TestResult = Schema.TaggedStruct("TestResult", {
   ...Timings,
   command: Schema.String,
   status: RunStatus,

@@ -3,7 +3,10 @@
   // Exported types are part of the protocol contract before apps consume them.
   "rules": { "types": "off", "nsTypes": "off" },
   "workspaces": {
-    ".": {},
+    ".": {
+      // Run by hand against the checker service; the escape probe is sent to it as a test file.
+      "entry": ["scripts/checker.ts", "scripts/checker-accept.ts", "scripts/checkerEscapeProbe.ts"],
+    },
     "packages/*": {
       "includeEntryExports": true,
     },

@@ -12,11 +12,11 @@ import { type ProcessResult, runProcess } from "./runProcess.ts";
 import { ServiceConfig } from "./ServiceConfig.ts";
 
 /** Where an environment's directory appears inside its containers; the repo is at /env/repo. */
-export const ENV_MOUNT = "/env";
+const ENV_MOUNT = "/env";
 export const REPO_ROOT = `${ENV_MOUNT}/repo`;
 
 /** Every container's environment: caches under the environment's home, no secrets, no color. */
-export const CONTAINER_ENV: Readonly<Record<string, string>> = {
+const CONTAINER_ENV: Readonly<Record<string, string>> = {
   HOME: `${ENV_MOUNT}/home`,
   TMPDIR: "/tmp",
   CI: "1",

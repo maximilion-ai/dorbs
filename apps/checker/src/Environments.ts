@@ -423,7 +423,7 @@ const make = Effect.gen(function* () {
     })),
   );
 
-  // Environments a previous run left come back stopped; containers and directories without one go.
+  // Environments a previous run left come back idle; directories without one go.
   const metas = yield* Effect.promise(() => NodeFSP.readdir(metaDir));
   for (const file of metas.filter((name) => name.endsWith(".json"))) {
     const text = yield* Effect.promise(() =>
@@ -446,11 +446,8 @@ const make = Effect.gen(function* () {
     };
     envs.set(key, env);
   }
-  for (const container of yield* docker.list) {
-    const env = envs.get(container.env);
-    if (env === undefined || env.container !== container.name) yield* docker.remove(container.name);
-    else if (container.running) yield* docker.stop(container.name);
-  }
+  // A container made before the restart may carry older limits or environment; the next run makes it anew.
+  for (const container of yield* docker.list) yield* docker.remove(container.name);
   for (const name of yield* Effect.promise(() => NodeFSP.readdir(envsDir))) {
     if (!envs.has(name)) yield* discard(NodePath.join(envsDir, name));
   }

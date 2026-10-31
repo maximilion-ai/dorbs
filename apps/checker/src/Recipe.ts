@@ -3,7 +3,6 @@ import type { RelativePath } from "@dorbs/protocol/typecheck";
 
 /** The images the service builds, one per ecosystem: dorbs-checker/<ecosystem>:1. */
 export type Ecosystem = "node" | "python" | "rust" | "go";
-export const ECOSYSTEMS: ReadonlyArray<Ecosystem> = ["node", "python", "rust", "go"];
 
 /**
  * How a check's output turns into diagnostics. `text` reads what repos' own scripts print: tsc,
