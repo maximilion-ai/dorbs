@@ -1,6 +1,7 @@
 // Prompts N sessions at once on a local stack, on Pi then on OpenCode, and prints one TSV row per harness.
-//   node scripts/compare.ts [count] [scripted|openrouter]   (openrouter reads OPENROUTER_API_KEY)
-// CPU and peak RSS are the workerd process's over the prompts; storage is each session's SQLite after workerd exits.
+//   [RUNTIME=celld] node scripts/compare.ts [count] [scripted|openrouter]   (openrouter reads OPENROUTER_API_KEY)
+// CPU and peak RSS are the runtime process's (workerd or celld) over the prompts; storage is each session's SQLite
+// after the runtime exits.
 
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
@@ -9,8 +10,8 @@ import * as NodePath from "node:path";
 import { prompt, runMain, startStack, stopAll, TS_PROJECT } from "./stack.ts";
 
 const CWD = "/tmp/dorbs-compare-project";
-const REPO = "dorbs/compare";
-const LOCAL = NodePath.resolve(import.meta.dirname, "../apps/agent-worker/.alchemy/local");
+// The repo the scripted model's e2e script clones.
+const REPO = "dorbs/e2e";
 
 const count = Number(process.argv[2] ?? "10");
 const provider = process.argv[3] === "openrouter" ? "openrouter" : "scripted";
@@ -30,16 +31,37 @@ const PROMPT = (n: number) =>
 const percentile = (sorted: ReadonlyArray<number>, p: number) =>
   sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))] ?? 0;
 
-/** This checkout's workerd processes; other projects on the machine run their own. */
-const workerds = () =>
-  NodeChildProcess.spawnSync(
-    "/usr/bin/pgrep",
-    ["-f", `${NodePath.resolve(import.meta.dirname, "..")}/node_modules/.*/bin/workerd `],
-    { encoding: "utf8" },
-  )
+/** The runtime processes under the Worker's process: workerd under alchemy dev, celld and its isolate host under celld. */
+const runtimes = (root: number) => {
+  const rows = NodeChildProcess.spawnSync("/bin/ps", ["-A", "-o", "pid=,ppid=,comm="], {
+    encoding: "utf8",
+  })
     .stdout.split("\n")
-    .filter(Boolean)
-    .map(Number);
+    .map((line) => line.trim().split(/\s+/u))
+    .map(([pid, ppid, comm]) => ({ pid: Number(pid), ppid: Number(ppid), comm: comm ?? "" }));
+  const tree = new Set([root]);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const row of rows)
+      if (tree.has(row.ppid) && !tree.has(row.pid)) grew = tree.add(row.pid) !== undefined;
+  }
+  return rows
+    .filter(
+      (row) => tree.has(row.pid) && ["workerd", "celld"].includes(NodePath.basename(row.comm)),
+    )
+    .map((row) => row.pid);
+};
+
+/** The AcpSession SQLite files under `dir`: alchemy's <id>-AcpSession/<hash>.sqlite, celld's AcpSession:<hash>/.../db.sqlite. */
+const sessionDbs = (dir: string): string[] =>
+  NodeFS.readdirSync(dir, { recursive: true, encoding: "utf8" })
+    .filter(
+      (file) =>
+        file.includes("AcpSession") &&
+        file.endsWith(".sqlite") &&
+        NodePath.basename(file) !== "metadata.sqlite",
+    )
+    .map((file) => NodePath.join(dir, file));
 
 /** CPU seconds a process has used, from ps's [[dd-]hh:]mm:ss.cc. */
 const cpuSeconds = (pid: number) => {
@@ -81,7 +103,6 @@ const storage = (file: string) => {
 const kb = (bytes: number) => Math.round(bytes / 1024);
 
 const run = async (harness: "pi" | "opencode") => {
-  const before = new Set(workerds());
   const stack = await startStack({
     repo: REPO,
     harness,
@@ -93,7 +114,7 @@ const run = async (harness: "pi" | "opencode") => {
       openrouterKey,
     },
   });
-  const pids = workerds().filter((pid) => !before.has(pid));
+  const pids = runtimes(stack.workerPid);
   const cpuBefore = pids.reduce((total, pid) => total + cpuSeconds(pid), 0);
   let rssKb = 0;
   const sample = () => {
@@ -110,23 +131,33 @@ const run = async (harness: "pi" | "opencode") => {
   const results = await Promise.all(
     Array.from({ length: count }, async (_, i) => {
       const session = await stack.startNc();
+      const opened = performance.now();
       const created = await session.client.request(
         2,
         "session/new",
         { cwd: CWD, mcpServers: [] },
         60_000,
       );
+      const newMs = Math.round(performance.now() - opened);
       const sessionId: string = created.result.sessionId;
       const t = performance.now();
       const answer = await session.client
         .request(3, "session/prompt", prompt(sessionId, PROMPT(i + 1)), 300_000)
         .catch((error: unknown) => ({ result: { stopReason: String(error) }, error: undefined }));
       const ms = Math.round(performance.now() - t);
-      const tools = session.client
-        .updates(sessionId)
-        .filter((update) => update.sessionUpdate === "tool_call").length;
+      const updates = session.client.updates(sessionId);
+      const tools = updates.filter((update) => update.sessionUpdate === "tool_call").length;
+      const failed = updates.filter(
+        (update) => update.sessionUpdate === "tool_call_update" && update.status === "failed",
+      ).length;
       session.nc.kill("SIGTERM");
-      return { ms, stop: answer.result?.stopReason ?? JSON.stringify(answer.error), tools };
+      return {
+        newMs,
+        ms,
+        stop: answer.result?.stopReason ?? JSON.stringify(answer.error),
+        tools,
+        failed,
+      };
     }),
   );
   clearInterval(sampler);
@@ -134,27 +165,27 @@ const run = async (harness: "pi" | "opencode") => {
   const cpu = pids.reduce((total, pid) => total + cpuSeconds(pid), 0) - cpuBefore;
   const wallMs = Date.now() - startedAt;
   await stopAll();
-  const files = NodeFS.readdirSync(LOCAL)
-    .filter((dir) => dir.endsWith("-AcpSession"))
-    .flatMap((dir) =>
-      NodeFS.readdirSync(NodePath.join(LOCAL, dir))
-        .filter((file) => file.endsWith(".sqlite") && file !== "metadata.sqlite")
-        .map((file) => NodePath.join(LOCAL, dir, file))
-        .filter((file) => NodeFS.statSync(file).mtimeMs >= startedAt),
-    );
+  const files = sessionDbs(stack.workerState).filter(
+    (file) => NodeFS.statSync(file).mtimeMs >= startedAt,
+  );
   const sizes = files.map(storage);
   const ms = results.map((r) => r.ms).toSorted((a, b) => a - b);
+  const newMs = results.map((r) => r.newMs).toSorted((a, b) => a - b);
   const mean = (pick: (s: ReturnType<typeof storage>) => number) =>
     kb(sizes.reduce((total, s) => total + pick(s), 0) / Math.max(1, sizes.length));
   return [
+    stack.workerRuntime,
     harness,
     count,
+    stack.workerBootMs,
+    percentile(newMs, 50),
     results.filter((r) => r.stop === "end_turn").length,
     percentile(ms, 50),
     percentile(ms, 90),
     ms.at(-1) ?? 0,
     wallMs,
     results.reduce((total, r) => total + r.tools, 0),
+    results.reduce((total, r) => total + r.failed, 0),
     cpu.toFixed(2),
     (cpu / count).toFixed(3),
     Math.round(rssKb / 1024),
@@ -172,17 +203,21 @@ await runMain(async () => {
   for (const harness of ["pi", "opencode"] as const) rows.push(await run(harness));
   console.log(
     [
+      "runtime",
       "harness",
       "sessions",
+      "boot_ms",
+      "new_p50_ms",
       "end_turn",
       "p50_ms",
       "p90_ms",
       "max_ms",
       "wall_ms",
       "tool_calls",
-      "workerd_cpu_s",
+      "failed_tools",
+      "runtime_cpu_s",
       "cpu_s_per_session",
-      "workerd_rss_max_mb",
+      "runtime_rss_max_mb",
       "dbs",
       "kb_per_session",
       "kb_loop",
