@@ -19,17 +19,31 @@ import { Docker } from "./Docker.ts";
 import { type EnvSpec, Environments, layer as environmentsLayer } from "./Environments.ts";
 import type { Recipe } from "./Recipe.ts";
 import { ServiceConfig, type Settings } from "./ServiceConfig.ts";
+import { fetchTree, viewOf } from "./view.ts";
 
 const RECIPE: Recipe = {
   image: "node",
   keyFiles: [RelativePath.make("package.json")],
-  setup: [{ id: "install", run: "install", cwd: ".", network: true }],
+  setup: [{ id: "install", run: "install", cwd: ".", phase: "online" }],
   checks: [],
   test: undefined,
   notes: [],
 };
 
-/** A Docker that runs nothing: setup writes `bytes` into the environment, exec answers "ok". */
+/** Every file under `dir`, with its content. */
+const filesUnder = (dir: string): Record<string, string> =>
+  Object.fromEntries(
+    NodeFS.readdirSync(dir, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => NodePath.join(entry.parentPath, entry.name))
+      .map((file) => [NodePath.relative(dir, file), NodeFS.readFileSync(file, "utf8")] as const)
+      .toSorted(([a], [b]) => a.localeCompare(b)),
+  );
+
+/**
+ * A Docker that runs nothing: setup writes `bytes` into the environment and notes the tree it saw,
+ * exec answers "ok".
+ */
 const fakeDocker = (options: {
   readonly failing?: boolean;
   readonly bytes?: number;
@@ -38,6 +52,7 @@ const fakeDocker = (options: {
   readonly containers?: ReadonlyArray<{ name: string; env: string; running: boolean }>;
 }) => {
   const calls: Array<string> = [];
+  const seen: Array<{ run: string; network: boolean; tree: Record<string, string> }> = [];
   const removed = new Set<string>();
   let running = 0;
   let peak = 0;
@@ -46,6 +61,11 @@ const fakeDocker = (options: {
     setup: (_image, envDir, spec) =>
       Effect.sync(() => {
         calls.push(`setup ${spec.run} network=${spec.network}`);
+        seen.push({
+          run: spec.run,
+          network: spec.network,
+          tree: filesUnder(NodePath.join(envDir, "repo")),
+        });
         NodeFS.writeFileSync(
           NodePath.join(envDir, "home/install"),
           "x".repeat(options.bytes ?? 1024),
@@ -85,7 +105,7 @@ const fakeDocker = (options: {
       }),
     list: Effect.sync(() => options.containers ?? []),
   });
-  return { docker, calls, peak: () => peak };
+  return { docker, calls, seen, peak: () => peak };
 };
 
 const repoFixture = () => {
@@ -132,6 +152,7 @@ const spec = (gitDir: string, key: string): EnvSpec => ({
   recipe: RECIPE,
   image: "image",
   keyChange: { files: [], deleted: [] },
+  fetch: { paths: [RelativePath.make("package.json")], change: { files: [], deleted: [] } },
 });
 
 const NO_CHANGE = { files: [], deleted: [] };
@@ -289,5 +310,64 @@ it.effect(
       ]);
       assert.isFalse(NodeFS.existsSync(NodePath.join(dataDir, "envs/half-set-up")));
     });
+  },
+);
+
+it.effect(
+  "runs downloads with the network on the manifests alone, and steps on the source without it",
+  () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "checker-envs-"));
+    const gitDir = NodePath.join(root, "repo.git");
+    const files = {
+      "package.json": '{"scripts":{"build":"node -e \\"post(read(\'src\'))\\""}}\n',
+      "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+      "src/secret.ts": "export const secret = 1;\n",
+      "crate/Cargo.toml": '[package]\nname = "crate"\n',
+      "crate/src/lib.rs": "pub fn secret() {}\n",
+    };
+    const commit = CommitSha.make(makeRepo(gitDir, files));
+    const paths = Object.keys(files).map((path) => RelativePath.make(path));
+    const change = {
+      files: [{ path: RelativePath.make("package.json"), content: '{"changed":true}\n' }],
+      deleted: [],
+    };
+    const keyFiles = ["crate/Cargo.toml", "package.json", "pnpm-lock.yaml"].map((path) =>
+      RelativePath.make(path),
+    );
+    const recipe: Recipe = {
+      ...RECIPE,
+      keyFiles,
+      setup: [
+        { id: "build", run: "build", cwd: ".", phase: "offline" },
+        { id: "download", run: "download", cwd: ".", phase: "online" },
+        { id: "operator", run: "operator", cwd: ".", phase: "online-with-source" },
+      ],
+    };
+    const envSpec: EnvSpec = {
+      ...spec(gitDir, "k1"),
+      recipe,
+      keyChange: change,
+      fetch: fetchTree(paths, viewOf(paths, new Map(), change, undefined), keyFiles, change),
+    };
+    const fake = fakeDocker({});
+    return Effect.gen(function* () {
+      const envs = yield* Environments;
+      yield* envs.use(envSpec, commit, NO_CHANGE, () => Effect.void);
+      const full = { ...files, "package.json": '{"changed":true}\n' };
+      assert.deepStrictEqual(fake.seen, [
+        {
+          run: "download",
+          network: true,
+          tree: {
+            "crate/Cargo.toml": '[package]\nname = "crate"\n',
+            "crate/src/lib.rs": "",
+            "package.json": '{"changed":true}\n',
+            "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+          },
+        },
+        { run: "operator", network: true, tree: full },
+        { run: "build", network: false, tree: full },
+      ]);
+    }).pipe(Effect.provide(environments(fake.docker, settings(NodePath.join(root, "data")))));
   },
 );

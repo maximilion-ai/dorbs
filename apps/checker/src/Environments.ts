@@ -18,10 +18,11 @@ import { CommitSha, RepoId } from "@dorbs/protocol/typecheck";
 
 import { Docker, type RunSpec } from "./Docker.ts";
 import { type EnvEvent, type EnvState, transition } from "./Environment.ts";
-import type { Recipe } from "./Recipe.ts";
+import type { Recipe, SetupStep } from "./Recipe.ts";
 import { type ProcessResult, runProcess } from "./runProcess.ts";
 import { ServiceConfig } from "./ServiceConfig.ts";
 import * as Trees from "./Tree.ts";
+import type { FetchTree } from "./view.ts";
 
 /** What makes an environment: its key, and what setting it up needs. */
 export type EnvSpec = {
@@ -34,6 +35,8 @@ export type EnvSpec = {
   readonly image: string;
   /** The change's key files, laid over the commit while setup runs, as the key includes them. */
   readonly keyChange: Change;
+  /** The tree the online setup steps run in, of manifests and lockfiles alone. */
+  readonly fetch: FetchTree;
 };
 
 /** What a run gets while it holds an environment. */
@@ -227,6 +230,25 @@ const make = Effect.gen(function* () {
     yield* Effect.logInfo(`setting up ${env.key} for ${spec.repo} at ${commit}`);
     // Room for the new environment, which may be as big as a quarter of the budget.
     yield* fit(config.diskBudget * 0.75, env.key);
+    const steps = (phase: SetupStep["phase"]) =>
+      spec.recipe.setup.filter((step) => step.phase === phase);
+    /** Runs steps until one fails, and answers that one's failure. */
+    const run = Effect.fn("Environments.runSteps")(function* (runs: ReadonlyArray<SetupStep>) {
+      for (const step of runs) {
+        const result = yield* docker.setup(spec.image, env.dir, {
+          ...step,
+          network: step.phase !== "offline",
+          timeout: config.setupTimeout,
+        });
+        if (result.exitCode !== 0) {
+          const reason = result.timedOut
+            ? `timed out after ${Duration.format(config.setupTimeout)}\n`
+            : "";
+          return { step: step.id, output: `${reason}${tail(result)}` };
+        }
+      }
+      return undefined;
+    });
     const failure = yield* setups
       .withPermit(
         Effect.gen(function* () {
@@ -235,23 +257,20 @@ const make = Effect.gen(function* () {
             NodeFSP.mkdir(NodePath.join(env.dir, "home"), { recursive: true }),
           );
           const tree = treeOf(env, spec.gitDir);
-          yield* Effect.promise(() => NodeFSP.rm(tree.indexFile, { force: true }));
+          // Downloads run in a tree of the manifests alone, which goes before the source comes.
+          const online = steps("online");
+          if (online.length > 0) {
+            yield* trees.materialize(tree, commit, spec.fetch.paths);
+            yield* trees.overlay(tree, spec.fetch.change).pipe(Effect.orDie);
+            const failed = yield* run(online);
+            if (failed !== undefined) return failed;
+            yield* discard(tree.workTree);
+          }
           yield* trees.materialize(tree, commit);
           const overlay = yield* trees.overlay(tree, spec.keyChange).pipe(Effect.orDie);
-          for (const step of spec.recipe.setup) {
-            const result = yield* docker.setup(spec.image, env.dir, {
-              ...step,
-              timeout: config.setupTimeout,
-            });
-            if (result.exitCode !== 0) {
-              yield* trees.restore(tree, overlay);
-              const reason = result.timedOut
-                ? `timed out after ${Duration.format(config.setupTimeout)}\n`
-                : "";
-              return { step: step.id, output: `${reason}${tail(result)}` };
-            }
-          }
+          const failed = yield* run([...steps("online-with-source"), ...steps("offline")]);
           yield* trees.restore(tree, overlay);
+          if (failed !== undefined) return failed;
           env.keeper = yield* docker.create(env.container, env.key, spec.image, env.dir);
           return undefined;
         }),

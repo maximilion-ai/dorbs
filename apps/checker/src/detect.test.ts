@@ -2,7 +2,7 @@ import { assert, it } from "@effect/vitest";
 
 import { RelativePath } from "@dorbs/protocol/typecheck";
 
-import { detect, isDetectionInput } from "./detect.ts";
+import { detect, isDetectionInput, isFetchInput } from "./detect.ts";
 import type { RepoView } from "./Recipe.ts";
 
 const view = (files: Record<string, string>): RepoView => ({
@@ -46,11 +46,12 @@ it("runs a pnpm repo's own typecheck and lint scripts after a frozen install", (
       "test/fixtures/package.json",
     ],
     setup: [
+      { id: "download", run: "pnpm fetch", cwd: ".", phase: "online" },
       {
         id: "install",
-        run: "pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile",
+        run: "pnpm install --offline --frozen-lockfile --ignore-scripts --ignore-pnpmfile",
         cwd: ".",
-        network: true,
+        phase: "offline",
       },
     ],
     checks: [
@@ -95,7 +96,13 @@ it("runs tsc -b for project references and eslint with JSON output when the repo
     "tsconfig.json": json({ files: [], references: [{ path: "packages/a" }] }),
     "eslint.config.js": "export default [];",
   });
-  assert.deepStrictEqual(detected.setup[0]?.run, "npm ci --ignore-scripts --no-audit --no-fund");
+  assert.deepStrictEqual(
+    detected.setup.map((step) => [step.run, step.phase]),
+    [
+      ["npm ci --ignore-scripts --no-audit --no-fund", "online"],
+      ["npm ci --offline --ignore-scripts --no-audit --no-fund", "offline"],
+    ],
+  );
   assert.deepStrictEqual<unknown>(detected.checks, [
     {
       id: "tsc",
@@ -124,9 +131,10 @@ it("tells yarn classic from berry and passes legacy eslint the TypeScript extens
     ".eslintrc.json": "{}",
   });
   assert.deepStrictEqual(
-    [classic.setup[0]?.run, ...classic.checks.map((check) => check.run)],
+    [...classic.setup.map((step) => step.run), ...classic.checks.map((check) => check.run)],
     [
       "yarn install --frozen-lockfile --ignore-scripts --non-interactive",
+      "yarn install --offline --frozen-lockfile --ignore-scripts --non-interactive",
       "yarn tsc --noEmit -p tsconfig.json --pretty false",
       "yarn eslint . --format json --ext .js,.jsx,.ts,.tsx,.mjs,.cjs,.mts,.cts",
     ],
@@ -137,7 +145,13 @@ it("tells yarn classic from berry and passes legacy eslint the TypeScript extens
     ".yarnrc.yml": "yarnPath: .yarn/releases/yarn-4.5.0.cjs\n",
     ".yarn/releases/yarn-4.5.0.cjs": "",
   });
-  assert.deepStrictEqual(berry.setup[0]?.run, "yarn install --immutable --mode=skip-build");
+  assert.deepStrictEqual(
+    berry.setup.map((step) => step.run),
+    [
+      "yarn install --immutable --mode=skip-build",
+      "YARN_ENABLE_NETWORK=0 yarn install --immutable --mode=skip-build",
+    ],
+  );
   assert.deepStrictEqual(berry.checks[0]?.run, "yarn run lint");
   assert.includeMembers([...berry.keyFiles], [".yarnrc.yml", ".yarn/releases/yarn-4.5.0.cjs"]);
 });
@@ -149,9 +163,10 @@ it("installs a bun repo with bun", () => {
     "tsconfig.json": "{}",
   });
   assert.deepStrictEqual(
-    [detected.setup[0]?.run, detected.checks[0]?.run, detected.test?.run],
+    [...detected.setup.map((step) => step.run), detected.checks[0]?.run, detected.test?.run],
     [
       "bun install --frozen-lockfile --ignore-scripts",
+      "bun install --offline --frozen-lockfile --ignore-scripts",
       "node_modules/.bin/tsc --noEmit -p tsconfig.json --pretty false",
       "bun run test",
     ],
@@ -167,12 +182,12 @@ it("syncs each SvelteKit workspace package offline after the install", () => {
     "sites/old/package.json": json({ devDependencies: { "@sveltejs/kit": "1" } }),
     "fixtures/kit/package.json": json({ devDependencies: { "@sveltejs/kit": "2" } }),
   });
-  assert.deepStrictEqual<unknown>(detected.setup.slice(1), [
+  assert.deepStrictEqual<unknown>(detected.setup.slice(2), [
     {
       id: "svelte-kit sync sites/docs",
       run: "pnpm exec svelte-kit sync",
       cwd: "sites/docs",
-      network: false,
+      phase: "offline",
     },
   ]);
 });
@@ -215,12 +230,24 @@ it("syncs a uv project and runs the type checkers, linters and pytest it locks",
     keyFiles: [".python-version", "libs/a/pyproject.toml", "pyproject.toml", "uv.lock"],
     setup: [
       {
-        id: "install",
-        run: "uv sync --frozen --all-extras --all-groups --all-packages",
+        id: "download",
+        run: "uv sync --frozen --all-extras --all-groups --all-packages --no-install-local",
         cwd: ".",
-        network: true,
+        phase: "online",
       },
-      { id: "pyright", run: ".venv/bin/pyright --version", cwd: ".", network: true },
+      {
+        id: "build backends",
+        run: "uv sync --frozen --all-extras --all-groups --all-packages >/dev/null 2>&1 || true",
+        cwd: ".",
+        phase: "online",
+      },
+      { id: "pyright", run: ".venv/bin/pyright --version", cwd: ".", phase: "online" },
+      {
+        id: "install",
+        run: "uv sync --offline --frozen --all-extras --all-groups --all-packages",
+        cwd: ".",
+        phase: "offline",
+      },
     ],
     checks: [
       {
@@ -258,10 +285,16 @@ it("installs requirements files into a venv and prefers basedpyright", () => {
   assert.deepStrictEqual(detected.image, "python");
   assert.deepStrictEqual<unknown>(detected.setup, [
     {
-      id: "install",
+      id: "download",
       run: "uv venv && uv pip install -r requirements-dev.txt -r requirements.txt",
       cwd: ".",
-      network: true,
+      phase: "online",
+    },
+    {
+      id: "install",
+      run: "uv venv --offline && uv pip install --offline -r requirements-dev.txt -r requirements.txt",
+      cwd: ".",
+      phase: "offline",
     },
   ]);
   assert.deepStrictEqual(
@@ -279,7 +312,7 @@ it("checks a cargo workspace offline with JSON messages and filters its tests by
   assert.deepStrictEqual<unknown>(detected, {
     image: "rust",
     keyFiles: ["Cargo.lock", "Cargo.toml", "axum/Cargo.toml"],
-    setup: [{ id: "fetch", run: "cargo fetch --locked", cwd: ".", network: true }],
+    setup: [{ id: "fetch", run: "cargo fetch --locked", cwd: ".", phase: "online" }],
     checks: [
       {
         id: "cargo-check",
@@ -304,7 +337,7 @@ it("builds and vets a Go module and tests the packages of the given files", () =
   assert.deepStrictEqual<unknown>(detected, {
     image: "go",
     keyFiles: ["go.mod", "go.sum"],
-    setup: [{ id: "download", run: "go mod download", cwd: ".", network: true }],
+    setup: [{ id: "download", run: "go mod download", cwd: ".", phase: "online" }],
     checks: [
       { id: "go-build", run: "go build ./...", cwd: ".", format: "text", scope: "repo" },
       { id: "go-vet", run: "go vet -json ./...", cwd: ".", format: "go-vet-json", scope: "repo" },
@@ -319,7 +352,10 @@ it("lets .dorbs/check.json replace what detection found, and keys the environmen
     "package.json": json({ scripts: { lint: "oxlint" } }),
     "package-lock.json": "{}",
     ".dorbs/check.json": json({
-      setup: [{ id: "install", run: "npm ci --legacy-peer-deps --ignore-scripts", network: true }],
+      setup: [
+        { id: "download", run: "npm ci --legacy-peer-deps --ignore-scripts", phase: "online" },
+        { id: "build", run: "npm run build" },
+      ],
       checks: [{ id: "tsc", run: "npx tsc -b packages", format: "text" }],
       test: null,
       keyFiles: ["tools/setup.sh"],
@@ -327,7 +363,13 @@ it("lets .dorbs/check.json replace what detection found, and keys the environmen
     "tools/setup.sh": "",
   });
   assert.deepStrictEqual<unknown>(detected.setup, [
-    { id: "install", run: "npm ci --legacy-peer-deps --ignore-scripts", cwd: ".", network: true },
+    {
+      id: "download",
+      run: "npm ci --legacy-peer-deps --ignore-scripts",
+      cwd: ".",
+      phase: "online",
+    },
+    { id: "build", run: "npm run build", cwd: ".", phase: "offline" },
   ]);
   assert.deepStrictEqual<unknown>(detected.checks, [
     { id: "tsc", run: "npx tsc -b packages", cwd: ".", format: "text", scope: "repo" },
@@ -419,4 +461,61 @@ it("runs vitest from each file's workspace package in a workspace", () => {
     target: "package",
     filterFlag: "-t",
   });
+});
+
+it("gives a step the network and the source at once only from the operator's registration", () => {
+  const files = {
+    "package.json": "{}",
+    ".dorbs/check.json": json({
+      setup: [{ id: "codegen", run: "npm run codegen", phase: "online-with-source" }],
+    }),
+  };
+  assert.deepStrictEqual(detect(view(files)), {
+    reason:
+      ".dorbs/check.json: a step with phase online-with-source comes only from the operator's registration.",
+  });
+  const operator = detect(view(files), "operator");
+  assert.deepStrictEqual<unknown>("setup" in operator && operator.setup, [
+    { id: "codegen", run: "npm run codegen", cwd: ".", phase: "online-with-source" },
+  ]);
+});
+
+it("lets the online steps see manifests, lockfiles and package manager files, but no source", () => {
+  const paths = [
+    "package.json",
+    "packages/a/package.json",
+    "pnpm-lock.yaml",
+    ".npmrc",
+    ".pnpmfile.cjs",
+    "patches/x.patch",
+    ".yarn/releases/yarn-4.5.0.cjs",
+    "pyproject.toml",
+    "uv.lock",
+    "requirements-dev.txt",
+    "setup.py",
+    "Cargo.toml",
+    "Cargo.lock",
+    "go.mod",
+    "go.sum",
+    ".dorbs/check.json",
+    "tsconfig.json",
+    "node_modules/x/package.json",
+    "src/index.ts",
+    "src/lib.rs",
+  ];
+  assert.deepStrictEqual(paths.filter(isFetchInput), [
+    "package.json",
+    "packages/a/package.json",
+    "pnpm-lock.yaml",
+    ".npmrc",
+    "patches/x.patch",
+    ".yarn/releases/yarn-4.5.0.cjs",
+    "pyproject.toml",
+    "uv.lock",
+    "requirements-dev.txt",
+    "Cargo.toml",
+    "Cargo.lock",
+    "go.mod",
+    "go.sum",
+  ]);
 });

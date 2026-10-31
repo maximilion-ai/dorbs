@@ -27,7 +27,7 @@ import { ServiceConfig } from "./ServiceConfig.ts";
 import { quote, testCommands } from "./testCommand.ts";
 import { testCounts } from "./testSummary.ts";
 import type { UnsafePath } from "./Tree.ts";
-import { setupChange, viewOf } from "./view.ts";
+import { fetchTree, setupChange, viewOf } from "./view.ts";
 
 export class Checker extends Context.Service<
   Checker,
@@ -108,7 +108,7 @@ const make = Effect.gen(function* () {
     if (gitDir === undefined) return rejected({ _tag: "UnknownCommit" });
     const { paths, inputs } = yield* git.files(gitDir, request.commit);
     const view = viewOf(paths, inputs, request.change, repo.recipe);
-    const recipe = detect(view);
+    const recipe = detect(view, repo.recipe === undefined ? "commit" : "operator");
     if ("reason" in recipe) return rejected({ _tag: "NoRecipe", reason: recipe.reason });
     const image = yield* docker.imageId(recipe.image);
     const keyFiles = new Set<string>(recipe.keyFiles);
@@ -120,13 +120,15 @@ const make = Effect.gen(function* () {
         keyFiles: recipe.keyFiles.map((path) => [path, sha256(view.read(path) ?? "\0absent")]),
       }),
     );
+    const keyChange = setupChange(request.change, keyFiles);
     const spec: EnvSpec = {
       key,
       repo: repo.id,
       gitDir,
       recipe,
       image,
-      keyChange: setupChange(request.change, keyFiles),
+      keyChange,
+      fetch: fetchTree(paths, view, recipe.keyFiles, keyChange),
     };
     return { spec, view };
   });

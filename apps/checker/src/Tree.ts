@@ -70,10 +70,23 @@ const lstat = (path: string) => Effect.promise(() => NodeFSP.lstat(path).catch((
 const dirtyFile = (tree: Tree) => `${tree.indexFile}.dirty`;
 
 export const make = (spawner: ChildProcessSpawner.ChildProcessSpawner["Service"]) => {
-  /** Checks `commit` out into an empty work tree. */
-  const materialize = Effect.fn("Tree.materialize")(function* (tree: Tree, commit: CommitSha) {
-    yield* Effect.promise(() => NodeFSP.mkdir(tree.workTree, { recursive: true }));
-    yield* git(spawner, tree, ["read-tree", "--reset", "-u", commit]);
+  /** Checks `commit` out into an empty work tree, or only its files at `paths`. */
+  const materialize = Effect.fn("Tree.materialize")(function* (
+    tree: Tree,
+    commit: CommitSha,
+    paths?: ReadonlyArray<RelativePath>,
+  ) {
+    yield* Effect.promise(async () => {
+      await NodeFSP.rm(tree.indexFile, { force: true });
+      await NodeFSP.rm(dirtyFile(tree), { force: true });
+      await NodeFSP.mkdir(tree.workTree, { recursive: true });
+    });
+    if (paths === undefined) {
+      yield* git(spawner, tree, ["read-tree", "--reset", "-u", commit]);
+      return;
+    }
+    yield* git(spawner, tree, ["read-tree", commit]);
+    if (paths.length > 0) yield* git(spawner, tree, ["checkout-index", "-f", "--", ...paths]);
   });
 
   /** Moves the tree from one commit to another, touching only the files that differ. */

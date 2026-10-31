@@ -23,10 +23,16 @@ export type Command = {
   readonly cwd: RelativePath | ".";
 };
 
+/**
+ * online: first, with the network, in a tree of the manifests and lockfiles alone, for downloads.
+ * offline: then on the full tree without network, for installs from them and builds.
+ * online-with-source: both, before the offline steps; only the operator's registration may ask.
+ */
+export type Phase = "online" | "offline" | "online-with-source";
+
 export type SetupStep = Command & {
   readonly id: string;
-  /** Whether the step reaches the network, as an install must. Steps that run repo code get none. */
-  readonly network: boolean;
+  readonly phase: Phase;
 };
 
 export type Check = Command & {

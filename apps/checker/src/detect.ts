@@ -8,6 +8,7 @@ import type {
   Command,
   DiagnosticFormat,
   Ecosystem,
+  Phase,
   Recipe,
   RepoView,
   SetupStep,
@@ -19,11 +20,11 @@ const ROOT = ".";
 
 type Detected = Omit<Recipe, "keyFiles"> & { readonly keyFiles: ReadonlyArray<string> };
 
-const step = (id: string, run: string, network: boolean, cwd = ROOT): SetupStep => ({
+const step = (id: string, run: string, phase: Phase, cwd = ROOT): SetupStep => ({
   id,
   run,
   cwd: cwd === ROOT ? ROOT : RelativePath.make(cwd),
-  network,
+  phase,
 });
 
 const check = (id: string, run: string, format: DiagnosticFormat): Check => ({
@@ -162,16 +163,17 @@ const packageManager = (repo: RepoView, root: Manifest) => {
   return { manager, lockfile: lockfile?.[0], note };
 };
 
-const install = (manager: PackageManager, locked: boolean): string =>
-  ({
-    pnpm: `pnpm install${locked ? " --frozen-lockfile" : ""} --ignore-scripts --ignore-pnpmfile`,
-    yarn: `yarn install${locked ? " --frozen-lockfile" : ""} --ignore-scripts --non-interactive`,
-    "yarn-berry": `yarn install${locked ? " --immutable" : ""} --mode=skip-build`,
-    npm: locked
-      ? "npm ci --ignore-scripts --no-audit --no-fund"
-      : "npm install --ignore-scripts --no-audit --no-fund",
-    bun: `bun install${locked ? " --frozen-lockfile" : ""} --ignore-scripts`,
-  })[manager];
+/** The install, online into the manager's cache or offline from it. */
+const install = (manager: PackageManager, locked: boolean, offline: boolean): string => {
+  const off = offline ? " --offline" : "";
+  return {
+    pnpm: `pnpm install${off}${locked ? " --frozen-lockfile" : ""} --ignore-scripts --ignore-pnpmfile`,
+    yarn: `yarn install${off}${locked ? " --frozen-lockfile" : ""} --ignore-scripts --non-interactive`,
+    "yarn-berry": `${offline ? "YARN_ENABLE_NETWORK=0 " : ""}yarn install${locked ? " --immutable" : ""} --mode=skip-build`,
+    npm: `npm ${locked ? "ci" : "install"}${off} --ignore-scripts --no-audit --no-fund`,
+    bun: `bun install${off}${locked ? " --frozen-lockfile" : ""} --ignore-scripts`,
+  }[manager];
+};
 
 const runScript = (manager: PackageManager, script: string): string =>
   manager === "npm"
@@ -368,12 +370,20 @@ const detectNode = (repo: RepoView): Detected | undefined => {
     image: "node",
     keyFiles: nodeKeyFiles(repo),
     setup: [
-      step("install", install(manager, lockfile !== undefined), true),
+      // pnpm fetches a lockfile's packages into its store without installing them.
+      step(
+        "download",
+        manager === "pnpm" && lockfile !== undefined
+          ? "pnpm fetch"
+          : install(manager, lockfile !== undefined, false),
+        "online",
+      ),
+      step("install", install(manager, lockfile !== undefined, true), "offline"),
       ...kits.map((dir) =>
         step(
           dir === ROOT ? "svelte-kit sync" : `svelte-kit sync ${dir}`,
           exec(manager, "svelte-kit sync"),
-          false,
+          "offline",
           dir,
         ),
       ),
@@ -402,17 +412,27 @@ const detectPython = (repo: RepoView): Detected | undefined => {
   const has = (name: string) =>
     new RegExp(`(?:^|[\\s"'=])${name}(?:[\\s"'=<>~!\\[;,]|$)`, "m").test(deps);
   const workspace = /^\[tool\.uv\.workspace\]/m.test(pyproject) ? " --all-packages" : "";
-  const install =
+  const flags = `${locked ? " --frozen" : ""} --all-extras --all-groups${workspace}`;
+  const files = requirements.map((file) => `-r ${file}`).join(" ");
+  const setup =
     pyproject !== "" || locked
-      ? `uv sync${locked ? " --frozen" : ""} --all-extras --all-groups${workspace}`
-      : `uv venv && uv pip install ${requirements.map((file) => `-r ${file}`).join(" ")}`;
-  const setup = [step("install", install, true)];
+      ? [
+          step("download", `uv sync${flags} --no-install-local`, "online"),
+          // Building the project against its manifests alone fails, but on the way uv caches the
+          // build backends that the offline sync builds it with.
+          step("build backends", `uv sync${flags} >/dev/null 2>&1 || true`, "online"),
+          step("install", `uv sync --offline${flags}`, "offline"),
+        ]
+      : [
+          step("download", `uv venv && uv pip install ${files}`, "online"),
+          step("install", `uv venv --offline && uv pip install --offline ${files}`, "offline"),
+        ];
   const checks: Array<Check> = [];
   if (has("basedpyright")) {
     checks.push(check("basedpyright", ".venv/bin/basedpyright --outputjson", "pyright-json"));
   } else if (has("pyright")) {
-    // The pyright wheel downloads Node and pyright itself on its first run.
-    setup.push(step("pyright", ".venv/bin/pyright --version", true));
+    // The pyright wheel downloads pyright itself on its first run.
+    setup.splice(-1, 0, step("pyright", ".venv/bin/pyright --version", "online"));
     checks.push(check("pyright", ".venv/bin/pyright --outputjson", "pyright-json"));
   }
   if (has("mypy") && (/^\[tool\.mypy\]/m.test(pyproject) || repo.read("mypy.ini") !== undefined)) {
@@ -460,7 +480,7 @@ const detectRust = (repo: RepoView): Detected | undefined => {
           path,
         ),
     ),
-    setup: [step("fetch", `cargo fetch${locked}`, true)],
+    setup: [step("fetch", `cargo fetch${locked}`, "online")],
     checks: [
       check(
         "cargo-check",
@@ -485,7 +505,7 @@ const detectGo = (repo: RepoView): Detected | undefined => {
     keyFiles: repo.paths.filter((path) =>
       ["go.mod", "go.sum", "go.work", "go.work.sum"].includes(path.split("/").at(-1) ?? ""),
     ),
-    setup: [step("download", "go mod download", true)],
+    setup: [step("download", "go mod download", "online")],
     checks: [
       check("go-build", "go build ./...", "text"),
       check("go-vet", "go vet -json ./...", "go-vet-json"),
@@ -515,7 +535,7 @@ const Override = Schema.Struct({
         id: Schema.NonEmptyString,
         run: Schema.NonEmptyString,
         cwd: Cwd,
-        network: Schema.optionalKey(Schema.Boolean),
+        phase: Schema.optionalKey(Schema.Literals(["online", "offline", "online-with-source"])),
       }),
     ),
   ),
@@ -592,6 +612,32 @@ export const isDetectionInput = (path: string): boolean => {
   );
 };
 
+const FETCH_ROOT_INPUTS = new Set([
+  ...LOCKFILES.map(([file]) => file),
+  "pnpm-workspace.yaml",
+  ".npmrc",
+  ".yarnrc",
+  ".yarnrc.yml",
+  "bunfig.toml",
+  "uv.lock",
+  ".python-version",
+  "Cargo.lock",
+  "rust-toolchain",
+  "rust-toolchain.toml",
+  ".cargo/config.toml",
+]);
+
+/**
+ * Whether the online setup steps see `path`: a manifest, a lockfile or a package manager's own file,
+ * which downloads need, and nothing of the repo's source, setup.py included.
+ */
+export const isFetchInput = (path: string): boolean =>
+  isDetectionInput(path) &&
+  (FETCH_ROOT_INPUTS.has(path) ||
+    NESTED_INPUTS.has(path.split("/").at(-1) ?? "") ||
+    /^requirements[\w.-]*\.txt$/.test(path) ||
+    /^(?:patches|\.yarn\/(?:releases|plugins|patches))\//.test(path));
+
 const DETECTORS: ReadonlyArray<(repo: RepoView) => Detected | undefined> = [
   detectNode,
   detectPython,
@@ -606,9 +652,13 @@ const toRecipe = (detected: Detected): Recipe => ({
 
 /**
  * The recipe for a repo: the first ecosystem, in the order node, python, rust, go, whose detection
- * finds a check, else the first found at all, with .dorbs/check.json laid over it.
+ * finds a check, else the first found at all, with .dorbs/check.json laid over it. `recipeFrom` says
+ * whose that file is; only the operator's may give a step the network and the source at once.
  */
-export const detect = (repo: RepoView): Recipe | { readonly reason: string } => {
+export const detect = (
+  repo: RepoView,
+  recipeFrom: "operator" | "commit" = "commit",
+): Recipe | { readonly reason: string } => {
   const found = DETECTORS.map((detector) => detector(repo)).filter(
     (recipe) => recipe !== undefined,
   );
@@ -625,6 +675,11 @@ export const detect = (repo: RepoView): Recipe | { readonly reason: string } => 
   const decoded = decodeOverride(text);
   if (decoded._tag === "Failure") return { reason: `${OVERRIDE}: ${decoded.failure.message}` };
   const override = decoded.success;
+  if (recipeFrom === "commit" && override.setup?.some((s) => s.phase === "online-with-source")) {
+    return {
+      reason: `${OVERRIDE}: a step with phase online-with-source comes only from the operator's registration.`,
+    };
+  }
   const image: Ecosystem | undefined = override.image ?? base?.image;
   if (image === undefined)
     return { reason: `${OVERRIDE} names no image and detection found no ecosystem.` };
@@ -640,7 +695,7 @@ export const detect = (repo: RepoView): Recipe | { readonly reason: string } => 
         id: s.id,
         run: s.run,
         cwd: cwd(s),
-        network: s.network ?? false,
+        phase: s.phase ?? "offline",
       })) ??
       base?.setup ??
       [],

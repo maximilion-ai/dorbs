@@ -1,6 +1,7 @@
 import type { Change } from "@dorbs/protocol/checker";
 import type { RelativePath } from "@dorbs/protocol/typecheck";
 
+import { isFetchInput } from "./detect.ts";
 import type { RepoView } from "./Recipe.ts";
 
 const OVERRIDE = ".dorbs/check.json";
@@ -51,3 +52,32 @@ export const setupChange = (change: Change, keyFiles: ReadonlySet<string>): Chan
   files: change.files.filter((file) => keyFiles.has(file.path) && !isCommitOnly(file.path)),
   deleted: change.deleted.filter((path) => keyFiles.has(path) && !isCommitOnly(path)),
 });
+
+/** The tree the online setup steps see: the commit's files at `paths`, and `change` over them. */
+export type FetchTree = {
+  readonly paths: ReadonlyArray<RelativePath>;
+  readonly change: Change;
+};
+
+/**
+ * The key files that downloads need, the change's over the commit's, and an empty file in place of
+ * each Rust source, since cargo refuses a manifest whose targets are missing.
+ */
+export const fetchTree = (
+  commitPaths: ReadonlyArray<RelativePath>,
+  view: RepoView,
+  keyFiles: ReadonlyArray<RelativePath>,
+  keyChange: Change,
+): FetchTree => {
+  const fetched = new Set<string>(keyFiles.filter(isFetchInput));
+  return {
+    paths: commitPaths.filter((path) => fetched.has(path)),
+    change: {
+      files: [
+        ...keyChange.files.filter((file) => fetched.has(file.path)),
+        ...view.paths.filter((path) => path.endsWith(".rs")).map((path) => ({ path, content: "" })),
+      ],
+      deleted: keyChange.deleted.filter((path) => fetched.has(path)),
+    },
+  };
+};

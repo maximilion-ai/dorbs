@@ -15,17 +15,20 @@ Every route requires `Authorization: Bearer $CHECK_TOKEN` and answers 401 otherw
 
 The service reads the commit's manifests, lockfiles and configs, lays the change over them and detects a recipe: an image, setup steps, checks with a diagnostic format and scope, and a test command.
 
-- Node: the package manager from `packageManager`, else the lockfile (pnpm, yarn classic or berry, npm, bun); install with a frozen lockfile and no install scripts; `svelte-kit sync` for each SvelteKit workspace package, offline. Checks are the repo's own `typecheck` script (or `type-check`, `check:type`, `check:types`, `check-types`, `types:check`, `tsc`), else its `check` script, plus `lint`. Without a type-checking script, `tsc --noEmit -p tsconfig.json`, or `tsc -b` with project references, when TypeScript is installed. Without `lint`, eslint, biome or oxlint by their config. Tests: vitest, jest, `node --test` with the test script's flags, or one run per workspace package.
-- Python: `uv sync --frozen` with a `uv.lock`, else a venv from `requirements*.txt`; basedpyright or pyright, mypy when configured, ruff; pytest.
-- Rust: `cargo fetch`, then `cargo check --workspace --all-targets --offline`; `cargo test` with a name filter.
-- Go: `go mod download`, then `go build ./...` and `go vet -json ./...`; `go test -v` on the files' packages.
+Each setup step has a phase. `online` steps run first, with the network, in a tree of the manifests, lockfiles and package manager files alone (`package.json` and `pyproject.toml` at any depth, lockfiles, `pnpm-workspace.yaml`, `.npmrc`, `requirements*.txt`, `Cargo.toml`, `go.mod` and the like, and an empty file for each Rust source, whose paths cargo reads), so nothing they run can read the source; they fill the package managers' caches in the environment's home. Then that tree goes, the commit is checked out, and `offline` steps install from the caches, build and run whatever else the recipe asks, without network. `online-with-source` steps get the network and the full tree, before the offline steps; only the operator's registration may declare one.
+
+- Node: the package manager from `packageManager`, else the lockfile (pnpm, yarn classic or berry, npm, bun); online, `pnpm fetch` or an install into the manager's cache; offline, the install with a frozen lockfile and no install scripts, then `svelte-kit sync` for each SvelteKit workspace package. Checks are the repo's own `typecheck` script (or `type-check`, `check:type`, `check:types`, `check-types`, `types:check`, `tsc`), else its `check` script, plus `lint`. Without a type-checking script, `tsc --noEmit -p tsconfig.json`, or `tsc -b` with project references, when TypeScript is installed. Without `lint`, eslint, biome or oxlint by their config. Tests: vitest, jest, `node --test` with the test script's flags, or one run per workspace package.
+- Python: with a `pyproject.toml` or `uv.lock`, online `uv sync --no-install-local` for the dependencies and a full `uv sync` that fails but leaves the project's build backends cached, offline `uv sync --offline`; else a venv from `requirements*.txt`, the same way. basedpyright or pyright, whose wheel downloads pyright online, mypy when configured, ruff; pytest.
+- Rust: `cargo fetch` online, then `cargo check --workspace --all-targets --offline`; `cargo test` with a name filter.
+- Go: `go mod download` online, then `go build ./...` and `go vet -json ./...`; `go test -v` on the files' packages.
 
 `.dorbs/check.json` replaces the detected `image`, `setup`, `checks` or `test`, and adds `keyFiles`:
 
 ```json
 {
   "setup": [
-    { "id": "install", "run": "npm ci --legacy-peer-deps --ignore-scripts", "network": true }
+    { "id": "download", "run": "npm ci --legacy-peer-deps --ignore-scripts", "phase": "online" },
+    { "id": "install", "run": "npm ci --offline --legacy-peer-deps --ignore-scripts" }
   ],
   "checks": [
     { "id": "tsc", "run": "node_modules/.bin/tsc -b packages --pretty false", "format": "text" }
@@ -34,23 +37,23 @@ The service reads the commit's manifests, lockfiles and configs, lays the change
 }
 ```
 
-Formats: `text` (tsc, svelte-check, eslint's stylish, pyright's, prettier `--check`, GitHub annotations, `file:line:col:` lines, under pnpm `-r` and turbo prefixes too), `eslint-json`, `oxlint-json`, `pyright-json`, `ruff-json`, `cargo-json`, `go-vet-json`. A setup step has no network unless it says `"network": true`.
+Formats: `text` (tsc, svelte-check, eslint's stylish, pyright's, prettier `--check`, GitHub annotations, `file:line:col:` lines, under pnpm `-r` and turbo prefixes too), `eslint-json`, `oxlint-json`, `pyright-json`, `ruff-json`, `cargo-json`, `go-vet-json`. A setup step's `phase` is `offline` unless it says otherwise; a commit's file may not say `online-with-source`.
 
-The recipe file and the package manager configs that can run code or point installs elsewhere (`.npmrc`, `.yarnrc*`, `.yarn/`, `bunfig.toml`, `.pnpmfile.cjs`, `.cargo/config*`, `setup.py`, `setup.cfg`, `rust-toolchain*`) come from the commit, since only those who can push should choose what setup runs with the network. The operator's registration may carry a `recipe`, which wins over the commit's.
+The recipe file and the package manager configs that can run code or point installs elsewhere (`.npmrc`, `.yarnrc*`, `.yarn/`, `bunfig.toml`, `.pnpmfile.cjs`, `.cargo/config*`, `setup.py`, `setup.cfg`, `rust-toolchain*`) come from the commit, not the change. The operator's registration may carry a `recipe`, which wins over the commit's.
 
 ## Environments
 
 An environment is one repo at one recipe, key-file content and image; its key is their hash, so a change to a lockfile or manifest selects a new environment rather than being refused. Every thread on the repo shares it, one run at a time. States: absent, setting up, ready, busy, idle (container stopped), failed (with the step's output, answered again for `RETRY_SETUP_AFTER`, 10 minutes, before a new setup), evicted.
 
-Setup checks the commit out of the repo's bare cache into `$DATA_DIR/envs/<key>/repo`, lays the change's key files over it and runs each step in a container of its own. A run lays the change over the tree in place, runs, kills whatever it left running, and takes the change off: new files go, and every tracked file that differs from the index, the run's own writes included, gets the commit's content back. Moving to another commit touches only the files that differ.
+Setup writes the online tree into `$DATA_DIR/envs/<key>/repo` and runs the online steps, then removes it, checks the commit out of the repo's bare cache in its place, lays the change's key files over it and runs the other steps, each step in a container of its own. A run lays the change over the tree in place, runs, kills whatever it left running, and takes the change off: new files go, and every tracked file that differs from the index, the run's own writes included, gets the commit's content back. Moving to another commit touches only the files that differ.
 
 Past `DISK_BUDGET` (12 GiB) of environments, the least recently used are evicted before a setup and after it. A container idle for `IDLE_AFTER` (10 minutes) stops; its tree and installs stay. After a restart, environments come back idle and their containers are made anew.
 
 ## Containment
 
-Each container runs as root without capabilities, with `no-new-privileges`, a read-only root, `/tmp` as a 1 GiB tmpfs and the environment's directory as the only writable mount, under `CONTAINER_MEMORY` (8g), `CONTAINER_CPUS` (4) and `CONTAINER_PIDS` (2048). Checks and tests have no network. Setup steps with network run on an internal Docker network whose only way out is `dorbs-egress`, a CONNECT proxy that reaches package registries on port 443 (`EGRESS_ALLOW` replaces its list; `SETUP_EGRESS=open` uses the default bridge instead). The service passes no secret into a container; the host fetches commits with the repo's read token. `CONTAINER_PREFIX` (`dorbs`) starts the names of its containers, network and label, so a second service on the host leaves the first's alone.
+Each container runs as root without capabilities, with `no-new-privileges`, a read-only root, `/tmp` as a 1 GiB tmpfs and the environment's directory as the only writable mount, under `CONTAINER_MEMORY` (8g), `CONTAINER_CPUS` (4) and `CONTAINER_PIDS` (2048). Checks, tests and offline setup steps have no network. Online setup steps run on an internal Docker network whose only way out is `dorbs-egress`, a CONNECT proxy that reaches package registries on port 443 (`EGRESS_ALLOW` replaces its list; `SETUP_EGRESS=open` uses the default bridge instead), and see no source. The service passes no secret into a container; the host fetches commits with the repo's read token. `CONTAINER_PREFIX` (`dorbs`) starts the names of its containers, network and label, so a second service on the host leaves the first's alone.
 
-What it does not contain: a run can change untracked files in its environment, such as `node_modules`, for the runs after it on the same repo; and a setup step can send the repo's files to a registry host it allows.
+What it does not contain: a run can change untracked files in its environment, such as `node_modules`, for the runs after it on the same repo; what a change writes into its manifests and lockfiles reaches the online steps, so it can leave in a download's URL to an allowed host; and an `online-with-source` step runs with whatever the online steps left in the home.
 
 ## Run on the host
 

@@ -28,6 +28,8 @@ const CONTAINER_ENV: Readonly<Record<string, string>> = {
   npm_config_update_notifier: "false",
   // yarn 1 caches under /usr/local/share otherwise, which the read-only root refuses, then in /tmp.
   YARN_CACHE_FOLDER: `${ENV_MOUNT}/home/.cache/yarn`,
+  // yarn berry caches in the home too, which both setup phases share, not in the tree the online phase loses.
+  YARN_ENABLE_GLOBAL_CACHE: "true",
   CARGO_HOME: `${ENV_MOUNT}/home/.cargo`,
   CARGO_TERM_COLOR: "never",
   GOPATH: `${ENV_MOUNT}/home/go`,
