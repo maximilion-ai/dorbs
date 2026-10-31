@@ -35,6 +35,9 @@ const CONTAINER_ENV: Readonly<Record<string, string>> = {
   GOTOOLCHAIN: "auto",
   UV_PYTHON_INSTALL_DIR: `${ENV_MOUNT}/home/.local/share/uv/python`,
   PYTHONDONTWRITEBYTECODE: "1",
+  // The tree has no .git, so packages that take their version from git get a fixed one.
+  SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0",
+  UV_DYNAMIC_VERSIONING_BYPASS: "0.0.0",
 };
 
 export class ImageMissing extends Schema.TaggedError<ImageMissing>()("ImageMissing", {
