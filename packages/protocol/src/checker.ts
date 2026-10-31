@@ -134,7 +134,7 @@ const RejectReason = Schema.Union([
     ids: Schema.Array(Schema.String),
     known: Schema.Array(CheckId),
   }),
-  Schema.TaggedStruct("NoTestCommand", {}),
+  Schema.TaggedStruct("NoTestCommand", { reason: Schema.String }),
   /** A path the change writes goes through a symbolic link of the tree. */
   Schema.TaggedStruct("UnsafePath", { paths: Schema.Array(RelativePath) }),
 ]);

@@ -2,7 +2,7 @@ import { assert, it } from "@effect/vitest";
 
 import { RelativePath } from "@dorbs/protocol/typecheck";
 
-import { detect } from "./detect.ts";
+import { detect, isDetectionInput } from "./detect.ts";
 import type { RepoView } from "./Recipe.ts";
 
 const view = (files: Record<string, string>): RepoView => ({
@@ -344,4 +344,38 @@ it("says why when it finds nothing it runs, or the override does not parse", () 
     view({ "go.mod": "", ".dorbs/check.json": json({ checks: [{ id: "x" }] }) }),
   );
   assert.isTrue("reason" in broken && broken.reason.startsWith(".dorbs/check.json: "));
+});
+
+it("reads only the files detection looks at", () => {
+  const read: Array<string> = [];
+  const files: Record<string, string> = {
+    "package.json": json({ workspaces: ["packages/*"], scripts: { typecheck: "tsc" } }),
+    "packages/a/package.json": json({ name: "a" }),
+    "packages/a/src/index.ts": "",
+    "packages/a/tsconfig.json": "{}",
+    "tsconfig.json": "{}",
+    "requirements-dev.txt": "",
+    "patches/x.patch": "",
+    "node_modules/x/package.json": "{}",
+    "src/main.ts": "",
+  };
+  detect({
+    paths: Object.keys(files).map((path) => RelativePath.make(path)),
+    read: (path) => {
+      read.push(path);
+      return files[path];
+    },
+  });
+  const inputs = Object.keys(files).filter(isDetectionInput);
+  assert.deepStrictEqual(inputs, [
+    "package.json",
+    "packages/a/package.json",
+    "tsconfig.json",
+    "requirements-dev.txt",
+    "patches/x.patch",
+  ]);
+  assert.deepStrictEqual(
+    read.filter((path) => files[path] !== undefined && !isDetectionInput(path)),
+    [],
+  );
 });

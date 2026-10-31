@@ -102,23 +102,34 @@ export const make = (spawner: ChildProcessSpawner.ChildProcessSpawner["Service"]
     }
   });
 
-  /** Takes an overlay off: tracked paths get the index's content back, new files and their directories go. */
+  /**
+   * Takes an overlay off: its new files and directories go, and every tracked file that differs
+   * from the index, the overlay's or one a run changed, gets the index's content back.
+   */
   const restore = Effect.fn("Tree.restore")(function* (tree: Tree, overlay: Overlay) {
     for (const path of [...overlay.touched, ...overlay.created]) yield* clearWay(tree, path);
     if (overlay.touched.length > 0) {
-      const tracked = (yield* git(spawner, tree, ["ls-files", "-z", "--", ...overlay.touched]))
-        .split("\0")
-        .filter((path) => path !== "");
-      const trackedSet = new Set(tracked);
-      if (tracked.length > 0)
-        yield* git(spawner, tree, ["checkout-index", "-f", "-u", "-q", "--", ...tracked]);
+      const tracked = new Set(
+        (yield* git(spawner, tree, ["ls-files", "-z", "--", ...overlay.touched])).split("\0"),
+      );
       yield* Effect.promise(() =>
         Promise.all(
           overlay.touched
-            .filter((path) => !trackedSet.has(path))
+            .filter((path) => !tracked.has(path))
             .map((path) => NodeFSP.rm(NodePath.join(tree.workTree, path), { force: true })),
         ),
       );
+    }
+    const drifted = [
+      ...new Set(
+        (yield* git(spawner, tree, ["ls-files", "-z", "-m", "-d"]))
+          .split("\0")
+          .filter((path) => path !== ""),
+      ),
+    ];
+    for (const path of drifted) yield* clearWay(tree, path);
+    if (drifted.length > 0) {
+      yield* git(spawner, tree, ["checkout-index", "-f", "-u", "-q", "--", ...drifted]);
     }
     for (const dir of overlay.created) {
       yield* Effect.promise(() =>

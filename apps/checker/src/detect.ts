@@ -103,6 +103,9 @@ const globRegex = (glob: string): RegExp => {
 };
 
 /** The workspace's package directories, the root first, from pnpm-workspace.yaml or `workspaces`. */
+export const workspacePackages = (repo: RepoView): ReadonlyArray<string> =>
+  workspaceDirs(repo, manifest(repo.read("package.json")));
+
 const workspaceDirs = (repo: RepoView, root: Manifest): ReadonlyArray<string> => {
   const yaml = repo.read("pnpm-workspace.yaml");
   const globs =
@@ -526,6 +529,52 @@ const Override = Schema.Struct({
   keyFiles: Schema.optionalKey(Schema.Array(RelativePath)),
 });
 const decodeOverride = Schema.decodeUnknownResult(Schema.fromJsonString(Override));
+
+const ROOT_INPUTS = new Set([
+  ...LOCKFILES.map(([file]) => file),
+  "pnpm-workspace.yaml",
+  ".npmrc",
+  ".yarnrc",
+  ".yarnrc.yml",
+  "bunfig.toml",
+  "tsconfig.json",
+  ...ESLINT_FLAT,
+  ...ESLINT_LEGACY,
+  "biome.json",
+  "biome.jsonc",
+  ".oxlintrc.json",
+  "uv.lock",
+  ".python-version",
+  "setup.py",
+  "setup.cfg",
+  "mypy.ini",
+  "Cargo.lock",
+  "rust-toolchain",
+  "rust-toolchain.toml",
+  ".cargo/config.toml",
+  OVERRIDE,
+]);
+const NESTED_INPUTS = new Set([
+  "package.json",
+  "pyproject.toml",
+  "Cargo.toml",
+  "go.mod",
+  "go.sum",
+  "go.work",
+  "go.work.sum",
+]);
+
+/** Whether detection may read `path`, so the service reads only these files of a commit. */
+export const isDetectionInput = (path: string): boolean => {
+  const names = path.split("/");
+  if (names.includes("node_modules")) return false;
+  return (
+    ROOT_INPUTS.has(path) ||
+    NESTED_INPUTS.has(names.at(-1) ?? "") ||
+    /^requirements[\w.-]*\.txt$/.test(path) ||
+    /^(?:patches|\.yarn\/(?:releases|plugins|patches))\//.test(path)
+  );
+};
 
 const DETECTORS: ReadonlyArray<(repo: RepoView) => Detected | undefined> = [
   detectNode,

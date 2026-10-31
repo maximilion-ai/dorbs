@@ -59,7 +59,7 @@ const fakeDocker = (options: {
             }
           : { stdout: "", stderr: "", exitCode: 0, timedOut: false, truncated: false };
       }),
-    create: (name) => Effect.sync(() => void calls.push(`create ${name}`)),
+    create: (name) => Effect.sync(() => (calls.push(`create ${name}`), "7")),
     exec: Effect.fn("FakeDocker.exec")(function* (container, spec) {
       calls.push(`exec ${container} ${spec.run}`);
       running += 1;
@@ -68,8 +68,8 @@ const fakeDocker = (options: {
       running -= 1;
       return { stdout: "ok", stderr: "", exitCode: 0, timedOut: false, truncated: false };
     }),
-    reap: () => Effect.void,
-    start: (name) => Effect.sync(() => (calls.push(`start ${name}`), true)),
+    reap: () => Effect.succeed(true),
+    start: (name) => Effect.sync(() => (calls.push(`start ${name}`), "7")),
     stop: (name) => Effect.sync(() => void calls.push(`stop ${name}`)),
     remove: (name) => Effect.sync(() => void calls.push(`remove ${name}`)),
     list: Effect.sync(() => options.containers ?? []),

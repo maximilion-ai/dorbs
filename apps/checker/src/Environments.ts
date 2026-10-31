@@ -84,6 +84,8 @@ type Env = {
   settingUp: Deferred.Deferred<void> | undefined;
   bytes: number;
   measuredAt: number;
+  /** The pid of the running container's keeper process. */
+  keeper: string | undefined;
 };
 
 const Meta = Schema.fromJsonString(
@@ -102,7 +104,7 @@ const encodeMeta = Schema.encodeSync(Meta);
 const tail = (result: ProcessResult) =>
   `${result.stdout}\n${result.stderr}`.trim().split("\n").slice(-60).join("\n").slice(-8000);
 
-const containerName = (key: string) => `dorbs-env-${key.slice(0, 16)}`;
+const containerName = (key: string) => `dorbs-env-${key}`;
 
 const make = Effect.gen(function* () {
   const docker = yield* Docker;
@@ -251,7 +253,7 @@ const make = Effect.gen(function* () {
             }
           }
           yield* trees.restore(tree, overlay);
-          yield* docker.create(env.container, env.key, spec.image, env.dir);
+          env.keeper = yield* docker.create(env.container, env.key, spec.image, env.dir);
           return undefined;
         }),
       )
@@ -290,6 +292,7 @@ const make = Effect.gen(function* () {
       settingUp: undefined,
       bytes: 0,
       measuredAt: 0,
+      keeper: undefined,
     };
     envs.set(spec.key, env);
     return env;
@@ -359,12 +362,13 @@ const make = Effect.gen(function* () {
           // Eviction may have taken it while this request waited in the queue.
           const state = env.state;
           if (state._tag !== "Ready" && state._tag !== "Idle") return undefined;
-          if (state._tag === "Idle") {
-            if (!(yield* docker.start(env.container))) {
-              yield* docker.create(env.container, env.key, spec.image, env.dir);
-            }
-            yield* move(env, { _tag: "Started" });
+          if (state._tag === "Idle" || env.keeper === undefined) {
+            env.keeper =
+              (yield* docker.start(env.container)) ??
+              (yield* docker.create(env.container, env.key, spec.image, env.dir));
+            if (state._tag === "Idle") yield* move(env, { _tag: "Started" });
           }
+          const keeper = env.keeper;
           yield* move(env, { _tag: "Acquired" });
           const tree = treeOf(env, spec.gitDir);
           return yield* slots
@@ -379,7 +383,13 @@ const make = Effect.gen(function* () {
                 // Nothing a run started may still write to the tree while the change comes off.
                 const value = yield* work({
                   exec: (run) => docker.exec(env.container, run),
-                }).pipe(Effect.ensuring(docker.reap(env.container)));
+                }).pipe(
+                  Effect.ensuring(
+                    Effect.gen(function* () {
+                      if (!(yield* docker.reap(env.container, keeper))) env.keeper = undefined;
+                    }),
+                  ),
+                );
                 const restoreAt = yield* now;
                 yield* trees.restore(tree, overlay);
                 const restoredMs = (yield* now) - restoreAt;
@@ -432,6 +442,7 @@ const make = Effect.gen(function* () {
       settingUp: undefined,
       bytes,
       measuredAt: 0,
+      keeper: undefined,
     };
     envs.set(key, env);
   }
@@ -459,6 +470,7 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           if (env.state._tag !== "Ready") return;
           yield* docker.stop(env.container);
+          env.keeper = undefined;
           yield* move(env, { _tag: "Stopped" });
           yield* saveMeta(env);
         }),

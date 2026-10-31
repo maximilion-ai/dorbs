@@ -61,6 +61,8 @@ const Registrations = Schema.fromJsonString(
       url: Schema.NonEmptyString,
       /** Names the environment variable that holds the repo's read token. */
       tokenEnv: Schema.optionalKey(Schema.NonEmptyString),
+      /** A public repo: fetched without a token, even when the GitHub App is set. */
+      public: Schema.optionalKey(Schema.Boolean),
       /** A .dorbs/check.json for a repo the operator cannot commit one to. */
       recipe: Schema.optionalKey(Schema.Record(Schema.String, Schema.Json)),
     }),
@@ -106,7 +108,7 @@ const make = Effect.gen(function* () {
       const token =
         registration.tokenEnv !== undefined
           ? Effect.succeed(yield* Config.Redacted(registration.tokenEnv))
-          : mint !== undefined && github !== undefined
+          : registration.public !== true && mint !== undefined && github !== undefined
             ? mint(github)
             : Effect.succeed(undefined);
       return {

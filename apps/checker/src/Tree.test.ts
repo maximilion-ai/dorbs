@@ -183,3 +183,20 @@ it.effect("takes an overlay off without following a link a run put in its way", 
     assert.isFalse(NodeFS.existsSync(NodePath.join(tree.workTree, "lib")));
   }).pipe(Effect.provide(NodeServices.layer)),
 );
+
+it.effect("puts back a tracked file a run changed or deleted outside the overlay", () =>
+  Effect.gen(function* () {
+    const { tree, first } = fixture();
+    const ops = yield* trees;
+    yield* ops.materialize(tree, first);
+    const clean = snapshot(tree.workTree);
+    const overlay = yield* ops.overlay(tree, {
+      files: [{ path: path("src/a.ts"), content: "x" }],
+      deleted: [],
+    });
+    NodeFS.writeFileSync(NodePath.join(tree.workTree, "package.json"), "poisoned");
+    NodeFS.rmSync(NodePath.join(tree.workTree, "src/old.ts"));
+    yield* ops.restore(tree, overlay);
+    assert.deepStrictEqual(snapshot(tree.workTree), clean);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);

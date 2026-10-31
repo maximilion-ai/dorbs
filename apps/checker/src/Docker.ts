@@ -67,17 +67,24 @@ export class Docker extends Context.Service<
       envDir: string,
       spec: RunSpec & { readonly network: boolean },
     ) => Effect.Effect<ProcessResult>;
-    /** Makes and starts an environment's container: no network, read-only but for /env and /tmp. */
+    /**
+     * Makes and starts an environment's container: no network, read-only but for /env and /tmp.
+     * Answers the pid of its keeper process, which `reap` spares.
+     */
     readonly create: (
       name: string,
       env: string,
       image: string,
       envDir: string,
-    ) => Effect.Effect<void>;
+    ) => Effect.Effect<string>;
     readonly exec: (container: string, spec: RunSpec) => Effect.Effect<ProcessResult>;
-    /** Kills every process in the container that a run left behind. */
-    readonly reap: (container: string) => Effect.Effect<void>;
-    readonly start: (container: string) => Effect.Effect<boolean>;
+    /**
+     * Kills every process in the container but its keeper, so nothing a run started outlives it.
+     * Answers false when it had to stop the container to do so.
+     */
+    readonly reap: (container: string, keeper: string) => Effect.Effect<boolean>;
+    /** Starts a stopped container; answers its keeper's pid, or undefined when it cannot start. */
+    readonly start: (container: string) => Effect.Effect<string | undefined>;
     readonly stop: (container: string) => Effect.Effect<void>;
     readonly remove: (container: string) => Effect.Effect<void>;
     /** The containers this service made, by their label. */
@@ -87,17 +94,24 @@ export class Docker extends Context.Service<
 
 const LABEL = "dorbs.checker.env";
 
-// Kills all but pid 1 (docker's init) and its sleep, whose parent is pid 1, and this shell itself.
+// Kills every process but pid 1 (docker's init), the keeper whose pid is $1, and this shell, until
+// none is left. Builtins only, so the shell starts no process of its own to spare.
 const REAP = [
-  "for d in /proc/[0-9]*; do",
-  "  p=${d#/proc/}",
-  '  [ "$p" = 1 ] || [ "$p" = $$ ] && continue',
-  '  ppid=$(cut -d" " -f4 "$d/stat" 2>/dev/null) || continue',
-  '  [ "$ppid" = 1 ] && [ "$(cat "$d/comm" 2>/dev/null)" = sleep ] && continue',
-  '  kill -9 "$p" 2>/dev/null',
+  "for round in 1 2 3 4 5; do",
+  "  left=0",
+  "  for d in /proc/[0-9]*; do",
+  "    p=${d#/proc/}",
+  '    case "$p" in 1|"$1"|$$) continue ;; esac',
+  '    kill -9 "$p" 2>/dev/null && left=1',
+  "  done",
+  '  [ "$left" = 0 ] && exit 0',
   "done",
-  "true",
+  "exit 1",
 ].join("\n");
+
+// The keeper is the one process besides pid 1 when the container has just started.
+const KEEPER =
+  'for d in /proc/[0-9]*; do p=${d#/proc/}; case "$p" in 1|$$) ;; *) echo "$p" ;; esac; done';
 
 const make = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -206,6 +220,7 @@ const make = Effect.gen(function* () {
         "sleep",
         "infinity",
       ]);
+      return yield* keeper(name);
     },
   );
 
@@ -216,11 +231,29 @@ const make = Effect.gen(function* () {
       spec.keepBytes,
     );
 
-  const reap: Docker["Service"]["reap"] = (container) =>
-    docker(["exec", container, "sh", "-c", REAP]).pipe(Effect.asVoid);
+  const keeper = Effect.fn("Docker.keeper")(function* (container: string) {
+    const pids = (yield* ok(["exec", container, "sh", "-c", KEEPER]))
+      .split("\n")
+      .filter((line) => line !== "");
+    if (pids.length !== 1)
+      return yield* Effect.die(new Error(`${container} has no single keeper: ${pids.join(" ")}`));
+    return pids[0] ?? "";
+  });
 
-  const start: Docker["Service"]["start"] = (container) =>
-    docker(["start", container]).pipe(Effect.map((result) => result.exitCode === 0));
+  const reap: Docker["Service"]["reap"] = Effect.fn("Docker.reap")(
+    function* (container, keeperPid) {
+      const result = yield* docker(["exec", container, "sh", "-c", REAP, "reap", keeperPid]);
+      if (result.exitCode === 0) return true;
+      // Something keeps forking: stopping the container kills it all; the next run starts it again.
+      yield* docker(["stop", "--time", "0", container]);
+      return false;
+    },
+  );
+
+  const start: Docker["Service"]["start"] = Effect.fn("Docker.start")(function* (container) {
+    const result = yield* docker(["start", container]);
+    return result.exitCode === 0 ? yield* keeper(container) : undefined;
+  });
 
   const stop: Docker["Service"]["stop"] = (container) =>
     docker(["stop", "--time", "2", container]).pipe(Effect.asVoid);
