@@ -42,6 +42,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const RetentionDays = Config.Int("SESSION_RETENTION_DAYS").pipe(Config.withDefault(30));
 /** The agent loop new sessions run on. */
 const HarnessConfig = Config.Literals(["pi", "opencode"], "HARNESS").pipe(Config.withDefault("pi"));
+/** Whether the runtime ends an event's storage transactions and RPCs with the event: celld does, workerd does not. */
+const HoldEvents = Config.Boolean("HOLD_EVENTS").pipe(Config.withDefault(false));
 
 /** History rows per replayed RPC; a row is at most 256 KiB, so a page stays under the 32 MiB RPC limit. */
 const REPLAY_PAGE = 64;
@@ -215,10 +217,22 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
       },
     } satisfies SessionHost);
 
+    readonly holdsEvents = Effect.runSync(HoldEvents.parse(ConfigProvider.fromUnknown(this.env)));
+
+    /**
+     * Keeps the current event open until its turns have ended and their messages are delivered, where the runtime
+     * needs it. workerd lets a Durable Object's work run on, and logs a held event a restart cuts off as uncaught.
+     */
+    private holdEvent(): void {
+      if (!this.holdsEvents) return;
+      this.ctx.waitUntil(this.session.drained().then(() => this.outbox.idle()));
+    }
+
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env);
       // A turn a restart cut off runs on and is answered; the loop's wake job is what restarts an evicted object.
       this.session.resume();
+      this.holdEvent();
     }
 
     /** session/new: creates this session and attaches the connection that made it. */
@@ -234,5 +248,6 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
     ): Promise<void> {
       await this.touch();
       await Effect.runPromise(this.session.receive(connection, frame));
+      this.holdEvent();
     }
   };

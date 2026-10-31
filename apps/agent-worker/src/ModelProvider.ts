@@ -31,12 +31,18 @@ export type OpenCodeModel = {
 };
 
 /**
- * The pi-ai provider Pi generates with and the model new sessions start on, and the same model for OpenCode where
- * this Worker wires one.
+ * The pi-ai provider Pi generates with and the model new sessions start on, the secrets the provider reads by name,
+ * and the same model for OpenCode where this Worker wires one.
  */
 export class ModelProvider extends Context.Service<
   ModelProvider,
-  { readonly provider: Provider; readonly model: PiModel; readonly openCode?: OpenCodeModel }
+  {
+    readonly provider: Provider;
+    readonly model: PiModel;
+    /** Pi's provider reads these as environment variables; celld leaves a Worker's vars out of process.env. */
+    readonly env?: Readonly<Record<string, string>>;
+    readonly openCode?: OpenCodeModel;
+  }
 >()("dorbs/agent-worker/ModelProvider") {}
 
 const ModelConfig = Config.all({
@@ -82,8 +88,8 @@ const languageModel = (id: string, language: LanguageModelV3): OpenCodeModel => 
 };
 
 /**
- * Reads MODEL_PROVIDER and MODEL_ID. OpenRouter needs the OPENROUTER_API_KEY secret, which Pi reads from the
- * environment itself and OpenCode takes in its config; Workers AI needs the Worker's `AI` binding and serves Pi only.
+ * Reads MODEL_PROVIDER and MODEL_ID. OpenRouter needs the OPENROUTER_API_KEY secret, which Pi reads as an
+ * environment variable and OpenCode takes in its config; Workers AI needs the Worker's `AI` binding and serves Pi only.
  * The scripted model
  * runs only under `alchemy dev`, which sets ALCHEMY_DEV, so a deployed Worker cannot answer from a script.
  */
@@ -97,6 +103,7 @@ export const layer = (ai: Ai | undefined) =>
         return {
           provider: openrouterProvider(),
           model: { provider: "openrouter", id: config.id },
+          env: { OPENROUTER_API_KEY: Redacted.value(apiKey) },
           openCode: {
             model: { providerID: "openrouter", id: config.id },
             plugins: [],

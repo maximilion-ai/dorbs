@@ -1,7 +1,7 @@
 // Runs the local chain with a real model: DeepSeek v4.1 Flash on OpenRouter.
 //   pnpm live            serve /tmp/dorbs-acp.sock for T3 Code's Local ACP provider until Ctrl-C
 //   pnpm live "<prompt>" send one prompt through nc and print what T3 Code would show
-// HARNESS=opencode runs the sessions on OpenCode instead of Pi.
+// HARNESS=opencode runs the sessions on OpenCode instead of Pi; RUNTIME=celld runs the Worker under celld dev.
 
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";

@@ -76,3 +76,13 @@ minimumReleaseAgeExclude:
   - "@opencode/server@2.2.3"
   - "@opencode/simulation@2.2.3"
   - "@opencode/util@2.2.3"
+
+# The patch gives Computer's git a pako Inflate on runtimes whose node:zlib cannot report consumed bytes (celld).
+# pako 1, as isomorphic-git pins: pako 2 reads on past a stream's end, into the next packfile object.
+packageExtensions:
+  "@cloudflare/computer@0.8.0":
+    dependencies:
+      pako: 1.0.11
+
+patchedDependencies:
+  "@cloudflare/computer@0.8.0": patches/@cloudflare__computer@0.8.0.patch

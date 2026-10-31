@@ -8,3 +8,5 @@ dist
 *.tsbuildinfo
 .env
 .env.local
+.celld
+.dev.vars

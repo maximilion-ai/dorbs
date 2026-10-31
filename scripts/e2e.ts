@@ -1,4 +1,5 @@
-// Drives the local chain the way T3 Code does: nc -U -> acp-mux -> agent Worker (alchemy dev) -> checker double.
+// Drives the local chain the way T3 Code does: nc -U -> acp-mux -> agent Worker -> checker double.
+// RUNTIME=celld runs the Worker under celld dev instead of alchemy dev.
 
 import * as NodeAssert from "node:assert/strict";
 import * as NodeChildProcess from "node:child_process";

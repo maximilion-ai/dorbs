@@ -51,8 +51,10 @@ export const makePiLoop = (host: LoopHost): Loop => {
 
   const harness = new PiHarness({
     harness: async ({ storage, context, onWake }) => {
-      const { provider } = await host.models();
-      const models = createModels();
+      const { provider, env } = await host.models();
+      const models = createModels({
+        authContext: { env: async (name) => env?.[name], fileExists: async () => false },
+      });
       models.setProvider(provider);
       await host.workspace.fs.mkdir(WORKSPACE_ROOT, { recursive: true });
       const pi = await Harness.open(storage, { models, registry, onWake }, context);

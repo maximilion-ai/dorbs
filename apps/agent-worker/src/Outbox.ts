@@ -46,5 +46,8 @@ export const makeOutbox = (deliver: Deliver) => {
     });
   };
 
-  return { send, replay };
+  /** Settles once everything sent so far is delivered. */
+  const idle = () => tail;
+
+  return { send, replay, idle };
 };

@@ -397,11 +397,14 @@ export const makeSession = (host: SessionHost) => {
     );
   });
 
+  // Settles once no open prompt is left to run.
+  let drained: Promise<void> = Promise.resolve();
+
   /** Runs the open prompts, oldest first, unless they are running already; the first may be one a restart cut off. */
   const resume = () => {
     if (driving || host.prompts().length === 0) return;
     driving = true;
-    Effect.runFork(drive);
+    drained = Effect.runPromise(drive);
   };
 
   const prompt = Effect.fn("Session.prompt")(function* (
@@ -496,5 +499,5 @@ export const makeSession = (host: SessionHost) => {
     );
   };
 
-  return { open, receive, resume };
+  return { open, receive, resume, drained: () => drained };
 };

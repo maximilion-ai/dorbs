@@ -1,4 +1,5 @@
-// The local chain T3 Code drives: nc -U -> acp-mux -> agent Worker (alchemy dev) -> checker service.
+// The local chain T3 Code drives: nc -U -> acp-mux -> agent Worker -> checker service.
+// The Worker runs under alchemy dev (workerd), or under celld dev with RUNTIME=celld.
 
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
@@ -233,6 +234,21 @@ const serve = async (handler: (request: Request) => Promise<Response>): Promise<
   });
 };
 
+/** A port free now, for a server that must be told its port before it listens. */
+const freePort = () =>
+  new Promise<number>((resolve, reject) => {
+    const server = NodeHttp.createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      server.close(() =>
+        typeof address === "object" && address !== null
+          ? resolve(address.port)
+          : reject(new Error("no port")),
+      );
+    });
+  });
+
 export const prompt = (sessionId: string, text: string) => ({
   sessionId,
   prompt: [{ type: "text", text }],
@@ -244,6 +260,67 @@ export const harness = (): "pi" | "opencode" => {
   if (name !== "pi" && name !== "opencode")
     throw new Error(`HARNESS must be pi or opencode, not ${name}`);
   return name;
+};
+
+/** What the stack runs the agent Worker under: RUNTIME, alchemy unless set. */
+const runtime = (): "alchemy" | "celld" => {
+  const name = process.env.RUNTIME ?? "alchemy";
+  if (name !== "alchemy" && name !== "celld")
+    throw new Error(`RUNTIME must be alchemy or celld, not ${name}`);
+  return name;
+};
+
+/** Where alchemy dev's workerd keeps its Durable Objects' SQLite files. */
+const ALCHEMY_STATE = NodePath.join(WORKER_DIR, ".alchemy/local");
+
+/** Starts the Worker under alchemy dev and returns its URL and the directory of its SQLite files. */
+const startAlchemyWorker = async (env: Record<string, string>) => {
+  const worker = start(
+    "agent-worker",
+    "pnpm",
+    ["exec", "alchemy", "dev", "--no-input", "--stage", stage],
+    { cwd: WORKER_DIR, env },
+  );
+  const [, url] = await waitForOutput(worker, /Started in \d+ms → (http:\/\/[^\s/]+)/u, 90_000);
+  return { url: url ?? "", state: ALCHEMY_STATE, child: worker };
+};
+
+/**
+ * Starts the Worker under celld dev from wrangler.jsonc and returns its URL. celld reads the Worker's variables
+ * from .dev.vars beside the config and keeps state beside it in .celld/dev, so each stack gets a project directory
+ * of its own: a copy of the config and a link to the Worker's source, which celld requires inside the project.
+ */
+const startCelldWorker = async (env: Record<string, string>) => {
+  const celld = process.env.CELLD ?? "celld";
+  if (NodeChildProcess.spawnSync(celld, ["--version"]).error !== undefined) {
+    throw new Error(
+      `${celld} not found: install it from https://celld.dev, or set CELLD to its path`,
+    );
+  }
+  const project = tempDir("dorbs-celld-");
+  NodeFS.copyFileSync(
+    NodePath.join(WORKER_DIR, "wrangler.jsonc"),
+    NodePath.join(project, "wrangler.jsonc"),
+  );
+  NodeFS.symlinkSync(NodePath.join(WORKER_DIR, "src"), NodePath.join(project, "src"));
+  // alchemy dev sets ALCHEMY_DEV itself; celld dev is local development too, so the scripted model may run.
+  const vars = Object.entries({ ...env, ALCHEMY_DEV: "true" }).map(([name, value]) => {
+    if (value.includes("'"))
+      throw new Error(`${name} contains a single quote, which .dev.vars cannot hold`);
+    return `${name}='${value}'\n`;
+  });
+  NodeFS.writeFileSync(NodePath.join(project, ".dev.vars"), vars.join(""), { mode: 0o600 });
+  const port = await freePort();
+  const worker = start("agent-worker", celld, ["dev", ".", "--port", String(port), "--no-watch"], {
+    cwd: project,
+    env: {
+      CELLD_ESBUILD: NodePath.join(WORKER_DIR, "node_modules/.bin/esbuild"),
+      // OpenCode outgrows celld's default isolate heap on its first prompt; 512 MB holds the e2e.
+      CELLD_V8_HEAP_LIMIT_MB: process.env.CELLD_V8_HEAP_LIMIT_MB ?? "512",
+    },
+  });
+  const [, url] = await waitForOutput(worker, /ready +(http:\/\/\S+)/u, 90_000);
+  return { url: url ?? "", state: NodePath.join(project, ".celld/dev"), child: worker };
 };
 
 export type StackOptions = {
@@ -291,31 +368,30 @@ export const startStack = async (options: StackOptions) => {
   if (checker === undefined) throw new Error("unreachable");
   ok(`the checker ${double === undefined ? "service" : "double"} answers on ${checker.url}`);
 
-  const worker = start(
-    "agent-worker",
-    "pnpm",
-    ["exec", "alchemy", "dev", "--no-input", "--stage", stage],
-    {
-      cwd: WORKER_DIR,
-      env: {
-        AGENT_TOKEN: agentToken,
-        CHECK_URL: checker.url,
-        CHECK_TOKEN: checker.token,
-        HARNESS: options.harness,
-        MODEL_PROVIDER: options.model.provider,
-        MODEL_ID: options.model.id,
-        REPOS: JSON.stringify([{ id: options.repo, url: gitUrl }]),
-        OPENROUTER_API_KEY: options.model.openrouterKey,
-      },
-    },
+  const workerEnv = {
+    AGENT_TOKEN: agentToken,
+    CHECK_URL: checker.url,
+    CHECK_TOKEN: checker.token,
+    HARNESS: options.harness,
+    MODEL_PROVIDER: options.model.provider,
+    MODEL_ID: options.model.id,
+    REPOS: JSON.stringify([{ id: options.repo, url: gitUrl }]),
+    OPENROUTER_API_KEY: options.model.openrouterKey,
+  };
+  const workerRuntime = runtime();
+  const bootAt = performance.now();
+  const {
+    url: workerUrl,
+    state: workerState,
+    child: worker,
+  } = workerRuntime === "celld"
+    ? await startCelldWorker(workerEnv)
+    : await startAlchemyWorker(workerEnv);
+  const workerBootMs = Math.round(performance.now() - bootAt);
+  const workerPort = Number(new URL(workerUrl).port);
+  ok(
+    `agent Worker runs under ${workerRuntime} dev at ${workerUrl} with HARNESS=${options.harness}`,
   );
-  const [, workerUrl] = await waitForOutput(
-    worker,
-    /Started in \d+ms → (http:\/\/[^\s/]+)/u,
-    90_000,
-  );
-  const workerPort = Number(new URL(workerUrl ?? "").port);
-  ok(`agent Worker runs under alchemy dev at ${workerUrl} with HARNESS=${options.harness}`);
 
   const mux = start("acp-mux", process.execPath, ["src/main.ts"], {
     cwd: NodePath.join(ROOT, "apps/acp-mux"),
@@ -374,6 +450,11 @@ export const startStack = async (options: StackOptions) => {
     socketPath,
     workerUrl,
     workerPort,
+    workerRuntime,
+    workerBootMs,
+    /** The process the Worker's runtime runs under, and the directory of its Durable Objects' SQLite files. */
+    workerPid: worker.proc.pid ?? 0,
+    workerState,
     mux,
     startNc,
     stopNc,
