@@ -132,7 +132,7 @@ const STYLISH_ENTRY = /^\s+(\d+):(\d+)\s+(error|warning)\s+(.+?)(?:\s{2,}(\S+))?
 // file:line:col: message, and mypy's file:line: severity: message [code].
 const GNU =
   /^(?:vet: )?([^\s:()][^:()]*?):(\d+)(?::(\d+))?: (?:(error|warning|note): )?(.*?)(?:\s+\[([\w-]+)\])?$/;
-const PNPM_PREFIX = /^(\S+) [\w:.-]+: (.*)$/;
+const PNPM_PREFIX = /^([\w@.+-]+(?:\/[\w@.+-]+)*) [\w:.-]+: (.*)$/;
 const TURBO_PREFIX = /^([@\w./-]+):[\w:.-]+: (.*)$/;
 
 const BIOME_CATEGORY = /^(?:lint|assist|format|organizeImports|syntax|parse)\b/;
@@ -238,28 +238,55 @@ const lineDiagnostic = (
   return undefined;
 };
 
-/** A line, read as is or under a pnpm -r, turbo or nx prefix that names the package it ran in. */
-const prefixedDiagnostic = (context: ParseContext, line: string): Diagnostic | undefined => {
-  const plain = lineDiagnostic(context, context.cwd, line);
-  if (plain !== undefined) return plain;
-  const turbo = TURBO_PREFIX.exec(line);
-  const dir = turbo === null ? undefined : context.packages.get(turbo[1] ?? "");
-  if (turbo !== null && dir !== undefined) return lineDiagnostic(context, dir, turbo[2] ?? "");
-  const pnpm = PNPM_PREFIX.exec(line);
-  if (pnpm !== null && isRelativePath(pnpm[1])) {
-    return lineDiagnostic(context, NodePath.posix.join(context.cwd, pnpm[1] ?? ""), pnpm[2] ?? "");
-  }
-  return undefined;
+type Line = {
+  /** The line without the package prefix. */
+  readonly body: string;
+  /** The line as printed, which output keeps. */
+  readonly raw: string;
 };
 
-/** The line formats repos' own scripts print, including two-line ones: eslint's stylish and svelte-check's. */
-const parseText = (context: ParseContext, text: string, into: Collector) => {
-  const lines = text.split("\n").map((line) => line.replace(/\s+$/, ""));
+/**
+ * Output split into one stream per package, by the prefix pnpm -r and --parallel or turbo puts before
+ * each line, so a two-line message stays whole when packages' lines interleave.
+ */
+const streams = (context: ParseContext, text: string): ReadonlyMap<string, ReadonlyArray<Line>> => {
+  const dirs = new Set(context.packages.values());
+  const byDir = new Map<string, Array<Line>>();
+  for (const printed of text.split("\n")) {
+    const raw = printed.replace(/\s+$/, "");
+    let cwd = context.cwd;
+    let body = raw;
+    const turbo = TURBO_PREFIX.exec(raw);
+    const turboDir = turbo === null ? undefined : context.packages.get(turbo[1] ?? "");
+    const pnpm = PNPM_PREFIX.exec(raw);
+    const pnpmDir = pnpm?.[1] ?? "";
+    if (turbo !== null && turboDir !== undefined) {
+      cwd = turboDir;
+      body = turbo[2] ?? "";
+    } else if (
+      pnpm !== null &&
+      isRelativePath(pnpmDir) &&
+      (dirs.has(pnpmDir) || pnpmDir.includes("/"))
+    ) {
+      cwd = NodePath.posix.join(context.cwd, pnpmDir);
+      body = pnpm[2] ?? "";
+    }
+    byDir.set(cwd, [...(byDir.get(cwd) ?? []), { body, raw }]);
+  }
+  return byDir;
+};
+
+const parseStream = (
+  context: ParseContext,
+  cwd: string,
+  lines: ReadonlyArray<Line>,
+  into: Collector,
+) => {
   let stylishFile: string | undefined;
   // tsc and svelte-check indent the rest of a message under its first line.
   let continuing = false;
   for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? "";
+    const { body: line, raw } = lines[index] ?? { body: "", raw: "" };
     if (continuing && /^\s+\S/.test(line)) {
       into.extend(line);
       continue;
@@ -269,7 +296,7 @@ const parseText = (context: ParseContext, text: string, into: Collector) => {
     if (entry !== null && stylishFile !== undefined) {
       const [, row, column, severity = "", message = "", rule] = entry;
       into.add(
-        diagnostic(context, context.cwd, {
+        diagnostic(context, cwd, {
           path: stylishFile,
           line: Number(row),
           column: Number(column),
@@ -278,16 +305,16 @@ const parseText = (context: ParseContext, text: string, into: Collector) => {
           source: "eslint",
           message,
         }),
-        line,
+        raw,
       );
       continue;
     }
     stylishFile = undefined;
     const location = SVELTE_LOCATION.exec(line);
-    const next = SVELTE_MESSAGE.exec(lines[index + 1] ?? "");
+    const next = SVELTE_MESSAGE.exec(lines[index + 1]?.body ?? "");
     if (location !== null && next !== null) {
       const [, path = "", row, column] = location;
-      const found = diagnostic(context, context.cwd, {
+      const found = diagnostic(context, cwd, {
         path,
         line: Number(row),
         column: Number(column),
@@ -295,23 +322,28 @@ const parseText = (context: ParseContext, text: string, into: Collector) => {
         source: "svelte-check",
         message: next[2] ?? "",
       });
-      into.add(found, `${line}\n${lines[index + 1] ?? ""}`);
+      into.add(found, `${raw}\n${lines[index + 1]?.raw ?? ""}`);
       continuing = found !== undefined;
       index += 1;
       continue;
     }
-    const found = prefixedDiagnostic(context, line);
+    const found = lineDiagnostic(context, cwd, line);
     if (
       found === undefined &&
       STYLISH_FILE.test(line) &&
-      STYLISH_ENTRY.test(lines[index + 1] ?? "")
+      STYLISH_ENTRY.test(lines[index + 1]?.body ?? "")
     ) {
       stylishFile = line;
       continue;
     }
-    into.add(found, line);
+    into.add(found, raw);
     continuing = found?.source === "tsc";
   }
+};
+
+/** The line formats repos' own scripts print, including two-line ones: eslint's stylish and svelte-check's. */
+const parseText = (context: ParseContext, text: string, into: Collector) => {
+  for (const [cwd, lines] of streams(context, text)) parseStream(context, cwd, lines, into);
 };
 
 const EslintOutput = Schema.Array(

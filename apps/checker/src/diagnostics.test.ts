@@ -244,3 +244,34 @@ it("reads pyright's and basedpyright's human output", () => {
     },
   );
 });
+
+it("reads two-line formats under pnpm's prefixes, with packages' lines interleaved", () => {
+  const parsed = parse(
+    "text",
+    [
+      "docs check$ svelte-check --tsconfig ./tsconfig.json",
+      "docs check: /env/repo/docs/src/lib/colors.ts:12:14",
+      "packages/cli check: /env/repo/packages/cli/src/a.ts:1:1",
+      "docs check: Error: Type 'string' is not assignable to type 'number'. (ts)",
+      "packages/cli check: Warn: Unused import.",
+      "docs check: svelte-check found 1 error and 0 warnings in 1 file",
+    ].join("\n"),
+    "",
+    {
+      packages: new Map([
+        ["docs", "docs"],
+        ["shadcn-svelte", "packages/cli"],
+      ]),
+    },
+  );
+  assert.deepStrictEqual(parsed, {
+    diagnostics: [
+      "docs/src/lib/colors.ts:11:13-11:13 1 svelte-check Type 'string' is not assignable to type 'number'.",
+      "packages/cli/src/a.ts:0:0-0:0 2 svelte-check Unused import.",
+    ],
+    output: [
+      "docs check$ svelte-check --tsconfig ./tsconfig.json",
+      "docs check: svelte-check found 1 error and 0 warnings in 1 file",
+    ],
+  });
+});
