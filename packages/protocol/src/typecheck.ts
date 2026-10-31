@@ -119,7 +119,7 @@ const MissingBlobs = Schema.TaggedStruct("MissingBlobs", {
 });
 export type MissingBlobs = typeof MissingBlobs.Type;
 
-export const ActionResult = Schema.TaggedStruct("ActionResult", {
+const ActionResult = Schema.TaggedStruct("ActionResult", {
   diagnostics: Schema.Array(Diagnostic),
   /** Files the action wrote, by digest. A check writes none. */
   outputs: Schema.Array(FileDigest),

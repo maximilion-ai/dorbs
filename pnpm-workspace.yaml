@@ -31,12 +31,10 @@ catalog:
   # The agent-worker tests prebundle OpenCode with it; wrangler and alchemy already pin it.
   esbuild: 0.28.2
   knip: 6.43.0
-  oxlint: 1.89.0
   tsrs: 0.20.0-ts7.1.0-beta
   vite: npm:@voidzero-dev/vite-plus-core@1.4.0
   vite-plus: 1.4.0
   vitest: 5.0.5
-  yaml: 2.9.1
   zod: 4.6.6
 
 # One vite and one vitest across the tree, so @effect/vitest and

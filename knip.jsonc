@@ -14,10 +14,6 @@
       "includeEntryExports": true,
       "entry": ["scripts/vendor-acp-v1.ts"],
     },
-    "apps/typecheck": {
-      // The service spawns the oxlint binary by name; nothing imports it.
-      "ignoreDependencies": ["oxlint"],
-    },
     "apps/agent-worker": {
       // alchemy dev loads alchemy.run.ts and the vitest plugin loads test/worker.ts, both by path;
       // vitest.config.ts aliases @opencode/sdk/workerd to test/opencode-native.ts.
