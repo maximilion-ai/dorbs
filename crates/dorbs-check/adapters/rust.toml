@@ -1,0 +1,42 @@
+# Rust: a cargo workspace or package, checked and tested offline from what cargo fetch downloaded.
+priority = 20
+detect = ["Cargo.toml"]
+commit_only = [".cargo/config.toml", ".cargo/config", "rust-toolchain", "rust-toolchain.toml"]
+
+# Rust's stable toolchain with gcc for build scripts. Registries and targets live in the environment.
+image = '''
+FROM rust:1-slim
+'''
+
+egress = ["crates.io", "index.crates.io", "static.crates.io", "github.com", "codeload.github.com"]
+
+[env]
+CARGO_HOME = "/env/home/.cargo"
+CARGO_TERM_COLOR = "never"
+
+[output]
+errorformat = ['%f:%l:%c: %trror[%n]: %m', '%f:%l:%c: %trror: %m', '%f:%l:%c: %tarning: %m']
+
+[[let.cargo]]
+when.exists = ["Cargo.lock"]
+flags = " --locked"
+
+[[let.cargo]]
+flags = ""
+
+[[setup]]
+id = "fetch"
+run = "cargo fetch{cargo.flags}"
+phase = "online"
+key = ["**/Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml", ".cargo/config.toml"]
+# cargo refuses a manifest whose targets are missing, so the sources are there, empty.
+stubs = ["**/*.rs"]
+
+[[checks]]
+id = "typecheck"
+run = "cargo check --workspace --all-targets --offline{cargo.flags} --message-format short"
+
+[[tests]]
+run = "cargo test --workspace --offline{cargo.flags} {filter}"
+filter_flag = ""
+format = "raw"

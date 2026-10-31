@@ -1,0 +1,18 @@
+{
+  "repo": "a-b/c_d.e",
+  "commit": "c085b16bedd5a7a4ee935124edd739de2d0f634d",
+  "change": {
+    "files": [
+      {
+        "path": "src/a.ts",
+        "content": "export const a: number = 1;\n"
+      },
+      {
+        "path": "packages/core/package.json",
+        "content": "{}"
+      }
+    ],
+    "deleted": ["src/old.ts"]
+  },
+  "only": ["typecheck", "check:type", "lint.v2"]
+}

@@ -1,0 +1,21 @@
+// The agent Worker for celld (https://celld.dev), which reads Wrangler config. Mirrors alchemy.run.ts;
+// variables come from .dev.vars under `celld dev`, which scripts/stack.ts writes.
+{
+  "name": "agent-worker",
+  "main": "./src/worker.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "AcpConnection", "class_name": "AcpConnection" },
+      { "name": "AcpSession", "class_name": "AcpSession" },
+      { "name": "ChatGptAccount", "class_name": "ChatGptAccount" },
+    ],
+  },
+  // celld ends an event's storage transactions and RPCs with the event, so AcpSession holds events open.
+  "vars": { "HOLD_EVENTS": "true" },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["AcpConnection", "AcpSession"] },
+    { "tag": "v2", "new_sqlite_classes": ["ChatGptAccount"] },
+  ],
+}

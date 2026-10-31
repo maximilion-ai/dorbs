@@ -1,0 +1,8 @@
+{
+  "_tag": "Rejected",
+  "reason": {
+    "_tag": "UnknownChecks",
+    "ids": ["tsc", "Not An Id!"],
+    "known": ["typecheck", "lint"]
+  }
+}

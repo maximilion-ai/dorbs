@@ -1,0 +1,15 @@
+{
+  "_tag": "TestResult",
+  "envKey": "k",
+  "durationMs": 942,
+  "setupMs": 0,
+  "overlayMs": 187,
+  "command": "cd 'test/unit' && pnpm exec vitest run 'test/basic.test.ts'",
+  "status": "failed",
+  "exitCode": 1,
+  "passed": 5,
+  "failed": 1,
+  "skipped": 0,
+  "output": "FAIL test/basic.test.ts",
+  "truncated": false
+}

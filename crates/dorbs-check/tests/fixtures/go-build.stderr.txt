@@ -1,0 +1,2 @@
+# example.com/w/pkg/a
+pkg/a/b.go:3:13: cannot use "x" (untyped string constant) as int value in variable declaration

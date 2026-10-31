@@ -1,0 +1,41 @@
+diff --git a/dist/shared-FgJMZb6y.js b/dist/shared-FgJMZb6y.js
+index 2a94197813aca0dd56e0621e22b2d8ba768a16e3..afce5e0fe5c4b0fbcdf15d7f7ec3c3e929a0b6bd 100644
+--- a/dist/shared-FgJMZb6y.js
++++ b/dist/shared-FgJMZb6y.js
+@@ -1,5 +1,6 @@
+ import { createHash } from "node:crypto";
+ import * as zlib from "node:zlib";
++import * as streamingPako from "pako";
+ // \0rolldown/runtime.js
+ var __create = Object.create;
+ var __defProp = Object.defineProperty;
+@@ -350,6 +351,10 @@ function isIncompleteInput(error) {
+ function pakoErrno(error) {
+ 	return typeof error.errno === "number" ? error.errno : 1;
+ }
++// dorbs patch: Inflate needs inflateSync's { info: true } byte count to find where a packfile object ends.
++// celld's node:zlib ignores that option and inflates truncated input without an error, so use pako there.
++let reportsConsumed;
++const zlibReportsConsumed = () => reportsConsumed ??= zlib.inflateSync(zlib.deflateSync(new Uint8Array(1)), { info: true }).engine !== void 0;
+ var Inflate = class {
+ 	err = 0;
+ 	msg = "";
+@@ -357,11 +362,18 @@ var Inflate = class {
+ 	strm = { avail_in: 0 };
+ 	#chunks = [];
+ 	#options;
++	#pako;
+ 	constructor(options = {}) {
+ 		this.#options = options;
+ 	}
+ 	push(data, mode) {
+ 		if (this.result !== void 0) return true;
++		if (this.#pako !== void 0 || !zlibReportsConsumed()) {
++			this.#pako ??= new streamingPako.Inflate(this.#options);
++			const pushed = this.#pako.push(data, mode);
++			({ err: this.err, msg: this.msg, result: this.result, strm: this.strm } = this.#pako);
++			return pushed;
++		}
+ 		const chunk = toBytes(data);
+ 		if (chunk.length > 0) this.#chunks.push(chunk);
+ 		const input = concat(this.#chunks);

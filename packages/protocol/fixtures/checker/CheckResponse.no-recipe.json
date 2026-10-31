@@ -1,0 +1,7 @@
+{
+  "_tag": "Rejected",
+  "reason": {
+    "_tag": "NoRecipe",
+    "reason": "No adapter matches this repo, and it has no .dorbs/check.json."
+  }
+}

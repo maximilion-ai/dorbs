@@ -1,0 +1,20 @@
+/env/repo/node_modules/esrap/types/types.d.ts:1:30
+Error: Cannot find module 'esrap' or its corresponding type declarations. 
+
+/env/repo/node_modules/svelte/types/index.d.ts:860:37
+Error: Cannot find module 'esrap/languages/ts' or its corresponding type declarations. 
+
+/env/repo/src/App.svelte:2:7
+Error: Type 'string' is not assignable to type 'number'. (ts)
+
+/env/repo/src/a.ts:1:14
+Error: Type 'string' is not assignable to type 'number'. 
+
+/env/repo/src/a.ts:4:12
+Error: Property 'foo' does not exist on type 'string'. 
+
+/env/repo/tsconfig.json:1:3
+Warn: Option 'moduleResolution' must be set to 'NodeNext' (or left unspecified) when option 'module' is set to 'NodeNext'. 
+
+====================================
+svelte-check found 5 errors and 1 warning in 5 files

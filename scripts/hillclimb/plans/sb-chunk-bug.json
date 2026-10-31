@@ -1,0 +1,238 @@
+{
+  "task": "sb-chunk-bug",
+  "runId": "2aba4f",
+  "recordedWallMs": 48411.06337499991,
+  "rounds": [
+    [
+      {
+        "name": "clone_repo",
+        "args": {
+          "repo": "maximilionai/dorbs-sandbox"
+        }
+      }
+    ],
+    [
+      {
+        "name": "list_files",
+        "args": {}
+      }
+    ],
+    [
+      {
+        "name": "read_file",
+        "args": {
+          "path": "package.json"
+        }
+      }
+    ],
+    [
+      {
+        "name": "read_file",
+        "args": {
+          "path": "src/index.ts"
+        }
+      },
+      {
+        "name": "read_file",
+        "args": {
+          "path": "tsconfig.json"
+        }
+      },
+      {
+        "name": "read_file",
+        "args": {
+          "path": "README.md"
+        }
+      }
+    ],
+    [
+      {
+        "name": "git",
+        "args": {
+          "args": "log --oneline -5"
+        }
+      },
+      {
+        "name": "git",
+        "args": {
+          "args": "branch -a"
+        }
+      }
+    ],
+    [
+      {
+        "name": "git",
+        "args": {
+          "args": "status"
+        }
+      }
+    ],
+    [
+      {
+        "name": "git",
+        "args": {
+          "args": "status --short"
+        }
+      }
+    ],
+    [
+      {
+        "name": "git",
+        "args": {
+          "args": "checkout -b dorbs/hc-sb-chunk-bug-2aba4f"
+        }
+      }
+    ],
+    [
+      {
+        "name": "write_file",
+        "args": {
+          "path": "src/chunk.ts",
+          "content": "export function chunk<T>(xs: readonly T[], size: number): T[][] {\n  const out: T[][] = [];\n  for (let i = 0; i + size <= xs.length; i += size) out.push(xs.slice(i, i + size));\n  return out;\n}\n"
+        }
+      },
+      {
+        "name": "write_file",
+        "args": {
+          "path": "src/chunk.test.ts",
+          "content": "import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { chunk } from './chunk.ts';\n\ntest('chunk keeps the last partial chunk', () => {\n  assert.deepEqual(chunk([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]]);\n});\n\ntest('chunk splits evenly sized input', () => {\n  assert.deepEqual(chunk([1, 2, 3, 4], 2), [[1, 2], [3, 4]]);\n});\n\ntest('chunk returns a single chunk when size exceeds length', () => {\n  assert.deepEqual(chunk([1, 2, 3], 5), [[1, 2, 3]]);\n});\n\ntest('chunk returns no chunks for empty input', () => {\n  assert.deepEqual(chunk([], 3), []);\n});\n\ntest('chunk accepts readonly input and a size of 1', () => {\n  const xs: readonly number[] = [1, 2, 3];\n  assert.deepEqual(chunk(xs, 1), [[1], [2], [3]]);\n});\n\ntest('chunk throws a RangeError for a size below 1', () => {\n  assert.throws(() => chunk([1, 2, 3], 0), RangeError);\n  assert.throws(() => chunk([1, 2, 3], -1), RangeError);\n});\n\ntest('chunk throws a RangeError for non-integer sizes', () => {\n  assert.throws(() => chunk([1, 2, 3], 1.5), RangeError);\n  assert.throws(() => chunk([1, 2, 3], Number.NaN), RangeError);\n});\n"
+        }
+      }
+    ],
+    [
+      {
+        "name": "test",
+        "args": {
+          "files": ["src/chunk.test.ts"]
+        }
+      }
+    ],
+    [
+      {
+        "name": "write_file",
+        "args": {
+          "content": "export function chunk<T>(xs: readonly T[], size: number): T[][] {\n  if (!Number.isInteger(size) || size < 1) {\n    throw new RangeError(`chunk size must be a positive integer, received ${size}`);\n  }\n  const out: T[][] = [];\n  for (let i = 0; i < xs.length; i += size) out.push(xs.slice(i, i + size));\n  return out;\n}\n",
+          "path": "src/chunk.ts"
+        }
+      }
+    ],
+    [
+      {
+        "name": "test",
+        "args": {
+          "files": ["src/chunk.test.ts"]
+        }
+      },
+      {
+        "name": "check",
+        "args": {}
+      }
+    ],
+    [
+      {
+        "name": "write_file",
+        "args": {
+          "content": "import * as test from 'node:test';\nimport * as assert from 'node:assert/strict';\n\nimport { chunk } from './chunk';\n\ntest.test('chunk keeps the last partial chunk', () => {\n  assert.deepEqual(chunk([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]]);\n});\n\ntest.test('chunk splits evenly sized input', () => {\n  assert.deepEqual(chunk([1, 2, 3, 4], 2), [[1, 2], [3, 4]]);\n});\n\ntest.test('chunk returns a single chunk when size exceeds length', () => {\n  assert.deepEqual(chunk([1, 2, 3], 5), [[1, 2, 3]]);\n});\n\ntest.test('chunk returns no chunks for empty input', () => {\n  assert.deepEqual(chunk([], 3), []);\n});\n\ntest.test('chunk accepts readonly input and a size of 1', () => {\n  const xs: readonly number[] = [1, 2, 3];\n  assert.deepEqual(chunk(xs, 1), [[1], [2], [3]]);\n});\n\ntest.test('chunk throws a RangeError for a size below 1', () => {\n  assert.throws(() => chunk([1, 2, 3], 0), RangeError);\n  assert.throws(() => chunk([1, 2, 3], -1), RangeError);\n});\n\ntest.test('chunk throws a RangeError for non-integer sizes', () => {\n  assert.throws(() => chunk([1, 2, 3], 1.5), RangeError);\n  assert.throws(() => chunk([1, 2, 3], Number.NaN), RangeError);\n});\n",
+          "path": "src/chunk.test.ts"
+        }
+      }
+    ],
+    [
+      {
+        "name": "check",
+        "args": {}
+      },
+      {
+        "name": "test",
+        "args": {
+          "files": ["src/chunk.test.ts"]
+        }
+      }
+    ],
+    [
+      {
+        "name": "edit_file",
+        "args": {
+          "path": "tsconfig.json",
+          "oldText": "\"noEmit\": true }",
+          "newText": "\"noEmit\": true, \"esModuleInterop\": true, \"allowImportingTsExtensions\": true }"
+        }
+      }
+    ],
+    [
+      {
+        "name": "edit_file",
+        "args": {
+          "path": "src/chunk.test.ts",
+          "oldText": "import { chunk } from './chunk';",
+          "newText": "import { chunk } from './chunk.ts';"
+        }
+      }
+    ],
+    [
+      {
+        "name": "check",
+        "args": {}
+      },
+      {
+        "name": "test",
+        "args": {
+          "files": ["src/chunk.test.ts"]
+        }
+      }
+    ],
+    [
+      {
+        "name": "git",
+        "args": {
+          "args": "add src/chunk.ts src/chunk.test.ts tsconfig.json"
+        }
+      }
+    ],
+    [
+      {
+        "name": "git",
+        "args": {
+          "args": "commit -m \"Fix chunk dropping the last partial chunk and reject sizes below 1\""
+        }
+      }
+    ],
+    [
+      {
+        "name": "git",
+        "args": {
+          "args": "status --short"
+        }
+      }
+    ]
+  ],
+  "outcomes": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "failed",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "red",
+    "ok",
+    "green",
+    "red",
+    "ok",
+    "green",
+    "red",
+    "ok",
+    "ok",
+    "green",
+    "green",
+    "ok",
+    "ok",
+    "ok"
+  ]
+}

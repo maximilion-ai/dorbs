@@ -1,0 +1,406 @@
+# Node: a package.json at the root, installed with the package manager it pins or locks.
+priority = 40
+detect = ["package.json"]
+ignore = ["**/node_modules/**"]
+commit_only = [".npmrc", ".yarnrc", ".yarnrc.yml", ".yarn/**", ".pnpmfile.cjs", "bunfig.toml"]
+
+# Node with corepack's pnpm and yarn shims, and bun.
+image = '''
+FROM oven/bun:1-slim AS bun
+FROM node:24-slim
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  && corepack enable
+COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
+RUN ln -s bun /usr/local/bin/bunx
+'''
+
+egress = [
+  "registry.npmjs.org",
+  "registry.yarnpkg.com",
+  "repo.yarnpkg.com",
+  "nodejs.org",
+  "github.com",
+  "codeload.github.com",
+  "objects.githubusercontent.com",
+]
+
+[env]
+COREPACK_HOME = "/env/home/.cache/corepack"
+COREPACK_ENABLE_DOWNLOAD_PROMPT = "0"
+npm_config_update_notifier = "false"
+# yarn 1 caches under /usr/local/share otherwise, which the read-only root refuses, then in /tmp.
+YARN_CACHE_FOLDER = "/env/home/.cache/yarn"
+# yarn berry caches in the home too, which both setup phases share, not in the tree the online phase loses.
+YARN_ENABLE_GLOBAL_CACHE = "true"
+
+[commands]
+"package.json" = "{pm.run} {name}"
+
+[output]
+errorformat = [
+  # tsc, its message's further lines indented under it
+  '%E%f(%l\,%c): %trror %n: %m',
+  '%W%f(%l\,%c): %tarning %n: %m',
+  '%I%f(%l\,%c): message %n: %m',
+  # svelte-check --output machine
+  '%*\d %tRROR "%f" %l:%c "%m"',
+  '%*\d %tARNING "%f" %l:%c "%m"',
+  '%*\d %tINT "%f" %l:%c "%m"',
+  # svelte-check's human output: the place, then the message
+  '%A%f:%l:%c',
+  '%C%trror: %m (\(ts\|js\|svelte\|css\))',
+  '%C%trror: %m',
+  '%C%tarn: %m (\(ts\|js\|svelte\|css\))',
+  '%C%tarn: %m',
+  '%C%tint: %m (\(ts\|js\|svelte\|css\))',
+  '%C%tint: %m',
+  '%+C\s\+%.%#',
+  # GitHub annotations, as biome --reporter=github and oxlint --format github print them
+  '::%trror title=%n\,file=%f\,line=%l\,endLine=%e\,col=%c\,endColumn=%k::%m',
+  '::%tarning title=%n\,file=%f\,line=%l\,endLine=%e\,col=%c\,endColumn=%k::%m',
+  '::%totice title=%n\,file=%f\,line=%l\,endLine=%e\,col=%c\,endColumn=%k::%m',
+  '::%trror file=%f\,line=%l\,col=%c::%m',
+  '::%tarning file=%f\,line=%l\,col=%c::%m',
+  # prettier --check names each file it would change
+  '%W[warn] %f',
+  # eslint's stylish output: a file, then its problems
+  '\s\+%l:%c\s\+%trror\s\+%m\s\s\+%n',
+  '\s\+%l:%c\s\+%tarning\s\+%m\s\s\+%n',
+  '\s\+%l:%c\s\+%trror\s\+%m',
+  '\s\+%l:%c\s\+%tarning\s\+%m',
+  # file:line:col: message, as most other tools print it
+  '%f:%l:%c: %trror: %m',
+  '%f:%l:%c: %tarning: %m',
+  # oxlint's and vp lint's default output: file:line:col: error rule: message
+  '%f:%l:%c: %trror %m',
+  '%f:%l:%c: %tarning %m',
+  '%f:%l:%c: %m',
+  '%P%f',
+]
+# turbo prints package:task: before each line, pnpm -r and --parallel dir task:.
+prefixes = [
+  '^(?P<package>[@\w./-]+):[\w:.-]+: (?P<line>.*)$',
+  '^(?P<dir>[\w@.+-]+(?:/[\w@.+-]+)*) [\w:.-]+: (?P<line>.*)$',
+]
+names = { file = "**/package.json", regex = '"name"\s*:\s*"(?P<name>[^"]+)"' }
+
+# The packages pnpm-workspace.yaml or package.json's workspaces name.
+[workspace]
+manifest = "package.json"
+members = [
+  { file = "pnpm-workspace.yaml", block = '(?m)^packages:[ \t]*\n((?:[ \t]+-.*\n?|[ \t]*#.*\n?)*)', item = '''(?m)^[ \t]+-[ \t]*["']?([^"'\n#]+?)["']?[ \t]*(?:#.*)?$''' },
+  { file = "package.json", block = '"workspaces"\s*:\s*(?:\{[^}]*?"packages"\s*:\s*)?\[([^\]]*)\]', item = '"([^"]+)"' },
+]
+
+# The package manager: the one packageManager pins, else the one whose lockfile is there, else npm.
+[[let.pm]]
+when.contains = [{ file = "package.json", regex = '"packageManager"\s*:\s*"pnpm@' }]
+name = "pnpm"
+run = "pnpm run"
+exec = "pnpm exec "
+exec_in = "pnpm exec "
+workspace_test = "pnpm --dir {dir} run test"
+
+[[let.pm]]
+when.contains = [{ file = "package.json", regex = '"packageManager"\s*:\s*"yarn@1\.' }]
+name = "yarn"
+run = "yarn run"
+exec = "yarn "
+exec_in = "yarn "
+workspace_test = "yarn --cwd {dir} run test"
+
+[[let.pm]]
+when.contains = [{ file = "package.json", regex = '"packageManager"\s*:\s*"yarn@' }]
+name = "yarn-berry"
+run = "yarn run"
+exec = "yarn "
+exec_in = "yarn "
+workspace_test = "yarn --cwd {dir} run test"
+
+[[let.pm]]
+when.contains = [{ file = "package.json", regex = '"packageManager"\s*:\s*"npm@' }]
+name = "npm"
+run = "npm run"
+exec = "node_modules/.bin/"
+exec_in = "npx --no-install "
+workspace_test = "npm test -w {dir} --"
+
+[[let.pm]]
+when.contains = [{ file = "package.json", regex = '"packageManager"\s*:\s*"bun@' }]
+name = "bun"
+run = "bun run"
+exec = "node_modules/.bin/"
+exec_in = "npx --no-install "
+workspace_test = "bun run --cwd {dir} test"
+
+[[let.pm]]
+when.exists = ["pnpm-lock.yaml"]
+name = "pnpm"
+run = "pnpm run"
+exec = "pnpm exec "
+exec_in = "pnpm exec "
+workspace_test = "pnpm --dir {dir} run test"
+
+[[let.pm]]
+when = { exists = [
+  "yarn.lock",
+], any = [
+  { exists = [
+    ".yarnrc.yml",
+  ] },
+  { contains = [
+    { file = "yarn.lock", regex = '__metadata:' },
+  ] },
+] }
+name = "yarn-berry"
+run = "yarn run"
+exec = "yarn "
+exec_in = "yarn "
+workspace_test = "yarn --cwd {dir} run test"
+
+[[let.pm]]
+when.exists = ["yarn.lock"]
+name = "yarn"
+run = "yarn run"
+exec = "yarn "
+exec_in = "yarn "
+workspace_test = "yarn --cwd {dir} run test"
+
+[[let.pm]]
+when.exists = ["bun.lock", "bun.lockb"]
+name = "bun"
+run = "bun run"
+exec = "node_modules/.bin/"
+exec_in = "npx --no-install "
+workspace_test = "bun run --cwd {dir} test"
+
+[[let.pm]]
+name = "npm"
+run = "npm run"
+exec = "node_modules/.bin/"
+exec_in = "npx --no-install "
+workspace_test = "npm test -w {dir} --"
+
+# The install: online into the manager's cache, then offline from it, frozen when there is a lockfile.
+[[let.install]]
+when = { vars = { "pm.name" = "pnpm" }, exists = ["pnpm-lock.yaml"] }
+# pnpm fetches a lockfile's packages into its store without installing them.
+download = "pnpm fetch"
+offline = "pnpm install --offline --frozen-lockfile --ignore-scripts --ignore-pnpmfile"
+
+[[let.install]]
+when.vars = { "pm.name" = "pnpm" }
+download = "pnpm install --ignore-scripts --ignore-pnpmfile"
+offline = "pnpm install --offline --ignore-scripts --ignore-pnpmfile"
+
+[[let.install]]
+when = { vars = { "pm.name" = "yarn" }, exists = ["yarn.lock"] }
+download = "yarn install --frozen-lockfile --ignore-scripts --non-interactive"
+offline = "yarn install --offline --frozen-lockfile --ignore-scripts --non-interactive"
+
+[[let.install]]
+when.vars = { "pm.name" = "yarn" }
+download = "yarn install --ignore-scripts --non-interactive"
+offline = "yarn install --offline --ignore-scripts --non-interactive"
+
+[[let.install]]
+when = { vars = { "pm.name" = "yarn-berry" }, exists = ["yarn.lock"] }
+download = "yarn install --immutable --mode=skip-build"
+offline = "YARN_ENABLE_NETWORK=0 yarn install --immutable --mode=skip-build"
+
+[[let.install]]
+when.vars = { "pm.name" = "yarn-berry" }
+download = "yarn install --mode=skip-build"
+offline = "YARN_ENABLE_NETWORK=0 yarn install --mode=skip-build"
+
+[[let.install]]
+when = { vars = { "pm.name" = "bun" }, exists = ["bun.lock", "bun.lockb"] }
+download = "bun install --frozen-lockfile --ignore-scripts"
+offline = "bun install --offline --frozen-lockfile --ignore-scripts"
+
+[[let.install]]
+when.vars = { "pm.name" = "bun" }
+download = "bun install --ignore-scripts"
+offline = "bun install --offline --ignore-scripts"
+
+[[let.install]]
+when.exists = ["package-lock.json", "npm-shrinkwrap.json"]
+download = "npm ci --ignore-scripts --no-audit --no-fund"
+offline = "npm ci --offline --ignore-scripts --no-audit --no-fund"
+
+[[let.install]]
+download = "npm install --ignore-scripts --no-audit --no-fund"
+offline = "npm install --offline --ignore-scripts --no-audit --no-fund"
+
+[[setup]]
+id = "download"
+run = "{install.download}"
+phase = "online"
+key = [
+  "**/package.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "bun.lock",
+  "bun.lockb",
+  "pnpm-workspace.yaml",
+  ".npmrc",
+  ".yarnrc",
+  ".yarnrc.yml",
+  "bunfig.toml",
+  "patches/**",
+  ".yarn/releases/**",
+  ".yarn/plugins/**",
+  ".yarn/patches/**",
+]
+
+[[setup]]
+id = "install"
+run = "{install.offline}"
+key = [
+  "**/package.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "bun.lock",
+  "bun.lockb",
+  "pnpm-workspace.yaml",
+  ".npmrc",
+  ".yarnrc",
+  ".yarnrc.yml",
+  "bunfig.toml",
+  "patches/**",
+  ".yarn/releases/**",
+  ".yarn/plugins/**",
+  ".yarn/patches/**",
+]
+
+# SvelteKit writes the tsconfig its packages extend.
+[[setup]]
+id = "svelte-kit sync {dir}"
+run = "{pm.exec_in}svelte-kit sync"
+each = { file = "package.json", regex = '"@sveltejs/kit"\s*:' }
+
+# tsc, when the repo has TypeScript and no command of its own type-checks: -b for project references.
+[[checks]]
+id = "typecheck"
+run = "{pm.exec}tsc -b --pretty false"
+covered_by = '\b(?:tsc|tsgo|tsrs|svelte-check|vue-tsc|astro check|typecheck|type-check)\b|--workspaces|\s-ws\b|\s-r\b|--recursive|--parallel|\bturbo\b|\bnx\b|--filter|\s-F\s'
+[checks.when]
+exists = ["tsconfig.json"]
+contains = [{ file = "tsconfig.json", regex = '"references"\s*:\s*\[\s*\{' }]
+any = [
+  { contains = [
+    { file = "**/package.json", regex = '"typescript"\s*:' },
+  ] },
+  { contains = [
+    { file = [
+      "pnpm-lock.yaml",
+      "yarn.lock",
+      "package-lock.json",
+      "bun.lock",
+    ], regex = 'typescript@\d|"node_modules/typescript"' },
+  ] },
+]
+
+[[checks]]
+id = "typecheck"
+run = "{pm.exec}tsc --noEmit -p tsconfig.json --pretty false"
+covered_by = '\b(?:tsc|tsgo|tsrs|svelte-check|vue-tsc|astro check|typecheck|type-check)\b|--workspaces|\s-ws\b|\s-r\b|--recursive|--parallel|\bturbo\b|\bnx\b|--filter|\s-F\s'
+[checks.when]
+exists = ["tsconfig.json"]
+any = [
+  { contains = [
+    { file = "**/package.json", regex = '"typescript"\s*:' },
+  ] },
+  { contains = [
+    { file = [
+      "pnpm-lock.yaml",
+      "yarn.lock",
+      "package-lock.json",
+      "bun.lock",
+    ], regex = 'typescript@\d|"node_modules/typescript"' },
+  ] },
+]
+
+# A linter by its config, when the repo has no lint command.
+[[checks]]
+id = "lint"
+run = "{pm.exec}eslint ."
+when.exists = [
+  "eslint.config.js",
+  "eslint.config.mjs",
+  "eslint.config.cjs",
+  "eslint.config.ts",
+  "eslint.config.mts",
+  "eslint.config.cts",
+]
+
+[[checks]]
+id = "lint"
+run = "{pm.exec}eslint . --ext .js,.jsx,.ts,.tsx,.mjs,.cjs,.mts,.cts"
+when.exists = [
+  ".eslintrc",
+  ".eslintrc.js",
+  ".eslintrc.cjs",
+  ".eslintrc.json",
+  ".eslintrc.yml",
+  ".eslintrc.yaml",
+]
+
+[[checks]]
+id = "lint"
+run = "{pm.exec}biome lint --reporter=github ."
+when.exists = ["biome.json", "biome.jsonc"]
+
+[[checks]]
+id = "lint"
+run = "{pm.exec}oxlint --format github"
+when.any = [
+  { exists = [
+    ".oxlintrc.json",
+  ] },
+  { contains = [
+    { file = "package.json", regex = '"oxlint"\s*:' },
+  ] },
+]
+
+# The runner the repo's tests use, from each test file's package.
+[[tests]]
+runner = true
+run = "cd {dir} && {pm.exec_in}vitest run --reporter=default --reporter=junit --outputFile.junit={report} {files} {filter}"
+when.contains = [{ file = "package.json", regex = '\bvitest\b' }]
+per_package = true
+filter_flag = "-t"
+format = "junit"
+
+[[tests]]
+runner = true
+run = "cd {dir} && {pm.exec_in}jest {files} {filter}"
+when.contains = [{ file = "package.json", regex = '\bjest\b' }]
+per_package = true
+filter_flag = "-t"
+format = "raw"
+
+[[tests]]
+runner = true
+run = "node{before} --test{after} --test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination={report} {files} {filter}"
+when.contains = [
+  { file = "package.json", regex = '"test"\s*:\s*"[^"]*?\bnode(?P<before>(?:\s+--?[\w-]+(?:=[^\s"]+)?)*)\s+--test\b(?P<after>(?:\s+--?[\w-]+(?:=[^\s"]+)?)*)' },
+]
+filter_flag = "--test-name-pattern"
+format = "tap"
+
+# A test script that hands off to the workspace's packages runs each package's own.
+[[tests]]
+runner = true
+run = "{pm.workspace_test} {files}"
+when.contains = [
+  { file = "package.json", regex = '"test"\s*:\s*"[^"]*(?:--workspaces|\s-ws\b|\s-r\b|--recursive|--parallel|\bturbo\b|\bnx\b|--filter|\s-F\s)' },
+]
+per_package = true
+format = "raw"

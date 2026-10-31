@@ -1,0 +1,202 @@
+# Python: a uv project (pyproject.toml, uv.lock) or requirements files, in a venv uv makes.
+priority = 30
+detect = ["pyproject.toml", "uv.lock", "requirements*.txt", "setup.py"]
+commit_only = ["setup.py", "setup.cfg"]
+
+# Python with uv, which installs other Python versions into the environment when a repo pins one,
+# and Node with npm, which the pyright wheel runs instead of downloading a Node of its own.
+image = '''
+FROM ghcr.io/astral-sh/uv:latest AS uv
+FROM node:24-slim AS node
+FROM python:3.13-slim
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+COPY --from=uv /uv /uvx /usr/local/bin/
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+  && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+ENV VIRTUAL_ENV=/env/repo/.venv PATH=/env/repo/.venv/bin:$PATH
+'''
+
+# uv's Python builds come from GitHub releases; the pyright wheel downloads pyright from npm.
+egress = [
+  "pypi.org",
+  "files.pythonhosted.org",
+  "github.com",
+  "objects.githubusercontent.com",
+  "release-assets.githubusercontent.com",
+  "codeload.github.com",
+  "registry.npmjs.org",
+  "nodejs.org",
+]
+
+[env]
+UV_PYTHON_INSTALL_DIR = "/env/home/.local/share/uv/python"
+PYTHONDONTWRITEBYTECODE = "1"
+# The tree has no .git, so packages that take their version from git get a fixed one.
+SETUPTOOLS_SCM_PRETEND_VERSION = "0.0.0"
+UV_DYNAMIC_VERSIONING_BYPASS = "0.0.0"
+
+[output]
+errorformat = [
+  # pyright and basedpyright
+  '\s%#%f:%l:%c - %trror: %m (%n)',
+  '\s%#%f:%l:%c - %trror: %m',
+  '\s%#%f:%l:%c - %tarning: %m (%n)',
+  '\s%#%f:%l:%c - %tarning: %m',
+  '\s%#%f:%l:%c - %tnformation: %m (%n)',
+  '\s%#%f:%l:%c - %tnformation: %m',
+  # mypy
+  '%f:%l: %trror: %m  [%n]',
+  '%f:%l: %trror: %m',
+  '%f:%l: %tarning: %m',
+  '%f:%l: %tote: %m',
+  '%f:%l:%c: %m',
+]
+
+# uv sync's flags: frozen with a lockfile, every package of a workspace.
+[[let.uv]]
+when = { exists = [
+  "uv.lock",
+], contains = [
+  { file = "pyproject.toml", regex = '(?m)^\[tool\.uv\.workspace\]' },
+] }
+flags = "--frozen --all-extras --all-groups --all-packages"
+
+[[let.uv]]
+when.exists = ["uv.lock"]
+flags = "--frozen --all-extras --all-groups"
+
+[[let.uv]]
+when.contains = [{ file = "pyproject.toml", regex = '(?m)^\[tool\.uv\.workspace\]' }]
+flags = "--all-extras --all-groups --all-packages"
+
+[[let.uv]]
+flags = "--all-extras --all-groups"
+
+[[setup]]
+id = "download"
+run = "uv sync {uv.flags} --no-install-local"
+phase = "online"
+when.exists = ["pyproject.toml", "uv.lock"]
+key = ["**/pyproject.toml", "uv.lock", ".python-version", "requirements*.txt"]
+
+# Building the project against its manifests alone fails, but on the way uv caches the build
+# backends that the offline sync builds it with.
+[[setup]]
+id = "build backends"
+run = "uv sync {uv.flags} >/dev/null 2>&1 || true"
+phase = "online"
+when.exists = ["pyproject.toml", "uv.lock"]
+key = ["**/pyproject.toml", "uv.lock", ".python-version", "requirements*.txt"]
+
+[[setup]]
+id = "download"
+run = 'uv venv && uv pip install $(for f in requirements*.txt; do printf -- "-r %s " "$f"; done)'
+phase = "online"
+when.absent = ["pyproject.toml", "uv.lock"]
+key = ["requirements*.txt", ".python-version"]
+
+# The pyright wheel downloads pyright itself on its first run.
+[[setup]]
+id = "pyright"
+run = ".venv/bin/pyright --version"
+phase = "online"
+key = ["**/pyproject.toml", "uv.lock", ".python-version", "requirements*.txt"]
+[setup.when]
+contains = [
+  { file = [
+    "pyproject.toml",
+    "uv.lock",
+    "requirements*.txt",
+  ], regex = '''(?m)(?:^|[\s"'=])pyright(?:[\s"'=<>~!\[;,]|$)''' },
+]
+
+[[setup]]
+id = "install"
+run = "uv sync --offline {uv.flags}"
+when.exists = ["pyproject.toml", "uv.lock"]
+key = [
+  "**/pyproject.toml",
+  "uv.lock",
+  ".python-version",
+  "requirements*.txt",
+  "setup.py",
+  "setup.cfg",
+  "mypy.ini",
+]
+
+[[setup]]
+id = "install"
+run = 'uv venv --offline && uv pip install --offline $(for f in requirements*.txt; do printf -- "-r %s " "$f"; done)'
+when.absent = ["pyproject.toml", "uv.lock"]
+key = ["requirements*.txt", ".python-version", "setup.py", "setup.cfg", "mypy.ini"]
+
+[[checks]]
+id = "typecheck"
+run = ".venv/bin/basedpyright"
+when.contains = [
+  { file = [
+    "pyproject.toml",
+    "uv.lock",
+    "requirements*.txt",
+  ], regex = '''(?m)(?:^|[\s"'=])basedpyright(?:[\s"'=<>~!\[;,]|$)''' },
+]
+
+[[checks]]
+id = "typecheck"
+run = ".venv/bin/pyright"
+when.contains = [
+  { file = [
+    "pyproject.toml",
+    "uv.lock",
+    "requirements*.txt",
+  ], regex = '''(?m)(?:^|[\s"'=])pyright(?:[\s"'=<>~!\[;,]|$)''' },
+]
+
+[[checks]]
+id = "mypy"
+role = "typecheck"
+run = ".venv/bin/mypy"
+[checks.when]
+contains = [
+  { file = [
+    "pyproject.toml",
+    "uv.lock",
+    "requirements*.txt",
+  ], regex = '''(?m)(?:^|[\s"'=])mypy(?:[\s"'=<>~!\[;,]|$)''' },
+]
+any = [
+  { exists = [
+    "mypy.ini",
+  ] },
+  { contains = [
+    { file = "pyproject.toml", regex = '(?m)^\[tool\.mypy\]' },
+  ] },
+]
+
+[[checks]]
+id = "lint"
+run = ".venv/bin/ruff check --output-format sarif ."
+format = "sarif"
+when.contains = [
+  { file = [
+    "pyproject.toml",
+    "uv.lock",
+    "requirements*.txt",
+  ], regex = '''(?m)(?:^|[\s"'=])ruff(?:[\s"'=<>~!\[;,]|$)''' },
+]
+
+[[tests]]
+run = ".venv/bin/python -m pytest -q -p no:cacheprovider --junitxml={report} {files} {filter}"
+when.contains = [
+  { file = [
+    "pyproject.toml",
+    "uv.lock",
+    "requirements*.txt",
+  ], regex = '''(?m)(?:^|[\s"'=])pytest(?:[\s"'=<>~!\[;,]|$)''' },
+]
+filter_flag = "-k"
+format = "junit"

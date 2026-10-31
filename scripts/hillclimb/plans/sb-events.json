@@ -1,0 +1,273 @@
+{
+  "task": "sb-events",
+  "runId": "8ed735",
+  "recordedWallMs": 40485.40370899998,
+  "rounds": [
+    [
+      {
+        "name": "clone_repo",
+        "args": {
+          "repo": "maximilionai/dorbs-sandbox"
+        }
+      }
+    ],
+    [
+      {
+        "name": "list_files",
+        "args": {}
+      },
+      {
+        "name": "read_file",
+        "args": {
+          "path": "package.json"
+        }
+      }
+    ],
+    [
+      {
+        "name": "read_file",
+        "args": {
+          "path": "tsconfig.json"
+        }
+      },
+      {
+        "name": "read_file",
+        "args": {
+          "path": "src/index.ts"
+        }
+      },
+      {
+        "name": "read_file",
+        "args": {
+          "path": "README.md"
+        }
+      }
+    ],
+    [
+      {
+        "name": "write_file",
+        "args": {
+          "path": "src/events.ts",
+          "content": "export type Listener<Payload> = (payload: Payload) => void;\n\nexport type Unsubscribe = () => void;\n\nexport interface Emitter<Events extends Record<string, unknown>> {\n  on<Name extends keyof Events & string>(\n    name: Name,\n    listener: Listener<Events[Name]>,\n  ): Unsubscribe;\n  off<Name extends keyof Events & string>(\n    name: Name,\n    listener: Listener<Events[Name]>,\n  ): void;\n  emit<Name extends keyof Events & string>(\n    name: Name,\n    payload: Events[Name],\n  ): void;\n}\n\nexport function createEmitter<\n  Events extends Record<string, unknown>,\n>(): Emitter<Events> {\n  const listeners = new Map<keyof Events & string, Set<Listener<never>>>();\n\n  const on: Emitter<Events>['on'] = (name, listener) => {\n    let set = listeners.get(name);\n    if (set === undefined) {\n      set = new Set();\n      listeners.set(name, set);\n    }\n    const stored = listener as Listener<never>;\n    set.add(stored);\n    let active = true;\n    return () => {\n      if (!active) {\n        return;\n      }\n      active = false;\n      const current = listeners.get(name);\n      if (current === undefined) {\n        return;\n      }\n      current.delete(stored);\n      if (current.size === 0) {\n        listeners.delete(name);\n      }\n    };\n  };\n\n  const off: Emitter<Events>['off'] = (name, listener) => {\n    const set = listeners.get(name);\n    if (set === undefined) {\n      return;\n    }\n    set.delete(listener as Listener<never>);\n    if (set.size === 0) {\n      listeners.delete(name);\n    }\n  };\n\n  const emit: Emitter<Events>['emit'] = (name, payload) => {\n    const set = listeners.get(name);\n    if (set === undefined) {\n      return;\n    }\n    for (const listener of [...set]) {\n      try {\n        (listener as Listener<Events[typeof name]>)(payload);\n      } catch {\n        // A throwing listener must not prevent the others from running.\n      }\n    }\n  };\n\n  return { on, off, emit };\n}\n"
+        }
+      }
+    ],
+    [
+      {
+        "name": "write_file",
+        "args": {
+          "content": "import assert from 'node:assert/strict';\nimport { describe, it } from 'node:test';\n\nimport { createEmitter } from './events';\n\ntype Events = {\n  ping: { id: number };\n  message: string;\n};\n\ndescribe('createEmitter', () => {\n  it('calls listeners with the typed payload', () => {\n    const emitter = createEmitter<Events>();\n    const seen: number[] = [];\n    emitter.on('ping', (payload) => {\n      seen.push(payload.id);\n    });\n\n    emitter.emit('ping', { id: 1 });\n    emitter.emit('ping', { id: 2 });\n\n    assert.deepEqual(seen, [1, 2]);\n  });\n\n  it('only notifies listeners registered for that event', () => {\n    const emitter = createEmitter<Events>();\n    const messages: string[] = [];\n    emitter.on('message', (payload) => {\n      messages.push(payload);\n    });\n\n    emitter.emit('ping', { id: 1 });\n\n    assert.deepEqual(messages, []);\n  });\n\n  it('returns an unsubscribe function from on', () => {\n    const emitter = createEmitter<Events>();\n    let calls = 0;\n    const unsubscribe = emitter.on('ping', () => {\n      calls += 1;\n    });\n\n    emitter.emit('ping', { id: 1 });\n    unsubscribe();\n    emitter.emit('ping', { id: 2 });\n\n    assert.equal(calls, 1);\n  });\n\n  it('unsubscribing twice is safe', () => {\n    const emitter = createEmitter<Events>();\n    let calls = 0;\n    const unsubscribe = emitter.on('ping', () => {\n      calls += 1;\n    });\n\n    unsubscribe();\n    unsubscribe();\n    emitter.emit('ping', { id: 1 });\n\n    assert.equal(calls, 0);\n  });\n\n  it('removes a listener with off', () => {\n    const emitter = createEmitter<Events>();\n    let calls = 0;\n    const listener = (): void => {\n      calls += 1;\n    };\n\n    emitter.on('ping', listener);\n    emitter.emit('ping', { id: 1 });\n    emitter.off('ping', listener);\n    emitter.emit('ping', { id: 2 });\n\n    assert.equal(calls, 1);\n  });\n\n  it('keeps other listeners running when one throws', () => {\n    const emitter = createEmitter<Events>();\n    const seen: string[] = [];\n\n    emitter.on('ping', () => {\n      seen.push('first');\n      throw new Error('boom');\n    });\n    emitter.on('ping', () => {\n      seen.push('second');\n    });\n    emitter.on('ping', () => {\n      seen.push('third');\n    });\n\n    assert.doesNotThrow(() => {\n      emitter.emit('ping', { id: 1 });\n    });\n    assert.deepEqual(seen, ['first', 'second', 'third']);\n  });\n\n  it('notifies a listener added during emit only on the next emit', () => {\n    const emitter = createEmitter<Events>();\n    const seen: string[] = [];\n\n    emitter.on('ping', () => {\n      seen.push('outer');\n      emitter.on('ping', () => {\n        seen.push('inner');\n      });\n    });\n\n    emitter.emit('ping', { id: 1 });\n    assert.deepEqual(seen, ['outer']);\n\n    emitter.emit('ping', { id: 2 });\n    assert.deepEqual(seen, ['outer', 'outer', 'inner']);\n  });\n});\n",
+          "path": "src/events.test.ts"
+        }
+      }
+    ],
+    [
+      {
+        "name": "edit_file",
+        "args": {
+          "path": "src/events.test.ts",
+          "oldText": "  it('notifies a listener added during emit only on the next emit', () => {",
+          "newText": "  it('notifies a listener added during an emit only on the next emit', () => {"
+        }
+      },
+      {
+        "name": "write_file",
+        "args": {
+          "path": "package.json",
+          "content": "{\n  \"name\": \"dorbs-sandbox\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {\n    \"typecheck\": \"tsc --noEmit\",\n    \"test\": \"node --test --experimental-strip-types \\\"src/**/*.test.ts\\\"\"\n  },\n  \"devDependencies\": {\n    \"typescript\": \"^5.6.0\"\n  }\n}\n"
+        }
+      }
+    ],
+    [
+      {
+        "name": "check",
+        "args": {}
+      }
+    ],
+    [
+      {
+        "name": "write_file",
+        "args": {
+          "content": "{\n  \"compilerOptions\": {\n    \"strict\": true,\n    \"noEmit\": true,\n    \"target\": \"es2022\",\n    \"module\": \"nodenext\",\n    \"moduleResolution\": \"nodenext\",\n    \"esModuleInterop\": true,\n    \"types\": [\"node\"]\n  },\n  \"include\": [\"src\"]\n}\n",
+          "path": "tsconfig.json"
+        }
+      },
+      {
+        "name": "check",
+        "args": {}
+      }
+    ],
+    [
+      {
+        "name": "grep",
+        "args": {
+          "pattern": "\"version\"",
+          "path": "node_modules/@types/node/package.json"
+        }
+      }
+    ],
+    [
+      {
+        "name": "list_files",
+        "args": {
+          "path": "node_modules/@types"
+        }
+      }
+    ],
+    [
+      {
+        "name": "grep",
+        "args": {
+          "path": "node_modules/.package-lock.json",
+          "pattern": "@types/node|typescript"
+        }
+      }
+    ],
+    [
+      {
+        "name": "list_files",
+        "args": {
+          "path": "node_modules"
+        }
+      }
+    ],
+    [
+      {
+        "name": "list_files",
+        "args": {
+          "path": "."
+        }
+      }
+    ],
+    [
+      {
+        "name": "write_file",
+        "args": {
+          "content": "{\n  \"compilerOptions\": {\n    \"strict\": true,\n    \"noEmit\": true,\n    \"target\": \"es2022\",\n    \"module\": \"esnext\",\n    \"moduleResolution\": \"bundler\",\n    \"esModuleInterop\": true,\n    \"verbatimModuleSyntax\": true,\n    \"skipLibCheck\": true,\n    \"types\": [\"node\"]\n  },\n  \"include\": [\"src\"]\n}\n",
+          "path": "tsconfig.json"
+        }
+      },
+      {
+        "name": "write_file",
+        "args": {
+          "content": "{\n  \"name\": \"dorbs-sandbox\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {\n    \"typecheck\": \"tsc --noEmit\",\n    \"test\": \"node --test --experimental-strip-types \\\"src/**/*.test.ts\\\"\"\n  },\n  \"devDependencies\": {\n    \"@types/node\": \"^22.7.0\",\n    \"typescript\": \"^5.6.0\"\n  }\n}\n",
+          "path": "package.json"
+        }
+      }
+    ],
+    [
+      {
+        "name": "check",
+        "args": {}
+      }
+    ],
+    [
+      {
+        "name": "test",
+        "args": {
+          "files": ["src/events.test.ts"]
+        }
+      }
+    ],
+    [
+      {
+        "name": "edit_file",
+        "args": {
+          "newText": "import { createEmitter } from './events.ts';",
+          "oldText": "import { createEmitter } from './events';",
+          "path": "src/events.test.ts"
+        }
+      },
+      {
+        "name": "edit_file",
+        "args": {
+          "newText": "    \"moduleResolution\": \"bundler\",\n    \"allowImportingTsExtensions\": true,",
+          "oldText": "    \"moduleResolution\": \"bundler\",",
+          "path": "tsconfig.json"
+        }
+      }
+    ],
+    [
+      {
+        "name": "check",
+        "args": {}
+      },
+      {
+        "name": "test",
+        "args": {
+          "files": ["src/events.test.ts"]
+        }
+      }
+    ],
+    [
+      {
+        "name": "test",
+        "args": {}
+      },
+      {
+        "name": "grep",
+        "args": {
+          "pattern": "\\bany\\b",
+          "path": "src"
+        }
+      }
+    ],
+    [
+      {
+        "name": "git",
+        "args": {
+          "args": "checkout -b dorbs/hc-sb-events-8ed735"
+        }
+      }
+    ],
+    [
+      {
+        "name": "git",
+        "args": {
+          "args": "add src/events.ts src/events.test.ts package.json tsconfig.json"
+        }
+      }
+    ],
+    [
+      {
+        "name": "git",
+        "args": {
+          "args": "commit -m \"Add typed event emitter with tests\""
+        }
+      }
+    ]
+  ],
+  "outcomes": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "red",
+    "ok",
+    "red",
+    "failed",
+    "failed",
+    "failed",
+    "failed",
+    "ok",
+    "ok",
+    "ok",
+    "green",
+    "red",
+    "ok",
+    "ok",
+    "green",
+    "green",
+    "green",
+    "ok",
+    "ok",
+    "ok",
+    "ok"
+  ]
+}

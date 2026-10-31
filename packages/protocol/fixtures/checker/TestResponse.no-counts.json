@@ -1,0 +1,12 @@
+{
+  "_tag": "TestResult",
+  "envKey": "k",
+  "durationMs": 430,
+  "setupMs": 0,
+  "overlayMs": 17,
+  "command": "cargo test --workspace --offline --locked 'routing::tests::fallback'",
+  "status": "timed_out",
+  "exitCode": null,
+  "output": "",
+  "truncated": true
+}

@@ -1,0 +1,7 @@
+{
+  "_tag": "Rejected",
+  "reason": {
+    "_tag": "UnsafePath",
+    "paths": ["link/a.ts"]
+  }
+}

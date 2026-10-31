@@ -1,0 +1,6 @@
+{
+  "_tag": "SetupFailed",
+  "envKey": "a0cf84ff",
+  "step": "install",
+  "output": "timed out after 20 minutes\nnpm ERR! network"
+}

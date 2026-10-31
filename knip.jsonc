@@ -1,0 +1,36 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  // Exported types are part of the protocol contract before apps consume them.
+  "rules": { "types": "off", "nsTypes": "off" },
+  "workspaces": {
+    ".": {
+      // Run by hand against the checker service; the escape probe is sent to it as a test file. The replay
+      // scripts run by hand against the hc stage.
+      "entry": [
+        "scripts/checker.ts",
+        "scripts/checker-accept.ts",
+        "scripts/checkerEscapeProbe.ts",
+        "scripts/hillclimb/plans.ts",
+        "scripts/hillclimb/replay.ts",
+      ],
+    },
+    "packages/*": {
+      "includeEntryExports": true,
+    },
+    "packages/protocol": {
+      "includeEntryExports": true,
+      "entry": ["scripts/vendor-acp-v1.ts"],
+    },
+    "apps/agent-worker": {
+      // alchemy dev loads alchemy.run.ts and the vitest plugin loads test/worker.ts, both by path;
+      // vitest.config.ts aliases @opencode/sdk/workerd to test/opencode-native.ts.
+      "entry": ["alchemy.run.ts", "src/worker.ts", "test/worker.ts", "test/opencode-native.ts"],
+      // cloudflare:workers and cloudflare:test are workerd built-ins, not packages.
+      "ignoreDependencies": ["cloudflare"],
+    },
+    "packages/oxlint-plugin": {
+      // oxlint loads index.ts by path from vite.config.ts and reads its default export.
+      "includeEntryExports": false,
+    },
+  },
+}

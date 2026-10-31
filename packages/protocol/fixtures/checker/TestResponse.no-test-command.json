@@ -1,0 +1,7 @@
+{
+  "_tag": "Rejected",
+  "reason": {
+    "_tag": "NoTestCommand",
+    "reason": "The service found no test command for this repo."
+  }
+}

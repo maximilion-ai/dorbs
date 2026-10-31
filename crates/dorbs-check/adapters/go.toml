@@ -1,0 +1,56 @@
+# Go: a module, built and vetted offline from what go mod download downloaded.
+priority = 10
+detect = ["go.mod"]
+
+# Go without cgo. The module cache and build cache live in the environment.
+image = '''
+FROM golang:1-alpine
+RUN apk add --no-cache git
+ENV CGO_ENABLED=0
+'''
+
+# The Go module proxy redirects downloads to its bucket.
+egress = [
+  "proxy.golang.org",
+  "sum.golang.org",
+  "storage.googleapis.com",
+  "dl.google.com",
+  "github.com",
+  "codeload.github.com",
+]
+
+[env]
+GOPATH = "/env/home/go"
+GOCACHE = "/env/home/.cache/go-build"
+GOTOOLCHAIN = "auto"
+# Go makes its module cache read-only otherwise, and the service could not delete it on eviction.
+GOFLAGS = "-modcacherw"
+
+[output]
+errorformat = [
+  # go vet names a type error it hit with vet: before it
+  '%Evet: %f:%l:%c: %m',
+  '%f:%l:%c: %m',
+]
+
+[[setup]]
+id = "download"
+run = "go mod download"
+phase = "online"
+key = ["**/go.mod", "**/go.sum", "**/go.work", "**/go.work.sum"]
+
+[[checks]]
+id = "typecheck"
+run = "go build ./..."
+
+# go vet's findings are warnings; the build errors it meets are errors.
+[[checks]]
+id = "lint"
+run = "go vet ./..."
+errorformat = ['%Evet: %f:%l:%c: %m', '%W%f:%l:%c: %m']
+
+[[tests]]
+run = "go test -v {dirs} {filter}"
+all = "./..."
+filter_flag = "-run"
+format = "raw"

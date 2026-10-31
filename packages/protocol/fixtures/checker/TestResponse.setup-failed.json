@@ -1,0 +1,6 @@
+{
+  "_tag": "SetupFailed",
+  "envKey": "k",
+  "step": "service",
+  "output": "git checkout failed"
+}

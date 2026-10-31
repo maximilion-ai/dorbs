@@ -1,0 +1,36 @@
+{
+  "name": "@dorbs/protocol",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./acp": {
+      "types": "./src/acp.ts",
+      "import": "./src/acp.ts"
+    },
+    "./checker": {
+      "types": "./src/checker.ts",
+      "import": "./src/checker.ts"
+    },
+    "./github-app": {
+      "types": "./src/githubApp.ts",
+      "import": "./src/githubApp.ts"
+    },
+    "./jsonrpc": {
+      "types": "./src/jsonrpc.ts",
+      "import": "./src/jsonrpc.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsrs --noEmit",
+    "test": "vp test run --config ../../vite.config.ts --dir ."
+  },
+  "dependencies": {
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "@types/node": "catalog:",
+    "tsrs": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}

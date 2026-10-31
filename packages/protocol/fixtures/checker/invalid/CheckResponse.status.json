@@ -1,0 +1,75 @@
+{
+  "_tag": "CheckResult",
+  "envKey": "66db68a17b69",
+  "durationMs": 3038,
+  "setupMs": 0,
+  "overlayMs": 8,
+  "scope": "repo",
+  "complete": false,
+  "checks": [
+    {
+      "id": "typecheck",
+      "command": "pnpm run typecheck",
+      "status": "ok",
+      "exitCode": 2,
+      "durationMs": 3001,
+      "diagnostics": [
+        {
+          "path": "src/a.ts",
+          "range": {
+            "start": {
+              "line": 0,
+              "character": 13
+            },
+            "end": {
+              "line": 0,
+              "character": 13
+            }
+          },
+          "severity": 1,
+          "code": "TS2322",
+          "source": "typecheck",
+          "message": "Type 'string' is not assignable to type 'number'.\n  more"
+        },
+        {
+          "path": "src/b.ts",
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 0
+            },
+            "end": {
+              "line": 4,
+              "character": 2
+            }
+          },
+          "severity": 4,
+          "source": "typecheck",
+          "message": "hint"
+        }
+      ],
+      "output": ["Found 1 error."],
+      "truncated": false
+    },
+    {
+      "id": "lint",
+      "command": "pnpm run lint",
+      "status": "timed_out",
+      "exitCode": null,
+      "durationMs": 300000,
+      "diagnostics": [],
+      "output": [],
+      "truncated": true
+    },
+    {
+      "id": "fmt",
+      "command": "prettier --check 'src/a.ts'",
+      "status": "skipped",
+      "exitCode": null,
+      "durationMs": 0,
+      "diagnostics": [],
+      "output": ["No changed files under this check's directory."],
+      "truncated": false
+    }
+  ]
+}

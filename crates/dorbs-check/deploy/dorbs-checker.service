@@ -1,0 +1,17 @@
+# systemd --user unit for the checker on its Linux host. Install with:
+#   cp dorbs-checker.service ~/.config/systemd/user/ && systemctl --user enable --now dorbs-checker
+[Unit]
+Description=dorbs checker: static checks and tests in warm Docker environments
+After=docker.service
+Wants=docker.service
+
+[Service]
+EnvironmentFile=%h/.config/dorbs/checker.env
+ExecStart=%h/dorbs-checker/bin/start.sh
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

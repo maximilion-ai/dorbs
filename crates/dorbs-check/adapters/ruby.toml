@@ -1,0 +1,74 @@
+# Ruby: a Gemfile, installed with bundler into the environment's home.
+priority = 15
+detect = ["Gemfile"]
+ignore = ["vendor/**", ".bundle/**"]
+commit_only = [".bundle/**"]
+
+# Ruby with a compiler for gems' native extensions.
+image = '''
+FROM ruby:3.4-slim
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends build-essential git ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+'''
+
+egress = ["rubygems.org", "index.rubygems.org"]
+
+[env]
+BUNDLE_PATH = "/env/home/.bundle"
+BUNDLE_APP_CONFIG = "/env/home/.bundle-config"
+GEM_HOME = "/env/home/.gem"
+
+[output]
+errorformat = [
+  # rubocop --format emacs: file:line:col: severity: [Correctable] Cop/Name: message
+  '%E%f:%l:%c: F: [Correctable] %n: %m',
+  '%E%f:%l:%c: F: %n: %m',
+  '%E%f:%l:%c: E: [Correctable] %n: %m',
+  '%E%f:%l:%c: E: %n: %m',
+  '%W%f:%l:%c: W: [Correctable] %n: %m',
+  '%W%f:%l:%c: W: %n: %m',
+  '%I%f:%l:%c: C: [Correctable] %n: %m',
+  '%I%f:%l:%c: C: %n: %m',
+  '%I%f:%l:%c: R: [Correctable] %n: %m',
+  '%I%f:%l:%c: R: %n: %m',
+  # ruby -wc: prism's syntax errors come with a frame of the code, each line holding a |
+  '%Eruby: %f:%l: %m',
+  '%+C%.%#|%.%#',
+  '%f:%l: %tarning: %m',
+  '%f:%l: %m',
+]
+
+# Bundler reads a gemspec, which reads the gem's version file, so the download sees those too.
+[[setup]]
+id = "download"
+run = "bundle install --jobs 4"
+phase = "online"
+key = ["Gemfile", "Gemfile.lock", "*.gemspec", ".ruby-version", "lib/**/version.rb"]
+
+[[setup]]
+id = "install"
+run = "bundle install --local"
+key = ["Gemfile", "Gemfile.lock", "*.gemspec", ".ruby-version", "lib/**/version.rb"]
+
+# Ruby has no type checker of its own; its parser finds what does not parse, and -w what looks wrong.
+# Fixtures are often templates, not Ruby.
+[[checks]]
+id = "typecheck"
+run = "find . -name '*.rb' -not -path './vendor/*' -not -path './.bundle/*' -not -path '*/fixtures/*' -print0 | xargs -0 -n 1 ruby -wc > /dev/null"
+
+[[checks]]
+id = "lint"
+run = "bundle exec rubocop --format emacs"
+when.contains = [{ file = ["Gemfile", "Gemfile.lock"], regex = '\brubocop\b' }]
+
+[[tests]]
+run = "bundle exec rspec {files} {filter}"
+when.contains = [{ file = ["Gemfile", "Gemfile.lock"], regex = '\brspec\b' }]
+filter_flag = "-e"
+format = "raw"
+
+[[tests]]
+run = "bundle exec rake test"
+when.exists = ["Rakefile"]
+format = "raw"

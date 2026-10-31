@@ -1,0 +1,10 @@
+{
+  "_tag": "CheckResult",
+  "envKey": "k",
+  "durationMs": 1,
+  "setupMs": 120000,
+  "overlayMs": 0,
+  "scope": "changed",
+  "complete": true,
+  "checks": []
+}

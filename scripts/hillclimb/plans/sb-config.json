@@ -1,0 +1,208 @@
+{
+  "task": "sb-config",
+  "runId": "6a2683",
+  "recordedWallMs": 32537.82833399996,
+  "rounds": [
+    [
+      {
+        "name": "clone_repo",
+        "args": {
+          "repo": "maximilionai/dorbs-sandbox"
+        }
+      }
+    ],
+    [
+      {
+        "name": "list_files",
+        "args": {}
+      },
+      {
+        "name": "read_file",
+        "args": {
+          "path": "package.json"
+        }
+      }
+    ],
+    [
+      {
+        "name": "read_file",
+        "args": {
+          "path": "src/index.ts"
+        }
+      },
+      {
+        "name": "read_file",
+        "args": {
+          "path": "tsconfig.json"
+        }
+      },
+      {
+        "name": "read_file",
+        "args": {
+          "path": "README.md"
+        }
+      }
+    ],
+    [
+      {
+        "name": "check",
+        "args": {}
+      }
+    ],
+    [
+      {
+        "name": "write_file",
+        "args": {
+          "path": "src/config.ts",
+          "content": "export interface Config {\n  port: number;\n  debug: boolean;\n  name: string;\n}\n\nexport type ParseConfigResult =\n  | { ok: true; config: Config }\n  | { ok: false; errors: string[] };\n\nconst PORT_PATTERN = /^-?\\d+$/;\n\nexport function parseConfig(\n  env: Record<string, string | undefined>,\n): ParseConfigResult {\n  const errors: string[] = [];\n\n  const rawPort = env.PORT;\n  let port = 0;\n  if (rawPort === undefined || rawPort.trim() === '') {\n    errors.push('PORT is required');\n  } else if (!PORT_PATTERN.test(rawPort.trim())) {\n    errors.push(`PORT must be an integer, got \"${rawPort}\"`);\n  } else {\n    const parsed = Number.parseInt(rawPort.trim(), 10);\n    if (parsed < 1 || parsed > 65535) {\n      errors.push(`PORT must be between 1 and 65535, got \"${rawPort}\"`);\n    } else {\n      port = parsed;\n    }\n  }\n\n  const rawDebug = env.DEBUG;\n  let debug = false;\n  if (rawDebug !== undefined && rawDebug !== '') {\n    if (rawDebug === 'true') {\n      debug = true;\n    } else if (rawDebug === 'false') {\n      debug = false;\n    } else {\n      errors.push(`DEBUG must be \"true\" or \"false\", got \"${rawDebug}\"`);\n    }\n  }\n\n  const rawName = env.NAME;\n  let name = 'dorbs';\n  if (rawName !== undefined) {\n    name = rawName;\n  }\n\n  if (errors.length > 0) {\n    return { ok: false, errors };\n  }\n\n  return { ok: true, config: { port, debug, name } };\n}\n"
+        }
+      }
+    ],
+    [
+      {
+        "name": "write_file",
+        "args": {
+          "content": "import assert from 'node:assert/strict';\nimport { describe, it } from 'node:test';\n\nimport { parseConfig } from './config.ts';\n\ndescribe('parseConfig', () => {\n  it('parses a valid environment with defaults', () => {\n    const result = parseConfig({ PORT: '8080' });\n    assert.deepEqual(result, {\n      ok: true,\n      config: { port: 8080, debug: false, name: 'dorbs' },\n    });\n  });\n\n  it('parses debug true and a custom name', () => {\n    const result = parseConfig({ PORT: '1', DEBUG: 'true', NAME: 'app' });\n    assert.deepEqual(result, {\n      ok: true,\n      config: { port: 1, debug: true, name: 'app' },\n    });\n  });\n\n  it('parses debug false and the upper port bound', () => {\n    const result = parseConfig({ PORT: '65535', DEBUG: 'false' });\n    assert.deepEqual(result, {\n      ok: true,\n      config: { port: 65535, debug: false, name: 'dorbs' },\n    });\n  });\n\n  it('allows an empty NAME', () => {\n    const result = parseConfig({ PORT: '3000', NAME: '' });\n    assert.deepEqual(result, {\n      ok: true,\n      config: { port: 3000, debug: false, name: '' },\n    });\n  });\n\n  it('reports a missing PORT', () => {\n    const result = parseConfig({});\n    assert.equal(result.ok, false);\n    assert.deepEqual(result, { ok: false, errors: ['PORT is required'] });\n  });\n\n  it('reports an undefined PORT value', () => {\n    const result = parseConfig({ PORT: undefined });\n    assert.equal(result.ok, false);\n    assert.deepEqual(result, { ok: false, errors: ['PORT is required'] });\n  });\n\n  it('reports a non-integer PORT', () => {\n    const result = parseConfig({ PORT: 'abc' });\n    assert.equal(result.ok, false);\n    assert.deepEqual(result, {\n      ok: false,\n      errors: ['PORT must be an integer, got \"abc\"'],\n    });\n  });\n\n  it('reports a fractional PORT', () => {\n    const result = parseConfig({ PORT: '80.5' });\n    assert.equal(result.ok, false);\n    assert.deepEqual(result, {\n      ok: false,\n      errors: ['PORT must be an integer, got \"80.5\"'],\n    });\n  });\n\n  it('reports an out-of-range PORT below 1', () => {\n    const result = parseConfig({ PORT: '0' });\n    assert.equal(result.ok, false);\n    assert.deepEqual(result, {\n      ok: false,\n      errors: ['PORT must be between 1 and 65535, got \"0\"'],\n    });\n  });\n\n  it('reports an out-of-range PORT above 65535', () => {\n    const result = parseConfig({ PORT: '70000' });\n    assert.equal(result.ok, false);\n    assert.deepEqual(result, {\n      ok: false,\n      errors: ['PORT must be between 1 and 65535, got \"70000\"'],\n    });\n  });\n\n  it('reports an invalid DEBUG', () => {\n    const result = parseConfig({ PORT: '8080', DEBUG: 'yes' });\n    assert.equal(result.ok, false);\n    assert.deepEqual(result, {\n      ok: false,\n      errors: ['DEBUG must be \"true\" or \"false\", got \"yes\"'],\n    });\n  });\n\n  it('collects every error instead of stopping at the first', () => {\n    const result = parseConfig({ PORT: 'nope', DEBUG: 'maybe' });\n    assert.equal(result.ok, false);\n    assert.deepEqual(result, {\n      ok: false,\n      errors: [\n        'PORT must be an integer, got \"nope\"',\n        'DEBUG must be \"true\" or \"false\", got \"maybe\"',\n      ],\n    });\n  });\n});\n",
+          "path": "src/config.test.ts"
+        }
+      }
+    ],
+    [
+      {
+        "name": "check",
+        "args": {}
+      }
+    ],
+    [
+      {
+        "name": "edit_file",
+        "args": {
+          "path": "src/config.test.ts",
+          "oldText": "import assert from 'node:assert/strict';\nimport { describe, it } from 'node:test';\n\nimport { parseConfig } from './config.ts';",
+          "newText": "import assert = require('node:assert/strict');\nimport { describe, it } from 'node:test';\n\nimport { parseConfig } from './config';"
+        }
+      }
+    ],
+    [
+      {
+        "name": "check",
+        "args": {}
+      }
+    ],
+    [
+      {
+        "name": "test",
+        "args": {
+          "files": ["src/config.test.ts"]
+        }
+      }
+    ],
+    [
+      {
+        "name": "edit_file",
+        "args": {
+          "path": "tsconfig.json",
+          "oldText": "{ \"compilerOptions\": { \"strict\": true, \"noEmit\": true }, \"include\": [\"src\"] }",
+          "newText": "{ \"compilerOptions\": { \"strict\": true, \"noEmit\": true, \"allowImportingTsExtensions\": true }, \"include\": [\"src\"] }"
+        }
+      }
+    ],
+    [
+      {
+        "name": "edit_file",
+        "args": {
+          "newText": "import assert from 'node:assert/strict';\nimport { describe, it } from 'node:test';\n\nimport { parseConfig } from './config.ts';",
+          "oldText": "import assert = require('node:assert/strict');\nimport { describe, it } from 'node:test';\n\nimport { parseConfig } from './config';",
+          "path": "src/config.test.ts"
+        }
+      }
+    ],
+    [
+      {
+        "name": "check",
+        "args": {}
+      }
+    ],
+    [
+      {
+        "name": "edit_file",
+        "args": {
+          "newText": "{ \"compilerOptions\": { \"strict\": true, \"noEmit\": true, \"allowImportingTsExtensions\": true, \"esModuleInterop\": true }, \"include\": [\"src\"] }",
+          "oldText": "{ \"compilerOptions\": { \"strict\": true, \"noEmit\": true, \"allowImportingTsExtensions\": true }, \"include\": [\"src\"] }",
+          "path": "tsconfig.json"
+        }
+      }
+    ],
+    [
+      {
+        "name": "check",
+        "args": {}
+      }
+    ],
+    [
+      {
+        "name": "test",
+        "args": {
+          "files": ["src/config.test.ts"]
+        }
+      }
+    ],
+    [
+      {
+        "name": "git",
+        "args": {
+          "args": "checkout -b dorbs/hc-sb-config-6a2683"
+        }
+      }
+    ],
+    [
+      {
+        "name": "git",
+        "args": {
+          "args": "add src/config.ts src/config.test.ts tsconfig.json"
+        }
+      }
+    ],
+    [
+      {
+        "name": "git",
+        "args": {
+          "args": "commit -m \"Add parseConfig env parser with tests\""
+        }
+      }
+    ],
+    [
+      {
+        "name": "git",
+        "args": {
+          "args": "status"
+        }
+      }
+    ]
+  ],
+  "outcomes": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "green",
+    "ok",
+    "ok",
+    "red",
+    "ok",
+    "green",
+    "red",
+    "ok",
+    "ok",
+    "red",
+    "ok",
+    "green",
+    "green",
+    "ok",
+    "ok",
+    "ok",
+    "ok"
+  ]
+}
