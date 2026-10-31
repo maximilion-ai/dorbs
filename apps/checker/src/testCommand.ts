@@ -59,7 +59,10 @@ export const testCommands = (
       return { reason: `${outside} is outside ${test.cwd}, where the tests run.` };
     return [command(`${test.run}${words(files.map((file) => file.slice(prefix.length)))}`)];
   }
-  // What is left is the workspace target.
+  // What is left are the workspace and package targets.
+  if (files.length === 0 && test.target === "package") {
+    return [command(test.run.replaceAll("{dir}", quote(".")))];
+  }
   if (files.length === 0) {
     return {
       reason: "This repo's tests run per workspace package. Pass the test files to run.",
@@ -70,9 +73,11 @@ export const testCommands = (
     .toSorted((a, b) => b.length - a.length);
   const groups = new Map<string, Array<string>>();
   for (const file of files) {
-    const dir = packages.find((candidate) => file.startsWith(`${candidate}/`));
+    const dir =
+      packages.find((candidate) => file.startsWith(`${candidate}/`)) ??
+      (test.target === "package" ? "." : undefined);
     if (dir === undefined) return { reason: `${file} is in no workspace package.` };
-    groups.set(dir, [...(groups.get(dir) ?? []), file.slice(dir.length + 1)]);
+    groups.set(dir, [...(groups.get(dir) ?? []), dir === "." ? file : file.slice(dir.length + 1)]);
   }
   return [...groups]
     .toSorted(([a], [b]) => a.localeCompare(b))

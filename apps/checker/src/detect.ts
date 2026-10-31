@@ -288,10 +288,18 @@ const nodeTest = (
     target: "files",
     filterFlag,
   });
-  if (root.dependencies.has("vitest") || /\bvitest\b/.test(script))
-    return files(`${exec(manager, "vitest")} run`, "-t");
-  if (root.dependencies.has("jest") || /\bjest\b/.test(script))
-    return files(exec(manager, "jest"), "-t");
+  // In a workspace a runner runs from the package of each file, where that package's config is.
+  const runner = (bin: string, args: string): TestCommand =>
+    dirs.length > 1
+      ? {
+          run: `cd {dir} && ${manager === "npm" || manager === "bun" ? `npx --no-install ${bin}` : exec(manager, bin)}${args}`,
+          cwd: ROOT,
+          target: "package",
+          filterFlag: "-t",
+        }
+      : files(`${exec(manager, bin)}${args}`, "-t");
+  if (root.dependencies.has("vitest") || /\bvitest\b/.test(script)) return runner("vitest", " run");
+  if (root.dependencies.has("jest") || /\bjest\b/.test(script)) return runner("jest", "");
   const node = /\bnode((?:\s+--?[\w-]+(?:=\S+)?)*)\s+--test\b((?:\s+--?[\w-]+(?:=\S+)?)*)/.exec(
     script,
   );
@@ -527,7 +535,9 @@ const Override = Schema.Struct({
       Schema.Struct({
         run: Schema.NonEmptyString,
         cwd: Cwd,
-        target: Schema.optionalKey(Schema.Literals(["files", "packages", "workspace", "filter"])),
+        target: Schema.optionalKey(
+          Schema.Literals(["files", "packages", "workspace", "package", "filter"]),
+        ),
         filterFlag: Schema.optionalKey(Schema.String),
       }),
     ),

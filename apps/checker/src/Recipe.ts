@@ -39,10 +39,11 @@ export type Check = Command & {
 /**
  * How a test request becomes a command. files: the files follow `run`. packages: their Go packages
  * follow, ./... without files. workspace: one run per package of the files, `{dir}` in `run` naming
- * it and the files relative to it following. filter: the runner takes only a name filter.
+ * it and the files relative to it following; package: the same, with files outside every package run
+ * from the root. filter: the runner takes only a name filter.
  */
 export type TestCommand = Command & {
-  readonly target: "files" | "packages" | "workspace" | "filter";
+  readonly target: "files" | "packages" | "workspace" | "package" | "filter";
   /** The flag before a name filter, such as -t: empty when it is positional, undefined without filters. */
   readonly filterFlag: string | undefined;
 };

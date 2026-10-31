@@ -98,3 +98,26 @@ it("refuses a file outside the repo or the test command's directory", () => {
     reason: "b.test.ts is outside packages/a, where the tests run.",
   });
 });
+
+it("runs a runner from the workspace package of each file, or the root", () => {
+  const vitest: TestCommand = {
+    run: "cd {dir} && pnpm exec vitest run",
+    cwd: ".",
+    target: "package",
+    filterFlag: "-t",
+  };
+  assert.deepStrictEqual(
+    testCommands(
+      vitest,
+      { files: ["test/unit/test/a.test.ts", "scripts/b.test.ts"], filter: "x" },
+      [".", "test/unit"],
+    ),
+    [
+      { run: "cd '.' && pnpm exec vitest run 'scripts/b.test.ts' -t 'x'", cwd: "." },
+      { run: "cd 'test/unit' && pnpm exec vitest run 'test/a.test.ts' -t 'x'", cwd: "." },
+    ],
+  );
+  assert.deepStrictEqual(testCommands(vitest, {}, [".", "test/unit"]), [
+    { run: "cd '.' && pnpm exec vitest run", cwd: "." },
+  ]);
+});

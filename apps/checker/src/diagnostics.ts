@@ -271,7 +271,9 @@ const streams = (context: ParseContext, text: string): ReadonlyMap<string, Reado
       cwd = NodePath.posix.join(context.cwd, pnpmDir);
       body = pnpm[2] ?? "";
     }
-    byDir.set(cwd, [...(byDir.get(cwd) ?? []), { body, raw }]);
+    const bucket = byDir.get(cwd) ?? [];
+    if (bucket.length === 0) byDir.set(cwd, bucket);
+    bucket.push({ body, raw });
   }
   return byDir;
 };

@@ -57,7 +57,12 @@ it("runs a pnpm repo's own typecheck and lint scripts after a frozen install", (
       { id: "typecheck", run: "pnpm run typecheck", cwd: ".", format: "text", scope: "repo" },
       { id: "lint", run: "pnpm run lint", cwd: ".", format: "text", scope: "repo" },
     ],
-    test: { run: "pnpm exec vitest run", cwd: ".", target: "files", filterFlag: "-t" },
+    test: {
+      run: "cd {dir} && pnpm exec vitest run",
+      cwd: ".",
+      target: "package",
+      filterFlag: "-t",
+    },
     notes: ["pnpm@11.28.6 from packageManager", "typescript 5.9.3"],
   });
 });
@@ -399,4 +404,19 @@ it("adds tsc beside a check script that runs no type checker", () => {
     svelte.checks.map((check) => check.id),
     ["check"],
   );
+});
+
+it("runs vitest from each file's workspace package in a workspace", () => {
+  const detected = recipe({
+    "package.json": json({ devDependencies: { vitest: "5" }, scripts: { test: "pnpm -r test" } }),
+    "pnpm-lock.yaml": PNPM_LOCK,
+    "pnpm-workspace.yaml": "packages:\n  - test/*\n",
+    "test/unit/package.json": json({ scripts: { test: "vitest" } }),
+  });
+  assert.deepStrictEqual<unknown>(detected.test, {
+    run: "cd {dir} && pnpm exec vitest run",
+    cwd: ".",
+    target: "package",
+    filterFlag: "-t",
+  });
 });
