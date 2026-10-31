@@ -55,7 +55,7 @@ What it does not contain: a run can change untracked files in its environment, s
 ## Run on the host
 
 ```sh
-apps/checker/images/build.sh          # dorbs-checker/{node,python,rust,go}:1
+apps/checker/images/build.sh          # dorbs-checker/{node,python,rust,go}:1; the service also builds a missing one
 cp apps/checker/deploy/dorbs-checker.service ~/.config/systemd/user/
 systemctl --user enable --now dorbs-checker
 ```

@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 
 import type { Ecosystem } from "./Recipe.ts";
 import { type ProcessResult, runProcess } from "./runProcess.ts";
@@ -40,7 +41,7 @@ export class ImageMissing extends Schema.TaggedError<ImageMissing>()("ImageMissi
   image: Schema.String,
 }) {
   override get message(): string {
-    return `The image ${this.image} is not built; run apps/checker/images/build.sh on the checker host.`;
+    return `The image ${this.image} is missing and building it failed; see the service's log.`;
   }
 }
 
@@ -190,11 +191,36 @@ const make = Effect.gen(function* () {
   ];
   const workdir = (cwd: string) => (cwd === "." ? REPO_ROOT : `${REPO_ROOT}/${cwd}`);
 
+  const inspect = (tag: string) =>
+    docker(["image", "inspect", "--format", "{{.Id}}", tag]).pipe(
+      Effect.map((result) => (result.exitCode === 0 ? result.stdout.trim() : undefined)),
+    );
+  // One build per image at a time; a host's cleanup may remove an image no container uses.
+  const builds = new Map<Ecosystem, Semaphore.Semaphore>();
   const imageId = Effect.fn("Docker.imageId")(function* (image: Ecosystem) {
     const tag = `dorbs-checker/${image}:1`;
-    const result = yield* docker(["image", "inspect", "--format", "{{.Id}}", tag]);
-    if (result.exitCode !== 0) return yield* new ImageMissing({ image: tag });
-    return result.stdout.trim();
+    const found = yield* inspect(tag);
+    if (found !== undefined) return found;
+    const turn = builds.get(image) ?? Semaphore.makeUnsafe(1);
+    builds.set(image, turn);
+    return yield* turn.withPermit(
+      Effect.gen(function* () {
+        const again = yield* inspect(tag);
+        if (again !== undefined) return again;
+        yield* Effect.logInfo(`building ${tag}`);
+        const images = NodeURL.fileURLToPath(new URL("../images", import.meta.url));
+        const built = yield* docker(
+          ["build", "--quiet", "-t", tag, "-f", `${images}/${image}.Dockerfile`, images],
+          "20 minutes",
+        );
+        const id = yield* inspect(tag);
+        if (id === undefined) {
+          yield* Effect.logWarning(`building ${tag} failed: ${built.stderr.slice(-2000)}`);
+          return yield* new ImageMissing({ image: tag });
+        }
+        return id;
+      }),
+    );
   });
 
   const setup: Docker["Service"]["setup"] = Effect.fn("Docker.setup")(
