@@ -35,6 +35,8 @@ const CONTAINER_ENV: Readonly<Record<string, string>> = {
   GOPATH: `${ENV_MOUNT}/home/go`,
   GOCACHE: `${ENV_MOUNT}/home/.cache/go-build`,
   GOTOOLCHAIN: "auto",
+  // Go makes its module cache read-only otherwise, and the service could not delete it on eviction.
+  GOFLAGS: "-modcacherw",
   UV_PYTHON_INSTALL_DIR: `${ENV_MOUNT}/home/.local/share/uv/python`,
   PYTHONDONTWRITEBYTECODE: "1",
   // The tree has no .git, so packages that take their version from git get a fixed one.
