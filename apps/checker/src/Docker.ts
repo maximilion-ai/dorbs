@@ -100,19 +100,13 @@ export class Docker extends Context.Service<
   }
 >()("dorbs/checker/Docker") {}
 
-const LABEL = "dorbs.checker.env";
-const SETUP_NETWORK = "dorbs-setup";
-const EGRESS = "dorbs-egress";
-const EGRESS_URL = `http://${EGRESS}:3128`;
 // Every proxy variable the package managers read: npm, yarn, pnpm, bun, uv, pip, cargo, go and Node's fetch.
-const PROXY_ENV = [
-  ...["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"].map(
-    (name) => `${name}=${EGRESS_URL}`,
-  ),
-  `npm_config_https_proxy=${EGRESS_URL}`,
-  `npm_config_proxy=${EGRESS_URL}`,
-  `YARN_HTTPS_PROXY=${EGRESS_URL}`,
-  `YARN_HTTP_PROXY=${EGRESS_URL}`,
+const proxyEnv = (url: string) => [
+  ...["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"].map((name) => `${name}=${url}`),
+  `npm_config_https_proxy=${url}`,
+  `npm_config_proxy=${url}`,
+  `YARN_HTTPS_PROXY=${url}`,
+  `YARN_HTTP_PROXY=${url}`,
   "NODE_USE_ENV_PROXY=1",
   "NO_PROXY=",
 ];
@@ -148,6 +142,11 @@ export const mebibytes = (size: string): number => {
 const make = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const config = yield* ServiceConfig;
+  const prefix = config.containerPrefix;
+  const LABEL = `${prefix}.checker.env`;
+  const SETUP_NETWORK = `${prefix}-setup`;
+  const EGRESS = `${prefix}-egress`;
+  const PROXY_ENV = proxyEnv(`http://${EGRESS}:3128`);
 
   const docker = (
     args: ReadonlyArray<string>,
@@ -228,7 +227,7 @@ const make = Effect.gen(function* () {
 
   const setup: Docker["Service"]["setup"] = Effect.fn("Docker.setup")(
     function* (image, envDir, spec) {
-      const name = `dorbs-setup-${crypto.randomUUID()}`;
+      const name = `${prefix}-setup-${crypto.randomUUID()}`;
       const result = yield* docker(
         [
           "run",

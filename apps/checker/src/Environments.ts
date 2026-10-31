@@ -104,13 +104,12 @@ const encodeMeta = Schema.encodeSync(Meta);
 const tail = (result: ProcessResult) =>
   `${result.stdout}\n${result.stderr}`.trim().split("\n").slice(-60).join("\n").slice(-8000);
 
-const containerName = (key: string) => `dorbs-env-${key}`;
-
 const make = Effect.gen(function* () {
   const docker = yield* Docker;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const config = yield* ServiceConfig;
   const trees = Trees.make(spawner);
+  const containerName = (key: string) => `${config.containerPrefix}-env-${key}`;
   const envsDir = NodePath.join(config.dataDir, "envs");
   const metaDir = NodePath.join(config.dataDir, "meta");
   const trashDir = NodePath.join(config.dataDir, "trash");

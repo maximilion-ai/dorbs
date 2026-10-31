@@ -1,7 +1,7 @@
 // The checker's acceptance run on its host: for each repo, check HEAD through the service, run the
 // repo's own check commands directly in the same container, compare the error sets, then check a
 // probe error and a warm repeat. Needs docker access, so it runs where the service runs.
-//   node scripts/checker-accept.ts [repo ...]
+//   node scripts/checker-accept.ts [repo ...]   CHECK_URL, DATA_DIR and CONTAINER_PREFIX name another service.
 
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
@@ -107,6 +107,8 @@ const CASES: ReadonlyArray<Case> = [
 ];
 
 const URL = process.env.CHECK_URL ?? "http://127.0.0.1:8790";
+const DATA_DIR = process.env.DATA_DIR ?? `${process.env.HOME}/dorbs-checker/data`;
+const PREFIX = process.env.CONTAINER_PREFIX ?? "dorbs";
 const TOKEN = NodeFS.readFileSync(
   NodePath.join(NodeOS.homedir(), ".config/dorbs/check-token"),
   "utf8",
@@ -185,7 +187,7 @@ for (const c of CASES.filter((candidate) => only.length === 0 || only.includes(c
     line.push(`cold ${head.wallMs} ms (setup ${result.setupMs} ms)`);
     line.push(result.checks.map((run) => `${run.id}=${run.status}`).join(","));
     const service = errorSet(result.checks.flatMap((run) => run.diagnostics));
-    const container = `dorbs-env-${result.envKey}`;
+    const container = `${PREFIX}-env-${result.envKey}`;
     const ownRuns = c.own.map((command) => ({ command, ...own(container, command) }));
     const direct = errorSet(ownRuns.flatMap((run) => run.parsed.diagnostics));
     const onlyService = [...service].filter((key) => !direct.has(key));
@@ -198,12 +200,7 @@ for (const c of CASES.filter((candidate) => only.length === 0 || only.includes(c
     );
     const original = NodeChildProcess.execFileSync(
       "git",
-      [
-        "--git-dir",
-        `${process.env.HOME}/dorbs-checker/data/git/${c.repo}.git`,
-        "show",
-        `${c.commit}:${c.probe.path}`,
-      ],
+      ["--git-dir", `${DATA_DIR}/git/${c.repo}.git`, "show", `${c.commit}:${c.probe.path}`],
       { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
     );
     const probed = await check(c, [{ path: c.probe.path, content: original + c.probe.text }]);

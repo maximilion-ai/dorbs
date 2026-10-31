@@ -114,6 +114,7 @@ const settings = (dataDir: string, overrides: Partial<Settings> = {}): Settings 
   containerPids: 64,
   setupEgress: "open",
   egressAllow: undefined,
+  containerPrefix: "dorbs",
   ...overrides,
 });
 

@@ -48,7 +48,7 @@ Past `DISK_BUDGET` (12 GiB) of environments, the least recently used are evicted
 
 ## Containment
 
-Each container runs as root without capabilities, with `no-new-privileges`, a read-only root, `/tmp` as a 1 GiB tmpfs and the environment's directory as the only writable mount, under `CONTAINER_MEMORY` (8g), `CONTAINER_CPUS` (4) and `CONTAINER_PIDS` (2048). Checks and tests have no network. Setup steps with network run on an internal Docker network whose only way out is `dorbs-egress`, a CONNECT proxy that reaches package registries on port 443 (`EGRESS_ALLOW` replaces its list; `SETUP_EGRESS=open` uses the default bridge instead). The service passes no secret into a container; the host fetches commits with the repo's read token.
+Each container runs as root without capabilities, with `no-new-privileges`, a read-only root, `/tmp` as a 1 GiB tmpfs and the environment's directory as the only writable mount, under `CONTAINER_MEMORY` (8g), `CONTAINER_CPUS` (4) and `CONTAINER_PIDS` (2048). Checks and tests have no network. Setup steps with network run on an internal Docker network whose only way out is `dorbs-egress`, a CONNECT proxy that reaches package registries on port 443 (`EGRESS_ALLOW` replaces its list; `SETUP_EGRESS=open` uses the default bridge instead). The service passes no secret into a container; the host fetches commits with the repo's read token. `CONTAINER_PREFIX` (`dorbs`) starts the names of its containers, network and label, so a second service on the host leaves the first's alone.
 
 What it does not contain: a run can change untracked files in its environment, such as `node_modules`, for the runs after it on the same repo; and a setup step can send the repo's files to a registry host it allows.
 

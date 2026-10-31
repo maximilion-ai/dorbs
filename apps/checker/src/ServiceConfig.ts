@@ -52,6 +52,8 @@ export type Settings = {
   readonly setupEgress: "proxy" | "open";
   /** The egress proxy's allowed hosts, comma-separated, a leading dot for a domain; its default list when unset. */
   readonly egressAllow: string | undefined;
+  /** What the names of the service's containers, network and label start with, so two services on one host keep apart. */
+  readonly containerPrefix: string;
 };
 
 export class ServiceConfig extends Context.Service<ServiceConfig, Settings>()(
@@ -100,6 +102,7 @@ const make = Effect.gen(function* () {
       Config.withDefault("proxy" as const),
     ),
     egressAllow: Config.String("EGRESS_ALLOW").pipe(Config.withDefault("")),
+    containerPrefix: Config.String("CONTAINER_PREFIX").pipe(Config.withDefault("dorbs")),
   });
   const registrations = yield* decodeRegistrations(
     yield* (yield* FileSystem.FileSystem).readFileString(config.reposFile),
@@ -142,6 +145,7 @@ const make = Effect.gen(function* () {
     containerPids: config.containerPids,
     setupEgress: config.setupEgress,
     egressAllow: config.egressAllow === "" ? undefined : config.egressAllow,
+    containerPrefix: config.containerPrefix,
   } satisfies Settings;
 });
 
