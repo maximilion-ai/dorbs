@@ -238,10 +238,14 @@ const nodeChecks = (
 ) => {
   const checks: Array<Check> = [];
   const typecheck = TYPECHECK_SCRIPTS.find((name) => root.scripts[name] !== undefined);
-  const scripted = typecheck ?? (root.scripts.check === undefined ? undefined : "check");
-  if (scripted !== undefined) {
-    checks.push(check(scripted, runScript(manager, scripted), "text"));
-  } else if (typescript && repo.read("tsconfig.json") !== undefined) {
+  if (typecheck !== undefined) checks.push(check(typecheck, runScript(manager, typecheck), "text"));
+  const checkScript = typecheck === undefined ? root.scripts.check : undefined;
+  if (checkScript !== undefined) checks.push(check("check", runScript(manager, "check"), "text"));
+  // A check script may only format or lint; tsc covers the types then, unless the script type-checks
+  // itself or hands off to the workspace's packages, whose own scripts may.
+  const typed =
+    checkScript !== undefined && (TYPE_CHECKERS.test(checkScript) || DELEGATING.test(checkScript));
+  if (typecheck === undefined && !typed && typescript && repo.read("tsconfig.json") !== undefined) {
     const tsconfig = parseJson(repo.read("tsconfig.json"));
     const references =
       isRecord(tsconfig) && Array.isArray(tsconfig.references) && tsconfig.references.length > 0;
@@ -267,7 +271,9 @@ const nodeChecks = (
   return checks;
 };
 
-const DELEGATING_TEST = /--workspaces|\s-ws\b|\s-r\b|--recursive|\bturbo\b|\bnx\b|--filter|\s-F\s/;
+const DELEGATING =
+  /--workspaces|\s-ws\b|\s-r\b|--recursive|--parallel|\bturbo\b|\bnx\b|--filter|\s-F\s/;
+const TYPE_CHECKERS = /\b(?:tsc|tsgo|tsrs|svelte-check|vue-tsc|astro check|typecheck|type-check)\b/;
 
 const nodeTest = (
   repo: RepoView,
@@ -295,7 +301,7 @@ const nodeTest = (
   const members = dirs.filter(
     (dir) => dir !== ROOT && manifest(repo.read(`${dir}/package.json`)).scripts.test !== undefined,
   );
-  if (DELEGATING_TEST.test(script) && members.length > 0) {
+  if (DELEGATING.test(script) && members.length > 0) {
     const run = {
       pnpm: "pnpm --dir {dir} run test",
       npm: "npm test -w {dir} --",

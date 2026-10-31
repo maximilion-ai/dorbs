@@ -44,7 +44,10 @@ export class Checker extends Context.Service<
 // What a check's answer carries of the lines no parser read, and a test's of its output.
 const OUTPUT_LINES = 200;
 const OUTPUT_BYTES = 32 * 1024;
-const RUN_KEEP_BYTES = 2 * 1024 * 1024;
+// JSON reporters print a whole document, which a cut would break; a run keeps this much of each stream.
+const RUN_KEEP_BYTES = 16 * 1024 * 1024;
+// What a check's answer carries of its diagnostics, errors first.
+const MAX_DIAGNOSTICS = 1000;
 
 const rejected = (reason: RejectReason): Rejected => ({ _tag: "Rejected", reason });
 const unsafe = (error: UnsafePath) =>
@@ -166,15 +169,16 @@ const make = Effect.gen(function* () {
       packages,
     });
     const output = capLines(parsed.output);
+    const diagnostics = parsed.diagnostics.toSorted((a, b) => a.severity - b.severity);
     return {
       id: check.id,
       command: run,
       status: result.timedOut ? "timed_out" : result.exitCode === 0 ? "passed" : "failed",
       exitCode: result.exitCode,
       durationMs: (yield* Clock.currentTimeMillis) - started,
-      diagnostics: parsed.diagnostics,
+      diagnostics: diagnostics.slice(0, MAX_DIAGNOSTICS),
       output: output.lines,
-      truncated: result.truncated || output.cut,
+      truncated: result.truncated || output.cut || diagnostics.length > MAX_DIAGNOSTICS,
     } satisfies CheckRun;
   });
 

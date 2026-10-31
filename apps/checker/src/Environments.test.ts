@@ -101,8 +101,8 @@ const settings = (dataDir: string, overrides: Partial<Settings> = {}): Settings 
   setupMemory: "1g",
   containerCpus: 1,
   containerPids: 64,
-  setupNetwork: "bridge",
-  setupProxyEnv: [],
+  setupEgress: "open",
+  egressAllow: undefined,
   ...overrides,
 });
 

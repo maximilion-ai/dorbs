@@ -45,9 +45,13 @@ export type Settings = {
   readonly setupMemory: string;
   readonly containerCpus: number;
   readonly containerPids: number;
-  /** The Docker network setup steps with network use, and the proxy variables that reach out of it. */
-  readonly setupNetwork: string;
-  readonly setupProxyEnv: ReadonlyArray<string>;
+  /**
+   * How setup steps with network reach out: proxy, through an internal network whose only way out
+   * is the registry-only egress proxy, or open, on Docker's default bridge.
+   */
+  readonly setupEgress: "proxy" | "open";
+  /** The egress proxy's allowed hosts, comma-separated, a leading dot for a domain; its default list when unset. */
+  readonly egressAllow: string | undefined;
 };
 
 export class ServiceConfig extends Context.Service<ServiceConfig, Settings>()(
@@ -88,12 +92,14 @@ const make = Effect.gen(function* () {
     checkTimeout: Config.Duration("CHECK_TIMEOUT").pipe(Config.withDefault(Duration.minutes(5))),
     testTimeout: Config.Duration("TEST_TIMEOUT").pipe(Config.withDefault(Duration.minutes(10))),
     runSlots: Config.Int("RUN_SLOTS").pipe(Config.withDefault(4)),
-    containerMemory: Config.String("CONTAINER_MEMORY").pipe(Config.withDefault("6g")),
+    containerMemory: Config.String("CONTAINER_MEMORY").pipe(Config.withDefault("8g")),
     setupMemory: Config.String("SETUP_MEMORY").pipe(Config.withDefault("8g")),
     containerCpus: Config.Number("CONTAINER_CPUS").pipe(Config.withDefault(4)),
     containerPids: Config.Int("CONTAINER_PIDS").pipe(Config.withDefault(2048)),
-    setupNetwork: Config.String("SETUP_NETWORK").pipe(Config.withDefault("bridge")),
-    setupProxy: Config.String("SETUP_PROXY").pipe(Config.withDefault("")),
+    setupEgress: Config.Literals(["proxy", "open"], "SETUP_EGRESS").pipe(
+      Config.withDefault("proxy" as const),
+    ),
+    egressAllow: Config.String("EGRESS_ALLOW").pipe(Config.withDefault("")),
   });
   const registrations = yield* decodeRegistrations(
     yield* (yield* FileSystem.FileSystem).readFileString(config.reposFile),
@@ -119,7 +125,6 @@ const make = Effect.gen(function* () {
       } satisfies Repo;
     }),
   );
-  const proxy = config.setupProxy;
   return {
     dataDir: config.dataDir,
     token: config.token,
@@ -135,13 +140,8 @@ const make = Effect.gen(function* () {
     setupMemory: config.setupMemory,
     containerCpus: config.containerCpus,
     containerPids: config.containerPids,
-    setupNetwork: config.setupNetwork,
-    setupProxyEnv:
-      proxy === ""
-        ? []
-        : ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"].map(
-            (name) => `${name}=${proxy}`,
-          ),
+    setupEgress: config.setupEgress,
+    egressAllow: config.egressAllow === "" ? undefined : config.egressAllow,
   } satisfies Settings;
 });
 

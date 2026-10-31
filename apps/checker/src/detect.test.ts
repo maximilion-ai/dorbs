@@ -379,3 +379,24 @@ it("reads only the files detection looks at", () => {
     [],
   );
 });
+
+it("adds tsc beside a check script that runs no type checker", () => {
+  const detected = recipe({
+    "package.json": json({ scripts: { check: "vp check", lint: "vp lint src" } }),
+    "pnpm-lock.yaml": PNPM_LOCK,
+    "tsconfig.json": json({ compilerOptions: { strict: true } }),
+  });
+  assert.deepStrictEqual(
+    detected.checks.map((check) => check.run),
+    ["pnpm run check", "pnpm exec tsc --noEmit -p tsconfig.json --pretty false", "pnpm run lint"],
+  );
+  const svelte = recipe({
+    "package.json": json({ scripts: { check: "svelte-kit sync && svelte-check" } }),
+    "pnpm-lock.yaml": PNPM_LOCK,
+    "tsconfig.json": "{}",
+  });
+  assert.deepStrictEqual(
+    svelte.checks.map((check) => check.id),
+    ["check"],
+  );
+});

@@ -1,3 +1,5 @@
+import * as NodeURL from "node:url";
+
 import * as Context from "effect/Context";
 import type * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -23,6 +25,8 @@ export const CONTAINER_ENV: Readonly<Record<string, string>> = {
   COREPACK_HOME: `${ENV_MOUNT}/home/.cache/corepack`,
   COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
   npm_config_update_notifier: "false",
+  // yarn 1 caches under /usr/local/share otherwise, which the read-only root refuses, then in /tmp.
+  YARN_CACHE_FOLDER: `${ENV_MOUNT}/home/.cache/yarn`,
   CARGO_HOME: `${ENV_MOUNT}/home/.cargo`,
   CARGO_TERM_COLOR: "never",
   GOPATH: `${ENV_MOUNT}/home/go`,
@@ -93,6 +97,21 @@ export class Docker extends Context.Service<
 >()("dorbs/checker/Docker") {}
 
 const LABEL = "dorbs.checker.env";
+const SETUP_NETWORK = "dorbs-setup";
+const EGRESS = "dorbs-egress";
+const EGRESS_URL = `http://${EGRESS}:3128`;
+// Every proxy variable the package managers read: npm, yarn, pnpm, bun, uv, pip, cargo, go and Node's fetch.
+const PROXY_ENV = [
+  ...["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"].map(
+    (name) => `${name}=${EGRESS_URL}`,
+  ),
+  `npm_config_https_proxy=${EGRESS_URL}`,
+  `npm_config_proxy=${EGRESS_URL}`,
+  `YARN_HTTPS_PROXY=${EGRESS_URL}`,
+  `YARN_HTTP_PROXY=${EGRESS_URL}`,
+  "NODE_USE_ENV_PROXY=1",
+  "NO_PROXY=",
+];
 
 // Kills every process but pid 1 (docker's init), the keeper whose pid is $1, and this shell, until
 // none is left. Builtins only, so the shell starts no process of its own to spare.
@@ -112,6 +131,15 @@ const REAP = [
 // The keeper is the one process besides pid 1 when the container has just started.
 const KEEPER =
   'for d in /proc/[0-9]*; do p=${d#/proc/}; case "$p" in 1|$$) ;; *) echo "$p" ;; esac; done';
+
+/** A Docker memory size such as 8g or 512m, in MiB; 0 when it does not parse. */
+export const mebibytes = (size: string): number => {
+  const match = /^(\d+)([kmg]?)b?$/i.exec(size.trim());
+  if (match === null) return 0;
+  const scale =
+    { "": 1 / 1024 / 1024, k: 1 / 1024, m: 1, g: 1024 }[(match[2] ?? "").toLowerCase()] ?? 0;
+  return Number(match[1]) * scale;
+};
 
 const make = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -137,7 +165,12 @@ const make = Effect.gen(function* () {
     return result.stdout;
   });
 
-  const env = Object.entries(CONTAINER_ENV).flatMap(([name, value]) => ["-e", `${name}=${value}`]);
+  // Node sizes its heap below what big type checks need; give it three quarters of the container.
+  const heapMiB = Math.floor((mebibytes(config.containerMemory) * 3) / 4);
+  const env = Object.entries({
+    ...CONTAINER_ENV,
+    ...(heapMiB > 0 ? { NODE_OPTIONS: `--max-old-space-size=${heapMiB}` } : {}),
+  }).flatMap(([name, value]) => ["-e", `${name}=${value}`]);
   const limits = (memory: string) => [
     "--read-only",
     "--tmpfs",
@@ -175,10 +208,12 @@ const make = Effect.gen(function* () {
           name,
           "--init",
           "--network",
-          spec.network ? config.setupNetwork : "none",
+          spec.network ? (config.setupEgress === "proxy" ? SETUP_NETWORK : "bridge") : "none",
           ...limits(config.setupMemory),
           ...env,
-          ...(spec.network ? config.setupProxyEnv.flatMap((pair) => ["-e", pair]) : []),
+          ...(spec.network && config.setupEgress === "proxy"
+            ? PROXY_ENV.flatMap((pair) => ["-e", pair])
+            : []),
           "-v",
           `${envDir}:${ENV_MOUNT}`,
           "-w",
@@ -279,6 +314,38 @@ const make = Effect.gen(function* () {
         }),
     ),
   );
+
+  // The setup network has no route out but the egress proxy, which is on it and on the default bridge.
+  if (config.setupEgress === "proxy") {
+    if ((yield* docker(["network", "inspect", SETUP_NETWORK])).exitCode !== 0) {
+      yield* ok(["network", "create", "--internal", SETUP_NETWORK]);
+    }
+    yield* docker(["rm", "-f", EGRESS]);
+    yield* ok([
+      "run",
+      "-d",
+      "--name",
+      EGRESS,
+      "--restart",
+      "unless-stopped",
+      "--network",
+      "bridge",
+      "--read-only",
+      "--cap-drop",
+      "ALL",
+      "--security-opt",
+      "no-new-privileges",
+      "--memory",
+      "256m",
+      ...(config.egressAllow === undefined ? [] : ["-e", `EGRESS_ALLOW=${config.egressAllow}`]),
+      "-v",
+      `${NodeURL.fileURLToPath(new URL("egress.ts", import.meta.url))}:/egress.ts:ro`,
+      "dorbs-checker/node:1",
+      "node",
+      "/egress.ts",
+    ]);
+    yield* ok(["network", "connect", SETUP_NETWORK, EGRESS]);
+  }
 
   return Docker.of({ imageId, setup, create, exec, reap, start, stop, remove, list });
 });

@@ -6,4 +6,6 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends git ca-certificates libatomic1 \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=uv /uv /uvx /usr/local/bin/
+# The environment's venv is the active one, so type checkers resolve imports from it.
+ENV VIRTUAL_ENV=/env/repo/.venv PATH=/env/repo/.venv/bin:$PATH
 LABEL dorbs.checker.image=python
