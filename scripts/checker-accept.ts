@@ -35,7 +35,7 @@ const CASES: ReadonlyArray<Case> = [
   {
     repo: "vbenjs/vue-vben-admin",
     commit: "eb47a1e6947a6dfa434686c1abb55ce8a66b029b",
-    own: ["pnpm run check:type", "pnpm run lint"],
+    own: ["pnpm exec turbo run typecheck --concurrency=2", "pnpm run lint"],
     probe: { path: "packages/@core/base/shared/src/utils/cn.ts", text: TS_PROBE },
   },
   {
