@@ -14,8 +14,9 @@ export const Worker = Cloudflare.Worker("AgentWorker", {
     AcpConnection: Cloudflare.DurableObject<AcpConnection>("AcpConnection"),
     AcpSession: Cloudflare.DurableObject<AcpSession>("AcpSession"),
     AGENT_TOKEN: Config.Redacted("AGENT_TOKEN"),
-    TYPECHECK_URL: Config.String("TYPECHECK_URL"),
-    TYPECHECK_TOKEN: Config.Redacted("TYPECHECK_TOKEN"),
+    // The checker service: static checks and tests in the repo's warm environment.
+    CHECK_URL: Config.String("CHECK_URL"),
+    CHECK_TOKEN: Config.Redacted("CHECK_TOKEN"),
     REPOS: Config.String("REPOS"),
     // The agent loop new sessions run on: pi or opencode.
     HARNESS: Config.String("HARNESS").pipe(Config.withDefault("pi")),

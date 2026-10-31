@@ -26,7 +26,7 @@ import {
   type StreamedRun,
 } from "./session.ts";
 import type { ToolHost } from "./tools.ts";
-import * as Typecheck from "./Typecheck.ts";
+import * as Checker from "./Checker.ts";
 
 export type ModelLayer = (
   env: Cloudflare.Env,
@@ -54,7 +54,7 @@ const REPLAY_PAGE = 64;
 export const makeAcpSession = (modelLayer: ModelLayer) =>
   class AcpSession extends DurableObject {
     readonly runtime = ManagedRuntime.make(
-      Layer.mergeAll(modelLayer(this.env), Typecheck.layer, Repos.layer, GitHub.layer).pipe(
+      Layer.mergeAll(modelLayer(this.env), Checker.layer, Repos.layer, GitHub.layer).pipe(
         Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(this.env))),
       ),
     );
@@ -68,12 +68,18 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
     readonly toolHost: ToolHost = {
       workspace: this.workspace,
       repos: () => this.runtime.runPromise(Effect.service(Repos.Repos)),
-      clone: () => this.ctx.storage.kv.get<Typecheck.Clone>(CLONE_KEY),
+      clone: () => this.ctx.storage.kv.get<Checker.Clone>(CLONE_KEY),
       saveClone: (clone) => this.ctx.storage.kv.put(CLONE_KEY, clone),
-      typecheck: (clone, change) =>
+      check: (clone, change, only) =>
         this.runtime.runPromise(
-          Effect.flatMap(Effect.service(Typecheck.Typecheck), (typecheck) =>
-            typecheck.check(clone, change),
+          Effect.flatMap(Effect.service(Checker.Checker), (checker) =>
+            checker.check(clone, change, only),
+          ),
+        ),
+      test: (clone, change, selection) =>
+        this.runtime.runPromise(
+          Effect.flatMap(Effect.service(Checker.Checker), (checker) =>
+            checker.test(clone, change, selection),
           ),
         ),
       github: () => this.runtime.runPromise(Effect.service(GitHub.GitHub)),

@@ -6,6 +6,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 
+import { isCleanCheck } from "./checkerDouble.ts";
 import { acpClient, prompt, T3_INITIALIZE_LINE } from "./stack.ts";
 
 const SOCKET = process.env.SOAK_SOCKET ?? "/tmp/dorbs-cloud.sock";
@@ -169,7 +170,7 @@ const long = async (count: number) => {
       case 0:
         return ["read", `Use read_file once on src/t${n - 2}.ts and reply with its content only.`];
       default:
-        return ["typecheck", "Run the typecheck tool once and reply with its output only."];
+        return ["typecheck", "Run the check tool once and reply with its output only."];
     }
   };
   row(
@@ -308,7 +309,7 @@ const idleCheck = async (label: string) => {
   const tc = await turn(
     conn,
     s.sessionId,
-    "Run the typecheck tool once and reply with its output only.",
+    "Run the check tool once and reply with its output only.",
   );
   conn.close();
   row(
@@ -347,7 +348,7 @@ const kill = async (where: "tool" | "stream") => {
   await turn(conn, sessionId, `Clone ${REPO} with clone_repo. Do nothing else. Reply: ok.`);
   const text =
     where === "tool"
-      ? "Use write_file to create src/k1.ts, src/k2.ts and src/k3.ts, each exporting one const number, one call per file, then run the typecheck tool, then reply: ok."
+      ? "Use write_file to create src/k1.ts, src/k2.ts and src/k3.ts, each exporting one const number, one call per file, then run the check tool, then reply: ok."
       : "Write a 400-word story about a lighthouse keeper. Use no tools.";
   const t = now();
   let killedAt: number | undefined;
@@ -429,7 +430,7 @@ const cancel = async (where: "tool" | "stream") => {
   await turn(conn, sessionId, `Clone ${REPO} with clone_repo. Do nothing else. Reply: ok.`);
   const text =
     where === "tool"
-      ? "Run the typecheck tool, then use write_file to create src/c1.ts exporting const c1 = 1, then run typecheck again, then reply: ok."
+      ? "Run the check tool, then use write_file to create src/c1.ts exporting const c1 = 1, then run check again, then reply: ok."
       : "Write a 600-word essay about rivers. Use no tools.";
   let cancelledAt: number | undefined;
   let toolStatusAtCancel = "";
@@ -516,18 +517,16 @@ const conc = async (count: number) => {
         conn,
         sessionId,
         `Clone ${REPO}. Use write_file to create src/load${n}.ts exporting function load${n}(xs: number[]): number that returns the sum. ` +
-          "Run the typecheck tool, fix any errors, then reply with one sentence. Do not commit or push.",
+          "Run the check tool, fix any errors, then reply with one sentence. Do not commit or push.",
       );
       return {
         n,
         ms: since(t),
         stop: r.stop,
         tools: r.toolTitles.length,
-        clean: r.toolResults.some(
-          (x) => x.startsWith("completed") && x.includes("No diagnostics."),
-        ),
+        clean: r.toolResults.some((x) => x.startsWith("completed") && isCleanCheck(x)),
         failedTools: r.toolResults.filter((x) => x.startsWith("failed")),
-        typecheckResults: r.toolResults.filter((_, i) => r.toolTitles[i] === "`typecheck`"),
+        typecheckResults: r.toolResults.filter((_, i) => r.toolTitles[i] === "`check`"),
       };
     } catch (error) {
       return {

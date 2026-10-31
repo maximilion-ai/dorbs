@@ -4,6 +4,7 @@
 
 import * as NodeChildProcess from "node:child_process";
 
+import { isCleanCheck } from "./checkerDouble.ts";
 import { acpClient, prompt, T3_INITIALIZE_LINE } from "./stack.ts";
 
 const SOCKET = "/tmp/dorbs-acp.sock";
@@ -32,7 +33,7 @@ const session = async (n: number): Promise<Result> => {
     const sessionId: string = created.result.sessionId;
     const text =
       `Clone the repo dorbs/live. Add src/load${n}.ts exporting load${n}(xs: number[]): number. ` +
-      "Run the typecheck tool, fix any errors, then reply with one sentence.";
+      "Run the check tool, fix any errors, then reply with one sentence.";
     const answer = await client.request(3, "session/prompt", prompt(sessionId, text), 600_000);
     const updates = client.updates(sessionId);
     return {
@@ -44,7 +45,7 @@ const session = async (n: number): Promise<Result> => {
         (u) =>
           u.sessionUpdate === "tool_call_update" &&
           u.status === "completed" &&
-          JSON.stringify(u.content ?? []).includes("No diagnostics."),
+          isCleanCheck(JSON.stringify(u.content ?? [])),
       ),
     };
   } catch (error) {

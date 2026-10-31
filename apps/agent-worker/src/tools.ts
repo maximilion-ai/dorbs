@@ -1,13 +1,14 @@
 import type { Workspace } from "@cloudflare/computer";
 import type { ToolKind } from "@dorbs/protocol/acp";
 import {
-  CommitSha,
-  RelativePath,
-  type ActionResult,
+  CheckId,
+  type CheckResponse,
   type Diagnostic,
   type Rejected,
-  type RepoId,
-} from "@dorbs/protocol/typecheck";
+  type SetupFailed,
+  type TestResponse,
+} from "@dorbs/protocol/checker";
+import { CommitSha, RelativePath, type RepoId } from "@dorbs/protocol/typecheck";
 import { Type, validateToolArguments, type Static, type TSchema } from "@earendil-works/pi-ai";
 import type { ToolExecutionResult, ToolRegistration } from "@earendil-works/pi-durable";
 import type { Plugin } from "@opencode/plugin";
@@ -17,7 +18,7 @@ import * as Schema from "effect/Schema";
 import { gh } from "./gh.ts";
 import { git, isGitPath } from "./git.ts";
 import type { GitHub } from "./GitHub.ts";
-import type { Change, Clone } from "./Typecheck.ts";
+import type { Change, Clone, TestSelection } from "./Checker.ts";
 
 export const WORKSPACE_ROOT = "/workspace";
 
@@ -29,7 +30,14 @@ export type ToolHost = {
   /** The repo the workspace was cloned from, once clone_repo has run. */
   readonly clone: () => Clone | undefined;
   readonly saveClone: (clone: Clone) => void;
-  readonly typecheck: (clone: Clone, change: Change) => Promise<ActionResult | Rejected>;
+  /** Runs the repo's static checks, or only the named ones, on the commit with the change laid over it. */
+  readonly check: (
+    clone: Clone,
+    change: Change,
+    only: ReadonlyArray<CheckId> | undefined,
+  ) => Promise<CheckResponse>;
+  /** Runs the repo's test command on the selected tests, on the commit with the change laid over it. */
+  readonly test: (clone: Clone, change: Change, selection: TestSelection) => Promise<TestResponse>;
   readonly github: () => Promise<GitHub["Service"]>;
 };
 
@@ -46,6 +54,13 @@ type Args = Readonly<Record<string, unknown>>;
 
 const arg = (args: Args, key: string): string | undefined =>
   typeof args[key] === "string" ? args[key] : undefined;
+
+const strings = (args: Args, key: string): ReadonlyArray<string> => {
+  const value = args[key];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+};
 
 type Row<P extends TSchema> = {
   readonly name: string;
@@ -108,6 +123,7 @@ const row = <P extends TSchema>(tool: Row<P>) => ({
 
 const decodePath = Schema.decodeUnknownSync(RelativePath);
 const decodeCommit = Schema.decodeUnknownSync(CommitSha);
+const decodeCheckId = Schema.decodeUnknownSync(CheckId);
 
 // Models often write ./src/a.ts, and . for the workspace root.
 const absolute = (path: string): string =>
@@ -256,19 +272,68 @@ const changesSince = async (workspace: Workspace, commit: CommitSha): Promise<Ch
 
 const rejectionText = ({ reason }: Rejected, clone: Clone): string =>
   Match.valueTags(reason, {
-    UnknownToolchain: () =>
-      "Not checked: the typecheck service does not run this agent's toolchain.",
-    UnknownRepo: () => `Not checked: the typecheck service does not have ${clone.repo} registered.`,
+    UnknownRepo: () => `Not checked: the checker does not have ${clone.repo} registered.`,
     UnknownCommit: () =>
-      `Not checked: the typecheck service cannot fetch commit ${clone.commit} of ${clone.repo}.`,
-    ProtectedPaths: ({ paths }) =>
-      `Not checked: ${paths.join(", ")} changed. The check takes dependencies and config ` +
-      `from commit ${clone.commit}, so dependency and config changes must be pushed first. ` +
-      "Undo these changes to check the rest.",
+      `Not checked: the checker cannot fetch commit ${clone.commit} of ${clone.repo}.`,
+    NoRecipe: ({ reason: why }) =>
+      `Not checked: the checker does not know how to check this repo. ${why}`,
+    UnknownChecks: ({ ids, known }) =>
+      `Not checked: this repo has no check ${ids.join(", ")}. Its checks: ${known.join(", ")}.`,
+    NoTestCommand: ({ reason: why }) => `Not run: ${why}`,
+    UnsafePath: ({ paths }) =>
+      `Not checked: ${paths.join(", ")} go through a symbolic link or replace a directory in the repo.`,
   });
 
+const setupText = (failed: SetupFailed): string =>
+  `Not checked: setting up the repo's environment failed at its ${failed.step} step. ` +
+  `The next call tries again in a few minutes. Its output ends:\n${failed.output}`;
+
+const SEVERITIES = ["error", "error", "warning", "info", "hint"];
+
 const formatDiagnostic = (d: Diagnostic): string =>
-  `${d.path}:${d.line}:${d.column} ${d.severity} ${d.code} ${d.message} (${d.tool})`;
+  `${d.path}:${d.range.start.line + 1}:${d.range.start.character + 1} ${SEVERITIES[d.severity]}${d.code === undefined ? "" : ` ${d.code}`} ${d.message} (${d.source})`;
+
+/** One line per check, then its diagnostics, and for a failure without any, what the tool printed. */
+const checkText = (response: CheckResponse, clone: Clone): string => {
+  if (response._tag === "Rejected") return rejectionText(response, clone);
+  if (response._tag === "SetupFailed") return setupText(response);
+  if (response.checks.length === 0) return "This repo has no checks the checker runs.";
+  return response.checks
+    .flatMap((run) => {
+      const status =
+        run.status === "failed"
+          ? `failed (exit ${run.exitCode})`
+          : run.status === "timed_out"
+            ? "timed out"
+            : run.status;
+      const lines = [
+        `${run.id} ${status}: ${run.command}`,
+        ...run.diagnostics.map(formatDiagnostic),
+      ];
+      if (run.status !== "passed" && run.diagnostics.length === 0) lines.push(...run.output);
+      if (run.truncated)
+        lines.push(`[${run.id}'s output was cut, so some diagnostics may be missing.]`);
+      return lines;
+    })
+    .join("\n");
+};
+
+const testText = (response: TestResponse, clone: Clone): string => {
+  if (response._tag === "Rejected") return rejectionText(response, clone);
+  if (response._tag === "SetupFailed") return setupText(response);
+  const status =
+    response.status === "failed"
+      ? `failed (exit ${response.exitCode})`
+      : response.status === "timed_out"
+        ? "timed out"
+        : response.status;
+  const counts =
+    response.passed === undefined
+      ? "the runner printed no summary."
+      : `${response.passed} passed, ${response.failed ?? 0} failed, ${response.skipped ?? 0} skipped.`;
+  const head = `Tests ${status}: ${counts}\n$ ${response.command}`;
+  return response.status === "passed" ? head : `${head}\n${response.output}`;
+};
 
 const urlOf = async (host: ToolHost, clone: Clone): Promise<string | undefined> =>
   (await host.repos()).get(clone.repo);
@@ -410,23 +475,72 @@ const TOOLS = [
     },
   }),
   row({
-    name: "typecheck",
-    title: () => "`typecheck`",
+    name: "check",
+    title: (args) => `\`${["check", ...strings(args, "only")].join(" ")}\``,
     kind: "execute",
-    description: "Type-check and lint the cloned repo with your changes, using tsrs and oxlint.",
-    parameters: Type.Object({}),
+    description:
+      "Run the repo's static checks, such as its typecheck and lint scripts, on the cloned repo with your " +
+      "changes, in a warm environment with the repo's dependencies installed. only names checks to run.",
+    parameters: Type.Object({
+      only: Type.Optional(
+        Type.Array(Type.String(), {
+          description: "Check ids to run, such as typecheck; all when absent",
+        }),
+      ),
+    }),
+    // A rerun checks the same workspace again; the checker restores its environment after each run.
     replay: "safe",
-    run: async (_args, host) => {
+    run: async ({ only }, host) => {
       const clone = host.clone();
       if (clone === undefined) {
         return text("No repo is cloned, so there is nothing to check. Call clone_repo first.");
       }
-      const result = await host.typecheck(clone, await changesSince(host.workspace, clone.commit));
-      if (result._tag === "Rejected") return text(rejectionText(result, clone));
+      const ids = only?.map((id) => decodeCheckId(id));
       return text(
-        result.diagnostics.length === 0
-          ? "No diagnostics."
-          : result.diagnostics.map(formatDiagnostic).join("\n"),
+        checkText(
+          await host.check(clone, await changesSince(host.workspace, clone.commit), ids),
+          clone,
+        ),
+        "Fix these first, or check with only to see one check at a time.",
+      );
+    },
+  }),
+  row({
+    name: "test",
+    title: (args) => {
+      const filter = arg(args, "filter");
+      return `\`${["test", ...strings(args, "files"), ...(filter === undefined ? [] : ["-t", filter])].join(" ")}\``;
+    },
+    kind: "execute",
+    description:
+      "Run the repo's own test runner, such as vitest, node --test, pytest, cargo test or go test, on the " +
+      "cloned repo with your changes. Name the test files (pytest also takes test ids) or a test name filter.",
+    parameters: Type.Object({
+      files: Type.Optional(
+        Type.Array(Type.String(), {
+          description: "Test files relative to the repo root, such as src/a.test.ts",
+        }),
+      ),
+      filter: Type.Optional(Type.String({ description: "Run only the tests whose name matches" })),
+    }),
+    // Tests run in the checker's environment, which it restores afterwards; nothing outside it changes.
+    replay: "safe",
+    run: async ({ files, filter }, host) => {
+      const clone = host.clone();
+      if (clone === undefined) {
+        return text("No repo is cloned, so there are no tests to run. Call clone_repo first.");
+      }
+      const selection = {
+        ...(files === undefined ? {} : { files }),
+        ...(filter === undefined ? {} : { filter }),
+      };
+      // The checker keeps the end of a long run's output, where the failures and the summary are.
+      return text(
+        testText(
+          await host.test(clone, await changesSince(host.workspace, clone.commit), selection),
+          clone,
+        ),
+        "Run fewer tests to see the rest.",
       );
     },
   }),

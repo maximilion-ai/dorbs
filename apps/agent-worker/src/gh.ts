@@ -4,7 +4,7 @@ import * as Schema from "effect/Schema";
 
 import { parseArgv } from "./argv.ts";
 import { GitHubFailed, type GitHubApi } from "./GitHub.ts";
-import type { Clone } from "./Typecheck.ts";
+import type { Clone } from "./Checker.ts";
 
 /** The cloned repo gh works on, and the API it reaches GitHub through. */
 export type GhContext = {

@@ -1,10 +1,7 @@
-// Drives the local chain the way T3 Code does: nc -U -> acp-mux -> agent Worker (alchemy dev) -> typecheck service.
+// Drives the local chain the way T3 Code does: nc -U -> acp-mux -> agent Worker (alchemy dev) -> checker double.
 
 import * as NodeAssert from "node:assert/strict";
 import * as NodeChildProcess from "node:child_process";
-import * as NodeCrypto from "node:crypto";
-import * as NodeFS from "node:fs";
-import * as NodePath from "node:path";
 
 import {
   harness,
@@ -21,27 +18,19 @@ import {
 
 const CWD = "/tmp/dorbs-e2e-project";
 const HELLO = 'export const n: number = "x";\n';
-const TYPECHECK_OUTPUT =
-  "src/hello.ts:1:14 error TS2322 Type 'string' is not assignable to type 'number'. (tsrs)";
+const HELLO_ERROR =
+  "src/hello.ts:1:14 error TS2322 Type 'string' is not assignable to type 'number'. (tsc)";
+const CHECK_OUTPUT = `typecheck failed (exit 2): pnpm run typecheck\n${HELLO_ERROR}\nlint passed: pnpm run lint`;
+const PACKAGE_OUTPUT = `typecheck failed (exit 2): pnpm run typecheck\n${HELLO_ERROR}`;
+const TEST_OUTPUT =
+  "Tests passed: 1 passed, 0 failed, 0 skipped.\n$ pnpm exec vitest run src/hello.test.ts";
 const REPO = "dorbs/e2e";
 
-const sha256 = (text: string) => NodeCrypto.createHash("sha256").update(text).digest("hex");
-
 const run = async () => {
-  const {
-    typecheckPort,
-    typecheckToken,
-    dataDir,
-    commit,
-    gitDir,
-    workerPort,
-    mux,
-    startNc,
-    stopNc,
-  } = await startStack({
+  const { double, commit, gitDir, workerPort, mux, startNc, stopNc } = await startStack({
     repo: REPO,
     harness: harness(),
-    fixture: TS_PROJECT,
+    source: { fixture: TS_PROJECT },
     cwd: CWD,
     model: {
       provider: "scripted",
@@ -97,48 +86,42 @@ const run = async () => {
     { type: "diff", path: `${CWD}/src/hello.ts`, newText: HELLO },
   );
   ok(`tool_call_update diff ${CWD}/src/hello.ts with newText ${JSON.stringify(HELLO)}`);
+  const requests = double?.requests ?? [];
   NodeAssert.deepEqual(
-    NodeFS.readdirSync(NodePath.join(dataDir, "blobs")),
-    [sha256(HELLO)],
-    "the typecheck service received exactly the blob of src/hello.ts",
+    requests.map((request) => request.change.files.map((file) => file.path)),
+    [
+      ["src/hello.ts"],
+      ["package.json", "src/hello.ts"],
+      ["package.json", "src/hello.test.ts", "src/hello.ts"],
+    ],
   );
-  ok("the check carried only src/hello.ts, the one file changed since the commit");
-  NodeAssert.deepEqual(toolText("call-typecheck"), [
-    { type: "content", content: { type: "text", text: TYPECHECK_OUTPUT } },
+  NodeAssert.deepEqual(requests[0]?.change, {
+    files: [{ path: "src/hello.ts", content: HELLO }],
+    deleted: [],
+  });
+  ok("each call carried only the files changed since the commit");
+  NodeAssert.deepEqual(toolText("call-check"), [
+    { type: "content", content: { type: "text", text: CHECK_OUTPUT } },
   ]);
-  ok(`typecheck tool_call_update from the real service: ${TYPECHECK_OUTPUT}`);
-  const protectedOutput =
-    `Not checked: package.json changed. The check takes dependencies and config from commit ${commit}, ` +
-    "so dependency and config changes must be pushed first. Undo these changes to check the rest.";
-  NodeAssert.deepEqual(toolText("call-typecheck-package"), [
-    { type: "content", content: { type: "text", text: protectedOutput } },
-  ]);
-  ok("a package.json change gets the ProtectedPaths rejection text");
-  const repeated = await fetch(`http://127.0.0.1:${typecheckPort}/actions`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${typecheckToken}`, "content-type": "application/json" },
-    body: JSON.stringify({
-      kind: "check",
-      toolchain: "node26-tsrs0.20-oxlint1.89",
-      repo: REPO,
-      commit,
-      files: [{ path: "src/hello.ts", sha256: sha256(HELLO) }],
-      deleted: [],
-    }),
-  }).then((response) => response.json());
+  ok(`check tool_call_update: ${JSON.stringify(CHECK_OUTPUT)}`);
   NodeAssert.deepEqual(
-    { tag: repeated._tag, cached: repeated.cached, outputs: repeated.outputs },
-    { tag: "ActionResult", cached: true, outputs: [] },
-    JSON.stringify(repeated),
+    { only: requests[1]?.only, text: toolText("call-check-package") },
+    {
+      only: ["typecheck"],
+      text: [{ type: "content", content: { type: "text", text: PACKAGE_OUTPUT } }],
+    },
+  );
+  ok(
+    "a package.json change goes to the checker, which keys a new environment on it, and only runs typecheck",
   );
   NodeAssert.deepEqual(
-    repeated.diagnostics.map(
-      (d: { path: string; line: number; column: number; code: string; tool: string }) =>
-        `${d.path}:${d.line}:${d.column} ${d.code} (${d.tool})`,
-    ),
-    ["src/hello.ts:1:14 TS2322 (tsrs)"],
+    { files: requests[2]?.files, text: toolText("call-test") },
+    {
+      files: ["src/hello.test.ts"],
+      text: [{ type: "content", content: { type: "text", text: TEST_OUTPUT } }],
+    },
   );
-  ok("the agent's check, repeated as the same action, is served from the action cache");
+  ok(`test tool_call_update: ${JSON.stringify(TEST_OUTPUT)}`);
   const message = updates
     .filter((u) => u.sessionUpdate === "agent_message_chunk")
     .map((u) => u.content.text)

@@ -8,7 +8,7 @@ import * as Effect from "effect/Effect";
 import { connect, open, updates } from "./client.ts";
 import { gh } from "../src/gh.ts";
 import * as GitHub from "../src/GitHub.ts";
-import { COUNT, HELLO, LONG_ANSWER, NEW_FILE, PROXY_CONFIG } from "../src/ScriptedModel.ts";
+import { FAILING_TEST, HELLO, LONG_ANSWER, NEW_FILE, PROXY_CONFIG } from "../src/ScriptedModel.ts";
 import type { AcpSession } from "./worker.ts";
 
 // Captured from T3 Code 125b619: effect-acp's AcpClient.initialize with provider-acp's client capabilities.
@@ -45,6 +45,12 @@ const inSession = <R>(
   );
 
 /** What the scripted model's "write hello" sends live, in order. */
+/** What the check tool shows for src/count.ts: the checker double's typecheck fails on it, its lint passes. */
+const CHECK_OUTPUT =
+  "typecheck failed (exit 2): pnpm run typecheck\n" +
+  "src/count.ts:1:14 error TS2322 Type 'string' is not assignable to type 'number'. (tsc)\n" +
+  "lint passed: pnpm run lint";
+
 const WROTE_HELLO = [
   {
     sessionUpdate: "tool_call",
@@ -95,16 +101,16 @@ const thread = (updates: ReadonlyArray<any>) =>
 
 const double = async <A>(url: string): Promise<A> => (await fetch(url)).json();
 
-/** The typecheck double's request log and actions, from this point on. */
+/** The doubles' request log and the checker's requests, from this point on. */
 const recordSince = async () => {
-  const [log, actions] = await Promise.all([
-    double<string[]>("http://typecheck.test/__log"),
-    double<unknown[]>("http://typecheck.test/__actions"),
+  const [log, requests] = await Promise.all([
+    double<string[]>("http://checker.test/__log"),
+    double<unknown[]>("http://checker.test/__requests"),
   ]);
   return {
-    log: async () => (await double<string[]>("http://typecheck.test/__log")).slice(log.length),
-    actions: async () =>
-      (await double<unknown[]>("http://typecheck.test/__actions")).slice(actions.length),
+    log: async () => (await double<string[]>("http://checker.test/__log")).slice(log.length),
+    requests: async () =>
+      (await double<unknown[]>("http://checker.test/__requests")).slice(requests.length),
   };
 };
 
@@ -112,12 +118,6 @@ const toolResult = (frames: ReturnType<typeof updates>, toolCallId: string) =>
   frames.find(
     (update) => update.sessionUpdate === "tool_call_update" && update.toolCallId === toolCallId,
   );
-
-const sha256 = async (text: string) =>
-  Array.from(
-    new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))),
-    (b) => b.toString(16).padStart(2, "0"),
-  ).join("");
 
 it("refuses a connection without the agent token", async () => {
   const missing = await open("/acp?connection=c1", { Upgrade: "websocket" });
@@ -217,31 +217,90 @@ it("takes ./ paths and . for the workspace root, as models write them", async ()
   ]);
 });
 
-it("uploads the blobs the typecheck service lacks and reports its diagnostics", async () => {
+it("sends the change to the checker and reports its diagnostics", async () => {
   const record = await recordSince();
   const client = await connect();
   const sessionId = await client.newSession();
-  const response = await client.request(2, "session/prompt", prompt(sessionId, "typecheck"));
+  const response = await client.request(2, "session/prompt", prompt(sessionId, "check"));
   assert.deepStrictEqual(response.result, { stopReason: "end_turn" });
-  assert.deepStrictEqual(toolResult(updates(client.frames), "call-typecheck"), {
+  assert.deepStrictEqual(toolResult(updates(client.frames), "call-check"), {
     sessionUpdate: "tool_call_update",
-    toolCallId: "call-typecheck",
+    toolCallId: "call-check",
     status: "completed",
-    content: [
-      {
-        type: "content",
-        content: {
-          type: "text",
-          text: "src/count.ts:1:14 error TS2322 Type 'string' is not assignable to type 'number'. (tsrs)",
-        },
-      },
-    ],
+    content: [{ type: "content", content: { type: "text", text: CHECK_OUTPUT } }],
   });
   const log = (await record.log()).filter((line) => !line.startsWith("git "));
-  assert.deepStrictEqual(log, [
-    "POST /actions",
-    `PUT /blobs/${await sha256(COUNT)}`,
-    "POST /actions",
+  assert.deepStrictEqual(log, ["POST /check"]);
+});
+
+it("runs only the checks the model names, and names the known ones for an unknown id", async () => {
+  const record = await recordSince();
+  const client = await connect();
+  const sessionId = await client.newSession();
+  const response = await client.request(2, "session/prompt", prompt(sessionId, "check typecheck"));
+  assert.deepStrictEqual(response.result, { stopReason: "end_turn" });
+  const frames = updates(client.frames);
+  assert.deepStrictEqual(toolResult(frames, "call-check")?.content, [
+    {
+      type: "content",
+      content: {
+        type: "text",
+        text: "Not checked: this repo has no check spelling. Its checks: typecheck, lint.",
+      },
+    },
+  ]);
+  assert.deepStrictEqual(toolResult(frames, "call-check-typecheck")?.content, [
+    { type: "content", content: { type: "text", text: "typecheck passed: pnpm run typecheck" } },
+  ]);
+  assert.deepStrictEqual(
+    frames.find((u) => u.sessionUpdate === "tool_call" && u.toolCallId === "call-check-typecheck")
+      ?.title,
+    "`check typecheck`",
+  );
+  assert.deepStrictEqual(
+    (await record.requests()).map((request) =>
+      typeof request === "object" && request !== null && "only" in request
+        ? request.only
+        : undefined,
+    ),
+    [["typecheck", "spelling"], ["typecheck"]],
+  );
+});
+
+it("runs the tests the model names in the checker and reports their counts and failures", async () => {
+  const commit = await double<string>("http://git.test/__commit");
+  const record = await recordSince();
+  const client = await connect();
+  const sessionId = await client.newSession();
+  const response = await client.request(2, "session/prompt", prompt(sessionId, "test"));
+  assert.deepStrictEqual(response.result, { stopReason: "end_turn" });
+  const frames = updates(client.frames);
+  const call = frames.find((u) => u.sessionUpdate === "tool_call" && u.toolCallId === "call-test");
+  assert.deepStrictEqual(
+    { title: call?.title, kind: call?.kind },
+    { title: "`test src/count.test.ts -t counts`", kind: "execute" },
+  );
+  assert.deepStrictEqual(toolResult(frames, "call-test")?.content, [
+    {
+      type: "content",
+      content: {
+        type: "text",
+        text:
+          "Tests failed (exit 1): 0 passed, 1 failed, 0 skipped.\n" +
+          "$ pnpm exec vitest run src/count.test.ts\n" +
+          "× src/count.test.ts\n" +
+          "      Tests  1 failed | 0 passed (1)",
+      },
+    },
+  ]);
+  assert.deepStrictEqual(await record.requests(), [
+    {
+      repo: "test/fixture",
+      commit,
+      change: { files: [{ path: "src/count.test.ts", content: FAILING_TEST }], deleted: [] },
+      files: ["src/count.test.ts"],
+      filter: "counts",
+    },
   ]);
 });
 
@@ -291,26 +350,29 @@ it("sends only the files changed since the cloned commit, and the deleted ones",
   ]);
   await inSession(sessionId, (instance) => instance.workspace.fs.rm("/workspace/src/old.ts"));
   const record = await recordSince();
-  const checked = await client.request(
-    3,
-    "session/prompt",
-    prompt(sessionId, "change and typecheck"),
-  );
+  const checked = await client.request(3, "session/prompt", prompt(sessionId, "change and check"));
   assert.deepStrictEqual(checked.result, { stopReason: "end_turn" });
-  const action = {
-    kind: "check",
-    toolchain: "node26-tsrs0.20-oxlint1.89",
-    repo: "test/fixture",
-    commit,
-    files: [
-      { path: "src/index.ts", sha256: await sha256("export const greeting = 'hello';\n") },
-      { path: "src/new.ts", sha256: await sha256(NEW_FILE) },
-    ],
-    deleted: ["src/old.ts"],
-  };
-  assert.deepStrictEqual(await record.actions(), [action, action], "MissingBlobs, then the retry");
-  assert.deepStrictEqual(toolResult(updates(client.frames), "call-typecheck")?.content, [
-    { type: "content", content: { type: "text", text: "No diagnostics." } },
+  assert.deepStrictEqual(await record.requests(), [
+    {
+      repo: "test/fixture",
+      commit,
+      change: {
+        files: [
+          { path: "src/index.ts", content: "export const greeting = 'hello';\n" },
+          { path: "src/new.ts", content: NEW_FILE },
+        ],
+        deleted: ["src/old.ts"],
+      },
+    },
+  ]);
+  assert.deepStrictEqual(toolResult(updates(client.frames), "call-check")?.content, [
+    {
+      type: "content",
+      content: {
+        type: "text",
+        text: "typecheck passed: pnpm run typecheck\nlint passed: pnpm run lint",
+      },
+    },
   ]);
 });
 
@@ -318,9 +380,9 @@ it("says so instead of calling the service when no repo is cloned", async () => 
   const record = await recordSince();
   const client = await connect();
   const sessionId = await client.newSession();
-  const response = await client.request(2, "session/prompt", prompt(sessionId, "typecheck only"));
+  const response = await client.request(2, "session/prompt", prompt(sessionId, "check only"));
   assert.deepStrictEqual(response.result, { stopReason: "end_turn" });
-  assert.deepStrictEqual(toolResult(updates(client.frames), "call-typecheck")?.content, [
+  assert.deepStrictEqual(toolResult(updates(client.frames), "call-check")?.content, [
     {
       type: "content",
       content: {
@@ -344,14 +406,14 @@ it("resolves a cancelled prompt with cancelled and takes the next prompt", async
 });
 
 it("runs a prompt sent while a turn runs once that turn ends, and answers each once", async () => {
-  await double("http://typecheck.test/__hold");
+  await double("http://checker.test/__hold");
   try {
     const client = await connect();
     const sessionId = await client.newSession();
-    const first = client.request(2, "session/prompt", prompt(sessionId, "typecheck"));
-    await client.until((frame) => frame.params?.update?.toolCallId === "call-typecheck");
+    const first = client.request(2, "session/prompt", prompt(sessionId, "check"));
+    await client.until((frame) => frame.params?.update?.toolCallId === "call-check");
     const second = client.request(3, "session/prompt", prompt(sessionId, "write hello"));
-    await double("http://typecheck.test/__release");
+    await double("http://checker.test/__release");
     assert.deepStrictEqual(
       [(await first).result, (await second).result],
       [{ stopReason: "end_turn" }, { stopReason: "end_turn" }],
@@ -364,7 +426,7 @@ it("runs a prompt sent while a turn runs once that turn ends, and answers each o
     const answered = client.frames.findIndex((frame) => frame.id === 2);
     assert.deepStrictEqual(updates(client.frames.slice(answered)), WROTE_HELLO);
   } finally {
-    await double("http://typecheck.test/__release");
+    await double("http://checker.test/__release");
   }
 });
 
@@ -447,37 +509,37 @@ it("loads idempotently: a second load replays the same history and the session t
 });
 
 it("runs a prompt on after its connection drops, and the next load replays how it ended", async () => {
-  await double("http://typecheck.test/__hold");
+  await double("http://checker.test/__hold");
   try {
     const first = await connect();
     const sessionId = await first.newSession();
-    first.send({ id: 2, method: "session/prompt", params: prompt(sessionId, "typecheck") });
-    await first.until((frame) => frame.params?.update?.toolCallId === "call-typecheck");
+    first.send({ id: 2, method: "session/prompt", params: prompt(sessionId, "check") });
+    await first.until((frame) => frame.params?.update?.toolCallId === "call-check");
     await first.close(1000, "nc exited");
     const second = await connect();
     const attached = await second.load(1, sessionId);
     assert.deepStrictEqual(attached.replay.at(-1), {
       sessionUpdate: "tool_call",
-      toolCallId: "call-typecheck",
-      title: "`typecheck`",
+      toolCallId: "call-check",
+      title: "`check`",
       kind: "execute",
       status: "in_progress",
       rawInput: {},
     });
-    await double("http://typecheck.test/__release");
+    await double("http://checker.test/__release");
     await second.until((frame) => frame.params?.update?.sessionUpdate === "session_info_update");
     const live = updates(second.frames.slice(attached.replay.length + 1));
     assert.deepStrictEqual(live, [
       {
         sessionUpdate: "tool_call_update",
-        toolCallId: "call-typecheck",
+        toolCallId: "call-check",
         status: "completed",
         content: [
           {
             type: "content",
             content: {
               type: "text",
-              text: "src/count.ts:1:14 error TS2322 Type 'string' is not assignable to type 'number'. (tsrs)",
+              text: CHECK_OUTPUT,
             },
           },
         ],
@@ -496,7 +558,7 @@ it("runs a prompt on after its connection drops, and the next load replays how i
       "the prompt's response belongs to the connection that sent it",
     );
   } finally {
-    await double("http://typecheck.test/__release");
+    await double("http://checker.test/__release");
   }
 });
 

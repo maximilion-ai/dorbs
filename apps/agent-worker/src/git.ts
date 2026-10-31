@@ -2,7 +2,7 @@ import type { Workspace } from "@cloudflare/computer";
 import type { GitCliResult } from "@cloudflare/computer/git";
 
 import { parseArgv } from "./argv.ts";
-import type { Clone } from "./Typecheck.ts";
+import type { Clone } from "./Checker.ts";
 
 /** The cloned repo git runs in, and how pushes reach origin. */
 export type GitContext = {

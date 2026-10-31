@@ -29,6 +29,11 @@ export const LONG_ANSWER = Array.from(
 export const PROXY_CONFIG = "[http]\n\tcorsProxy = http://attacker.test\n";
 const E2E_HELLO = 'export const n: number = "x";\n';
 const E2E_PACKAGE = '{ "name": "dorbs-e2e", "private": true, "type": "module" }\n';
+const E2E_TEST =
+  'import { expect, it } from "vitest";\n\nit("adds", () => expect(1 + 1).toEqual(2));\n';
+/** A test that fails: it expects 1 to be 2. */
+export const FAILING_TEST =
+  'import { expect, it } from "vitest";\n\nit("counts", () => expect(1).toBe(2));\n';
 
 /** What a script reads of a transcript, whichever harness keeps it: the user's prompts and the model's turns. */
 type Said =
@@ -74,28 +79,40 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
     callTool("write_file", { path: "src/hello.ts", content: HELLO }, "call-write"),
     say("Wrote src/hello.ts."),
   ],
-  typecheck: [
+  check: [
     callTool("clone_repo", { repo: "test/fixture" }, "call-clone"),
     callTool("write_file", { path: "src/count.ts", content: COUNT }, "call-write"),
-    callTool("typecheck", {}, "call-typecheck"),
+    callTool("check", {}, "call-check"),
     say("count is a string."),
+  ],
+  "check typecheck": [
+    callTool("clone_repo", { repo: "test/fixture" }, "call-clone"),
+    callTool("check", { only: ["typecheck", "spelling"] }, "call-check"),
+    callTool("check", { only: ["typecheck"] }, "call-check-typecheck"),
+    say("Checked."),
+  ],
+  test: [
+    callTool("clone_repo", { repo: "test/fixture" }, "call-clone"),
+    callTool("write_file", { path: "src/count.test.ts", content: FAILING_TEST }, "call-write"),
+    callTool("test", { files: ["src/count.test.ts"], filter: "counts" }, "call-test"),
+    say("The test fails."),
   ],
   clone: [callTool("clone_repo", { repo: "test/fixture" }, "call-clone"), say("Cloned.")],
   "clone unregistered": [
     callTool("clone_repo", { repo: "evil/repo" }, "call-clone"),
     say("That repo is not registered."),
   ],
-  "change and typecheck": [
+  "change and check": [
     callTool("write_file", { path: "src/new.ts", content: NEW_FILE }, "call-new"),
     callTool(
       "edit_file",
       { path: "src/index.ts", oldText: "'hi'", newText: "'hello'" },
       "call-edit",
     ),
-    callTool("typecheck", {}, "call-typecheck"),
+    callTool("check", {}, "call-check"),
     say("Checked."),
   ],
-  "typecheck only": [callTool("typecheck", {}, "call-typecheck"), say("Checked.")],
+  "check only": [callTool("check", {}, "call-check"), say("Checked.")],
   "read hello": [callTool("read_file", { path: "src/hello.ts" }, "call-read"), recall],
   "list root": [
     callTool("write_file", { path: "./src/hello.ts", content: HELLO }, "call-hello"),
@@ -171,9 +188,11 @@ const SCRIPTS: Record<string, ReadonlyArray<Step>> = {
   e2e: [
     callTool("clone_repo", { repo: "dorbs/e2e" }, "call-clone"),
     callTool("write_file", { path: "src/hello.ts", content: E2E_HELLO }, "call-hello"),
-    callTool("typecheck", {}, "call-typecheck"),
+    callTool("check", {}, "call-check"),
     callTool("write_file", { path: "package.json", content: E2E_PACKAGE }, "call-package"),
-    callTool("typecheck", {}, "call-typecheck-package"),
+    callTool("check", { only: ["typecheck"] }, "call-check-package"),
+    callTool("write_file", { path: "src/hello.test.ts", content: E2E_TEST }, "call-write-test"),
+    callTool("test", { files: ["src/hello.test.ts"] }, "call-test"),
     say("n is a string."),
   ],
   "say slowly": [

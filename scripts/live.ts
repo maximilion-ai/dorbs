@@ -4,12 +4,19 @@
 // HARNESS=opencode runs the sessions on OpenCode instead of Pi.
 
 import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
 import { harness, ok, prompt, runMain, startStack, TS_PROJECT } from "./stack.ts";
 
 const SOCKET = "/tmp/dorbs-acp.sock";
 const CWD = "/tmp/dorbs-live-project";
-const REPO = "dorbs/live";
+// CHECK_URL and CHECK_TOKEN point the Worker at a running checker instead of the local double.
+// LIVE_REPO=owner/name registers that github.com repo instead of the fixture; a private one needs the
+// GitHub App, whose id and key come from ~/.config/dorbs unless GITHUB_APP_ID is set.
+const LIVE_REPO = process.env.LIVE_REPO;
+const REPO = LIVE_REPO ?? "dorbs/live";
+const CONFIG_DIR = NodePath.join(NodeOS.homedir(), ".config/dorbs");
 const MODEL_ID = "deepseek/deepseek-v4.1-flash";
 
 const openrouterKey = process.env.OPENROUTER_API_KEY;
@@ -59,10 +66,29 @@ const ask = async (stack: Stack, text: string) => {
 
 await runMain(async () => {
   NodeFS.mkdirSync(CWD, { recursive: true });
+  if (LIVE_REPO !== undefined && process.env.GITHUB_APP_ID === undefined) {
+    // The Worker child inherits these; nothing prints them.
+    process.env.GITHUB_APP_ID = NodeFS.readFileSync(
+      NodePath.join(CONFIG_DIR, "github-app-id"),
+      "utf8",
+    ).trim();
+    process.env.GITHUB_APP_PRIVATE_KEY = NodeFS.readFileSync(
+      NodePath.join(CONFIG_DIR, "github-app.pkcs8.pem"),
+      "utf8",
+    );
+  }
+  const checkUrl = process.env.CHECK_URL;
+  const checkToken = process.env.CHECK_TOKEN;
   const stack = await startStack({
     repo: REPO,
     harness: harness(),
-    fixture: TS_PROJECT,
+    source:
+      LIVE_REPO === undefined
+        ? { fixture: TS_PROJECT }
+        : { url: `https://github.com/${LIVE_REPO}` },
+    ...(checkUrl === undefined || checkToken === undefined
+      ? {}
+      : { checker: { url: checkUrl, token: checkToken } }),
     cwd: CWD,
     socketPath: SOCKET,
     model: { provider: "openrouter", id: MODEL_ID, openrouterKey },

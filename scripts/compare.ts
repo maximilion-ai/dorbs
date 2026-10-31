@@ -20,12 +20,12 @@ if (provider === "openrouter" && openrouterKey === "") {
   process.exit(1);
 }
 
-/** The scripted model's clone, write, typecheck run; the real model gets soak.ts's conc prompt. */
+/** The scripted model's clone, write, check run; the real model gets soak.ts's conc prompt. */
 const PROMPT = (n: number) =>
   provider === "scripted"
     ? "e2e"
     : `Clone ${REPO}. Use write_file to create src/load${n}.ts exporting function load${n}(xs: number[]): number ` +
-      "that returns the sum. Run the typecheck tool, fix any errors, then reply with one sentence. Do not commit or push.";
+      "that returns the sum. Run the check tool, fix any errors, then reply with one sentence. Do not commit or push.";
 
 const percentile = (sorted: ReadonlyArray<number>, p: number) =>
   sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))] ?? 0;
@@ -85,7 +85,7 @@ const run = async (harness: "pi" | "opencode") => {
   const stack = await startStack({
     repo: REPO,
     harness,
-    fixture: TS_PROJECT,
+    source: { fixture: TS_PROJECT },
     cwd: CWD,
     model: {
       provider,

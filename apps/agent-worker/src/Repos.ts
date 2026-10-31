@@ -5,7 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
-/** The repos clone_repo may clone: their HTTPS urls by id, as the typecheck service registers them. */
+/** The repos clone_repo may clone: their HTTPS urls by id, as the checker service registers them. */
 export class Repos extends Context.Service<Repos, ReadonlyMap<RepoId, string>>()(
   "dorbs/agent-worker/Repos",
 ) {}

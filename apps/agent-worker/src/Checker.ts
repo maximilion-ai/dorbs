@@ -1,15 +1,12 @@
 import {
-  ActionResponse,
-  isProtectedPath,
-  Sha256,
-  ToolchainId,
-  type Action,
-  type ActionResult,
-  type CommitSha,
-  type Rejected,
-  type RelativePath,
-  type RepoId,
-} from "@dorbs/protocol/typecheck";
+  CheckResponse,
+  TestResponse,
+  type Change,
+  type CheckId,
+  type CheckRequest,
+  type TestRequest,
+} from "@dorbs/protocol/checker";
+import type { CommitSha, RepoId } from "@dorbs/protocol/typecheck";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -17,7 +14,7 @@ import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 
-export type WorkspaceFile = { readonly path: RelativePath; readonly content: string };
+export type { Change };
 
 /**
  * The repo and commit a workspace was cloned from, the base branch checked out then, and the branches the
@@ -30,138 +27,111 @@ export type Clone = {
   readonly created?: ReadonlyArray<string>;
 };
 
-/** How a workspace differs from the commit it was cloned from. */
-export type Change = {
-  readonly files: ReadonlyArray<WorkspaceFile>;
-  readonly deleted: ReadonlyArray<RelativePath>;
-};
+/** Which tests a test call runs: files, or for pytest test ids, and a name filter. */
+export type TestSelection = { readonly files?: ReadonlyArray<string>; readonly filter?: string };
 
-export class TypecheckFailed extends Schema.TaggedError<TypecheckFailed>()("TypecheckFailed", {
+export class CheckFailed extends Schema.TaggedError<CheckFailed>()("CheckFailed", {
   reason: Schema.String,
   cause: Schema.optional(Schema.Defect()),
 }) {
   override get message(): string {
-    return `Type check failed: ${this.reason}`;
+    return `The checker failed: ${this.reason}`;
   }
 }
 
-export class Typecheck extends Context.Service<
-  Typecheck,
+export class Checker extends Context.Service<
+  Checker,
   {
     readonly check: (
       clone: Clone,
       change: Change,
-    ) => Effect.Effect<ActionResult | Rejected, TypecheckFailed>;
+      only: ReadonlyArray<CheckId> | undefined,
+    ) => Effect.Effect<CheckResponse, CheckFailed>;
+    readonly test: (
+      clone: Clone,
+      change: Change,
+      selection: TestSelection,
+    ) => Effect.Effect<TestResponse, CheckFailed>;
   }
->()("dorbs/agent-worker/Typecheck") {}
+>()("dorbs/agent-worker/Checker") {}
 
-const TypecheckConfig = Config.all({
-  url: Config.URL("TYPECHECK_URL"),
-  token: Config.Redacted("TYPECHECK_TOKEN"),
+const CheckerConfig = Config.all({
+  url: Config.URL("CHECK_URL"),
+  token: Config.Redacted("CHECK_TOKEN"),
 });
 
-const decodeActionResponse = Schema.decodeUnknownEffect(ActionResponse);
-
-// The one toolchain the typecheck service runs today.
-const TOOLCHAIN = ToolchainId.make("node26-tsrs0.20-oxlint1.89");
-const toSha256 = Schema.decodeSync(Sha256);
-
-const sha256 = (text: string) =>
-  Effect.promise(() => crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))).pipe(
-    Effect.map((digest) =>
-      toSha256(Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("")),
-    ),
-  );
+const decodeCheck = Schema.decodeUnknownEffect(CheckResponse);
+const decodeTest = Schema.decodeUnknownEffect(TestResponse);
 
 const make = Effect.gen(function* () {
-  const { url, token } = yield* TypecheckConfig;
+  const { url, token } = yield* CheckerConfig;
   const base = url.href.replace(/\/$/, "");
   const authorization = `Bearer ${Redacted.value(token)}`;
 
-  const send = (method: string, path: string, body: string, contentType: string) =>
+  const post = <A>(
+    path: string,
+    body: CheckRequest | TestRequest,
+    decode: (json: unknown) => Effect.Effect<A, Schema.SchemaError>,
+  ) =>
     Effect.tryPromise({
       try: () =>
         fetch(`${base}${path}`, {
-          method,
-          body,
-          headers: { authorization, "content-type": contentType },
+          method: "POST",
+          body: JSON.stringify(body),
+          headers: { authorization, "content-type": "application/json" },
         }),
-      catch: (cause) => new TypecheckFailed({ reason: `${method} ${path} did not answer`, cause }),
+      catch: (cause) => new CheckFailed({ reason: `POST ${path} did not answer`, cause }),
     }).pipe(
-      Effect.filterOrFail(
-        (response) => response.ok,
-        (response) =>
-          new TypecheckFailed({ reason: `${method} ${path} answered ${response.status}` }),
-      ),
-    );
-
-  const post = (action: Action) =>
-    send("POST", "/actions", JSON.stringify(action), "application/json").pipe(
       Effect.flatMap((response) =>
         Effect.tryPromise({
-          try: () => response.json(),
-          catch: (cause) =>
-            new TypecheckFailed({ reason: "POST /actions sent invalid JSON", cause }),
+          try: () => response.text(),
+          catch: (cause) => new CheckFailed({ reason: `POST ${path} broke off`, cause }),
+        }).pipe(
+          Effect.filterOrFail(
+            () => response.ok,
+            (text) =>
+              new CheckFailed({
+                reason: `POST ${path} answered ${response.status}: ${text.slice(0, 2000)}`,
+              }),
+          ),
+        ),
+      ),
+      Effect.flatMap((text) =>
+        Effect.try({
+          try: (): unknown => JSON.parse(text),
+          catch: (cause) => new CheckFailed({ reason: `POST ${path} sent invalid JSON`, cause }),
         }),
       ),
       Effect.flatMap((json) =>
-        decodeActionResponse(json).pipe(
+        decode(json).pipe(
           Effect.mapError(
-            (cause) =>
-              new TypecheckFailed({ reason: "POST /actions sent an unknown shape", cause }),
+            (cause) => new CheckFailed({ reason: `POST ${path} sent an unknown shape`, cause }),
           ),
         ),
       ),
     );
 
-  const check = Effect.fn("Typecheck.check")(function* (clone: Clone, change: Change) {
-    // The service would refuse these too; answering here skips the round trip.
-    const touched = [...change.files.map((file) => file.path), ...change.deleted];
-    const protectedPaths = touched.filter(isProtectedPath);
-    if (protectedPaths.length > 0) {
-      return {
-        _tag: "Rejected",
-        reason: { _tag: "ProtectedPaths", paths: protectedPaths },
-      } satisfies Rejected;
-    }
-    const blobs = new Map<Sha256, string>();
-    const hashed = yield* Effect.forEach(change.files, (file) =>
-      sha256(file.content).pipe(
-        Effect.map((sha) => {
-          blobs.set(sha, file.content);
-          return { path: file.path, sha256: sha };
-        }),
-      ),
+  const check: Checker["Service"]["check"] = (clone, change, only) =>
+    post(
+      "/check",
+      { repo: clone.repo, commit: clone.commit, change, ...(only === undefined ? {} : { only }) },
+      decodeCheck,
     );
-    const action: Action = {
-      kind: "check",
-      toolchain: TOOLCHAIN,
-      repo: clone.repo,
-      commit: clone.commit,
-      files: hashed,
-      deleted: change.deleted,
-    };
 
-    const first = yield* post(action);
-    if (first._tag !== "MissingBlobs") return first;
-    yield* Effect.forEach(
-      first.sha256s,
-      (sha) => {
-        const blob = blobs.get(sha);
-        return blob === undefined
-          ? Effect.fail(new TypecheckFailed({ reason: `asked for unknown blob ${sha}` }))
-          : send("PUT", `/blobs/${sha}`, blob, "application/octet-stream");
+  const test: Checker["Service"]["test"] = (clone, change, selection) =>
+    post(
+      "/test",
+      {
+        repo: clone.repo,
+        commit: clone.commit,
+        change,
+        ...(selection.files === undefined ? {} : { files: selection.files }),
+        ...(selection.filter === undefined ? {} : { filter: selection.filter }),
       },
-      { concurrency: 8, discard: true },
+      decodeTest,
     );
-    const second = yield* post(action);
-    if (second._tag !== "MissingBlobs") return second;
-    return yield* new TypecheckFailed({
-      reason: `blobs still missing after upload: ${second.sha256s.join(", ")}`,
-    });
-  });
 
-  return { check };
+  return { check, test };
 });
 
-export const layer = Layer.effect(Typecheck, make);
+export const layer = Layer.effect(Checker, make);

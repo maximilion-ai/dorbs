@@ -48,7 +48,7 @@ const durableLog = (sessionId: string) =>
   });
 
 it("offers the model none of OpenCode's own tools, so none of them runs", async () => {
-  const before = (await double<string[]>("http://typecheck.test/__log")).length;
+  const before = (await double<string[]>("http://checker.test/__log")).length;
   const client = await connect();
   const sessionId = await client.newSession();
   await client.request(2, "session/prompt", prompt(sessionId, "clone github"));
@@ -75,7 +75,7 @@ it("offers the model none of OpenCode's own tools, so none of them runs", async 
     config,
   );
   assert.deepStrictEqual(
-    (await double<string[]>("http://typecheck.test/__log")).slice(before),
+    (await double<string[]>("http://checker.test/__log")).slice(before),
     [],
     "nothing reached the network",
   );
@@ -132,40 +132,40 @@ it("keeps OpenCode's durable event log and transcript across an eviction", async
 });
 
 it("cancels mid tool: the open call fails as interrupted and the session takes the next prompt", async () => {
-  await double("http://typecheck.test/__hold");
+  await double("http://checker.test/__hold");
   try {
     const client = await connect();
     const sessionId = await client.newSession();
-    const cancelled = client.request(2, "session/prompt", prompt(sessionId, "typecheck"));
-    await client.until((frame) => frame.params?.update?.toolCallId === "call-typecheck");
+    const cancelled = client.request(2, "session/prompt", prompt(sessionId, "check"));
+    await client.until((frame) => frame.params?.update?.toolCallId === "call-check");
     client.send({ method: "session/cancel", params: { sessionId } });
     assert.deepStrictEqual((await cancelled).result, { stopReason: "cancelled" });
     assert.deepStrictEqual(
-      updates(client.frames).findLast((update) => update.toolCallId === "call-typecheck"),
+      updates(client.frames).findLast((update) => update.toolCallId === "call-check"),
       {
         sessionUpdate: "tool_call_update",
-        toolCallId: "call-typecheck",
+        toolCallId: "call-check",
         status: "failed",
         content: [
           { type: "content", content: { type: "text", text: "Tool execution interrupted" } },
         ],
       },
     );
-    await double("http://typecheck.test/__release");
+    await double("http://checker.test/__release");
     const next = await client.request(3, "session/prompt", prompt(sessionId, "write hello"));
     assert.deepStrictEqual(next.result, { stopReason: "end_turn" });
   } finally {
-    await double("http://typecheck.test/__release");
+    await double("http://checker.test/__release");
   }
 });
 
 it("catches up from OpenCode's durable log on a turn it ran on alone after a restart", async () => {
-  await double("http://typecheck.test/__hold");
+  await double("http://checker.test/__hold");
   try {
     const client = await connect();
     const sessionId = await client.newSession();
-    const turn = client.request(2, "session/prompt", prompt(sessionId, "typecheck"));
-    await client.until((frame) => frame.params?.update?.toolCallId === "call-typecheck");
+    const turn = client.request(2, "session/prompt", prompt(sessionId, "check"));
+    await client.until((frame) => frame.params?.update?.toolCallId === "call-check");
     // OpenCode resumes the turn while it boots, before the session watches it; here it runs to the end unwatched.
     const restarted = await runInDurableObject(
       env.AcpSession.getByName(sessionId),
@@ -177,7 +177,7 @@ it("catches up from OpenCode's durable log on a turn it ran on alone after a res
       },
     ).catch((error: unknown) => String(error));
     assert.strictEqual(restarted, "Error: restarted");
-    await double("http://typecheck.test/__release");
+    await double("http://checker.test/__release");
     assert.isTrue(await runDurableObjectAlarm(env.AcpSession.getByName(sessionId)));
     await vi.waitFor(
       async () =>
@@ -198,9 +198,7 @@ it("catches up from OpenCode's durable log on a turn it ran on alone after a res
     assert.deepStrictEqual((await turn).result, { stopReason: "end_turn" });
     const live = updates(client.frames);
     assert.deepStrictEqual(
-      live
-        .filter((update) => update.toolCallId === "call-typecheck")
-        .map((update) => update.status),
+      live.filter((update) => update.toolCallId === "call-check").map((update) => update.status),
       ["in_progress", "failed"],
     );
     assert.deepStrictEqual(live.at(-1), {
@@ -210,6 +208,6 @@ it("catches up from OpenCode's durable log on a turn it ran on alone after a res
     const { replay } = await client.load(3, sessionId);
     assert.deepStrictEqual(replay.slice(1, -1), live);
   } finally {
-    await double("http://typecheck.test/__release");
+    await double("http://checker.test/__release");
   }
 });

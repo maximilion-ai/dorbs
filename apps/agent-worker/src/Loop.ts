@@ -6,8 +6,8 @@ import type { SessionHost, SessionRecord } from "./session.ts";
 import type { ToolHost } from "./tools.ts";
 
 export const SYSTEM_PROMPT =
-  "You are a coding agent working in a TypeScript workspace. Every path is relative to the workspace root. " +
-  "Run the typecheck tool after you change code.";
+  "You are a coding agent working in a cloned repo. Every path is relative to the workspace root. " +
+  "Run the check tool after you change code, and the test tool on the tests that cover your change.";
 
 /** What an agent loop needs from the AcpSession that hosts it. */
 export type LoopHost = {

@@ -8,7 +8,7 @@ import { build, type Plugin } from "esbuild";
 import { defineConfig } from "vite-plus";
 
 import { GITHUB_APP_ID } from "../../scripts/githubFixture.ts";
-import { APP_KEY, makeTypecheckDouble } from "./test/typecheck-double.ts";
+import { APP_KEY, makeOutboundDouble } from "./test/outbound-double.ts";
 
 /** Bundled CommonJS `require`s Node built-ins; ESM imports them, as wrangler's nodejs_compat bundling does. */
 const builtins: Plugin = {
@@ -72,8 +72,8 @@ const harness = (name: string, loop: "pi" | "opencode", include: ReadonlyArray<s
         },
         bindings: {
           AGENT_TOKEN: "agent-token",
-          TYPECHECK_URL: "http://typecheck.test",
-          TYPECHECK_TOKEN: "typecheck-token",
+          CHECK_URL: "http://checker.test",
+          CHECK_TOKEN: "check-token",
           REPOS: JSON.stringify([
             { id: "test/fixture", url: "http://git.test/fixture.git" },
             { id: "test/github", url: "https://github.com/test/github.git" },
@@ -87,7 +87,7 @@ const harness = (name: string, loop: "pi" | "opencode", include: ReadonlyArray<s
           MODEL_ID: "scripted",
           ALCHEMY_DEV: "true",
         },
-        outboundService: makeTypecheckDouble(),
+        outboundService: makeOutboundDouble(),
       },
     }),
   ],
@@ -104,13 +104,13 @@ export default defineConfig({
     dedupe: ["@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable"],
   },
   test: {
-    // Each project has its own doubles, whose request log and held typecheck its tests assert on.
+    // Each project has its own doubles, whose request log and held check its tests assert on.
     projects: [
       harness("pi", "pi", ["src/**/*.test.ts", "test/acp.test.ts"]),
       // The ACP behaviours again with OpenCode as the agent loop, then what only OpenCode has to show.
       harness("opencode", "opencode", ["test/acp.test.ts"]),
       harness("opencode-only", "opencode", ["test/opencode.test.ts"]),
-      // Restarts under both loops, apart from the suites above, whose held typecheck they would release.
+      // Restarts under both loops, apart from the suites above, whose held check they would release.
       harness("pi-restart", "pi", ["test/restart.test.ts"]),
       harness("opencode-restart", "opencode", ["test/restart.test.ts"]),
     ],

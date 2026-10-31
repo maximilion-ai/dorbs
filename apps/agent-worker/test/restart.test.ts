@@ -86,7 +86,7 @@ const thread = (updates: ReadonlyArray<any>) =>
 // over a connection, and a restart in the middle of that fetch leaves the import pending for good.
 beforeAll(async () => {
   const client = await connect();
-  await client.request(2, "session/prompt", prompt(await client.newSession(), "typecheck"));
+  await client.request(2, "session/prompt", prompt(await client.newSession(), "check"));
 });
 
 /** The prompts the session has yet to answer; once none is left, nothing can answer one again. */
@@ -94,14 +94,14 @@ const openPrompts = (sessionId: string) =>
   inSession(sessionId, (_instance, state) => state.storage.kv.get("acp/prompts"));
 
 it("finishes a turn whose session restarted in the middle of a tool call", async () => {
-  await double("http://typecheck.test/__hold");
+  await double("http://checker.test/__hold");
   try {
     const client = await connect();
     const sessionId = await client.newSession();
-    const turn = client.request(2, "session/prompt", prompt(sessionId, "typecheck"));
-    await client.until((frame) => frame.params?.update?.toolCallId === "call-typecheck");
+    const turn = client.request(2, "session/prompt", prompt(sessionId, "check"));
+    await client.until((frame) => frame.params?.update?.toolCallId === "call-check");
     const { woken } = await restartSession(sessionId);
-    await double("http://typecheck.test/__release");
+    await double("http://checker.test/__release");
 
     assert.deepStrictEqual((await turn).result, { stopReason: "end_turn" });
     assert.isTrue(await woken);
@@ -115,7 +115,7 @@ it("finishes a turn whose session restarted in the middle of a tool call", async
     const { replay } = await client.load(3, sessionId);
     assert.lengthOf(responses(client.frames, 2), 1, "one response to the prompt");
     assert.isUndefined(await openPrompts(sessionId));
-    assert.deepStrictEqual(replay, [said("typecheck"), ...live, ended("end_turn")]);
+    assert.deepStrictEqual(replay, [said("check"), ...live, ended("end_turn")]);
     assert.strictEqual(
       await inSession(sessionId, (instance) =>
         instance.workspace.fs.readFile("/workspace/src/count.ts", "utf8"),
@@ -123,7 +123,7 @@ it("finishes a turn whose session restarted in the middle of a tool call", async
       COUNT,
     );
   } finally {
-    await double("http://typecheck.test/__release");
+    await double("http://checker.test/__release");
   }
 });
 
@@ -158,20 +158,20 @@ it("finishes a turn whose session restarted in the middle of a model stream", as
 });
 
 it("shows a turn still running to a client that reconnects after its connection restarted, then runs its next prompt", async () => {
-  await double("http://typecheck.test/__hold");
+  await double("http://checker.test/__hold");
   try {
     const first = await connect();
     const sessionId = await first.newSession();
-    first.send({ id: 2, method: "session/prompt", params: prompt(sessionId, "typecheck") });
-    await first.until((frame) => frame.params?.update?.toolCallId === "call-typecheck");
+    first.send({ id: 2, method: "session/prompt", params: prompt(sessionId, "check") });
+    await first.until((frame) => frame.params?.update?.toolCallId === "call-check");
     await restart(env.AcpConnection.getByName(first.connection));
 
     const second = await connect();
     const attached = await second.load(1, sessionId);
-    assert.deepStrictEqual(attached.replay.at(-1)?.toolCallId, "call-typecheck");
+    assert.deepStrictEqual(attached.replay.at(-1)?.toolCallId, "call-check");
     // T3 sends the user's next prompt as soon as the load answers; it waits behind the running turn.
     const next = second.request(2, "session/prompt", prompt(sessionId, "write hello"));
-    await double("http://typecheck.test/__release");
+    await double("http://checker.test/__release");
 
     assert.deepStrictEqual((await next).result, { stopReason: "end_turn" });
     const live = updates(second.frames.slice(attached.replay.length + 1));
@@ -199,7 +199,7 @@ it("shows a turn still running to a client that reconnects after its connection 
       ended("end_turn"),
     ]);
   } finally {
-    await double("http://typecheck.test/__release");
+    await double("http://checker.test/__release");
   }
 });
 

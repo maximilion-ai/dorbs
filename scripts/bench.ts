@@ -25,7 +25,7 @@ type Task = "edit" | "survey";
 const promptFor = (task: Task, name: string) =>
   task === "edit"
     ? `Clone the GitHub repo ${REPO} into the current working directory. Add src/${name}.ts exporting a function ${name}(xs: number[]): number ` +
-      "that returns the sum of xs. Type check the project (use your typecheck tool if you have one, " +
+      "that returns the sum of xs. Type check the project (use your check tool if you have one, " +
       "otherwise run `npx --yes -p typescript tsc --noEmit` in the clone), fix any errors, then commit " +
       `the change on a new local branch bench/${name}. Do not push and do not open a pull request. ` +
       "Reply with one sentence."
@@ -66,7 +66,7 @@ type Run = {
 
 const classify = (label: string): string => {
   if (/git clone|gh repo clone/u.test(label)) return "clone";
-  if (/typecheck|\btsc\b/u.test(label)) return "typecheck";
+  if (/typecheck|\bcheck\b|\btsc\b/u.test(label)) return "typecheck";
   if (/^(write|edit)|^(write_file|edit_file)\b|apply_patch/u.test(label)) return "write";
   if (/(^|`|&& ?|; ?)git /u.test(label)) return "git";
   return "other";

@@ -1,14 +1,14 @@
-// The local chain T3 Code drives: nc -U -> acp-mux -> agent Worker (alchemy dev) -> typecheck service.
+// The local chain T3 Code drives: nc -U -> acp-mux -> agent Worker (alchemy dev) -> checker service.
 
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
-import * as NodeNet from "node:net";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 import * as NodeAssert from "node:assert/strict";
 
+import { checkerDouble } from "./checkerDouble.ts";
 import { makeRepo, nodeListener, serveGit, type FixtureFile } from "./gitFixture.ts";
 
 const ROOT = NodePath.resolve(import.meta.dirname, "..");
@@ -81,30 +81,6 @@ export const until = async <A>(
       }
     })(),
   );
-
-const freePort = () =>
-  new Promise<number>((resolve, reject) => {
-    const server = NodeNet.createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      server.close(() =>
-        typeof address === "object" && address !== null
-          ? resolve(address.port)
-          : reject(new Error("no port")),
-      );
-    });
-  });
-
-const accepts = (port: number) =>
-  new Promise<true | undefined>((resolve) => {
-    const socket = NodeNet.createConnection({ host: "127.0.0.1", port });
-    socket.once("connect", () => {
-      socket.destroy();
-      resolve(true);
-    });
-    socket.once("error", () => resolve(undefined));
-  });
 
 const tempDir = (prefix: string) => {
   // Under /tmp, not os.tmpdir(): macOS's long tmpdir pushes a socket path past the 104-byte limit.
@@ -245,9 +221,9 @@ export const acpClient = (nc: NodeChildProcess.ChildProcessWithoutNullStreams) =
   return { frames, next, sendLine, send, request, updates };
 };
 
-/** Serves the bare repos under `root` over git's smart HTTP on a free port. */
-const gitServer = async (root: string): Promise<number> => {
-  const server = NodeHttp.createServer(nodeListener(serveGit(root)));
+/** Serves `handler` on a free port. */
+const serve = async (handler: (request: Request) => Promise<Response>): Promise<number> => {
+  const server = NodeHttp.createServer(nodeListener(handler));
   servers.push(server);
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
@@ -273,7 +249,10 @@ export const harness = (): "pi" | "opencode" => {
 export type StackOptions = {
   readonly repo: string;
   readonly harness: "pi" | "opencode";
-  readonly fixture: Record<string, FixtureFile>;
+  /** The repo's files, served from a local bare repo; or a github.com url, which the Worker clones itself. */
+  readonly source: { readonly fixture: Record<string, FixtureFile> } | { readonly url: string };
+  /** The checker the Worker calls: a running service, or the local double when absent. */
+  readonly checker?: { readonly url: string; readonly token: string };
   /** The cwd T3 Code would send in session/new; nc starts here. */
   readonly cwd: string;
   readonly model: {
@@ -286,37 +265,31 @@ export type StackOptions = {
 };
 
 export const startStack = async (options: StackOptions) => {
-  const typecheckPort = await freePort();
-  const typecheckToken = NodeCrypto.randomBytes(16).toString("hex");
   const agentToken = NodeCrypto.randomBytes(16).toString("hex");
-  const dataDir = tempDir("dorbs-e2e-data-");
   const gitRoot = tempDir("dorbs-e2e-git-");
   const gitDir = NodePath.join(gitRoot, "repo.git");
-  const commit = makeRepo(gitDir, options.fixture);
-  const gitUrl = `http://127.0.0.1:${await gitServer(gitRoot)}/repo.git`;
-  const reposFile = NodePath.join(gitRoot, "repos.json");
-  NodeFS.writeFileSync(reposFile, JSON.stringify([{ id: options.repo, url: gitUrl }]));
-  ok(`${options.repo} at ${commit} is served on ${gitUrl}`);
+  const local = "fixture" in options.source ? options.source.fixture : undefined;
+  const commit = local === undefined ? undefined : makeRepo(gitDir, local);
+  const gitUrl =
+    "url" in options.source
+      ? options.source.url
+      : `http://127.0.0.1:${await serve(serveGit(gitRoot))}/repo.git`;
+  ok(`${options.repo} at ${commit ?? "its default branch"} is served on ${gitUrl}`);
   const socketPath = options.socketPath ?? NodePath.join(tempDir("dorbs-e2e-mux-"), "mux.sock");
   const createdCwd = !NodeFS.existsSync(options.cwd);
   NodeFS.mkdirSync(options.cwd, { recursive: true });
   if (createdCwd) tempDirs.push(options.cwd);
 
-  const typecheck = start("typecheck", "pnpm", ["--filter", "@dorbs/typecheck", "start"], {
-    cwd: ROOT,
-    env: {
-      PORT: String(typecheckPort),
-      DATA_DIR: dataDir,
-      REPOS_FILE: reposFile,
-      TYPECHECK_TOKEN: typecheckToken,
-    },
-  });
-  await until(30_000, "typecheck to listen", async () => {
-    if (typecheck.proc.exitCode !== null)
-      throw new Error(`typecheck exited:\n${typecheck.output()}`);
-    return accepts(typecheckPort);
-  });
-  ok(`typecheck service listens on 127.0.0.1:${typecheckPort}`);
+  // The real checker needs Linux and Docker; without one, the Worker calls the double, which answers alike.
+  const doubleToken = NodeCrypto.randomBytes(16).toString("hex");
+  const double = options.checker === undefined ? checkerDouble(doubleToken) : undefined;
+  const checker =
+    options.checker ??
+    (double === undefined
+      ? undefined
+      : { url: `http://127.0.0.1:${await serve(double.handle)}`, token: doubleToken });
+  if (checker === undefined) throw new Error("unreachable");
+  ok(`the checker ${double === undefined ? "service" : "double"} answers on ${checker.url}`);
 
   const worker = start(
     "agent-worker",
@@ -326,8 +299,8 @@ export const startStack = async (options: StackOptions) => {
       cwd: WORKER_DIR,
       env: {
         AGENT_TOKEN: agentToken,
-        TYPECHECK_URL: `http://127.0.0.1:${typecheckPort}`,
-        TYPECHECK_TOKEN: typecheckToken,
+        CHECK_URL: checker.url,
+        CHECK_TOKEN: checker.token,
         HARNESS: options.harness,
         MODEL_PROVIDER: options.model.provider,
         MODEL_ID: options.model.id,
@@ -393,9 +366,8 @@ export const startStack = async (options: StackOptions) => {
   };
 
   return {
-    typecheckPort,
-    typecheckToken,
-    dataDir,
+    checker,
+    double,
     commit,
     gitDir,
     gitUrl,
@@ -415,7 +387,7 @@ const cleanup = async () => {
   for (const dir of tempDirs) NodeFS.rmSync(dir, { recursive: true, force: true });
 };
 
-// Ctrl-C and a background stop both tear the stack down; otherwise workerd and the typecheck service outlive us.
+// Ctrl-C and a background stop both tear the stack down; otherwise workerd outlives us.
 for (const [signal, code] of [
   ["SIGINT", 130],
   ["SIGTERM", 143],
