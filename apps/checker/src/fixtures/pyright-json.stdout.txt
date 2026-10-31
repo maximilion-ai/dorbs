@@ -1,0 +1,44 @@
+{
+    "version": "1.1.414",
+    "time": "1793432921189",
+    "generalDiagnostics": [
+        {
+            "file": "/env/repo/pkg/a.py",
+            "severity": "error",
+            "message": "Type \"Literal['a']\" is not assignable to declared type \"int\"\n  \"Literal['a']\" is not assignable to \"int\"",
+            "range": {
+                "start": {
+                    "line": 0,
+                    "character": 9
+                },
+                "end": {
+                    "line": 0,
+                    "character": 12
+                }
+            },
+            "rule": "reportAssignmentType"
+        },
+        {
+            "file": "/env/repo/pkg/a.py",
+            "severity": "warning",
+            "message": "Import \"os\" is not accessed",
+            "range": {
+                "start": {
+                    "line": 1,
+                    "character": 7
+                },
+                "end": {
+                    "line": 1,
+                    "character": 9
+                }
+            }
+        }
+    ],
+    "summary": {
+        "filesAnalyzed": 1,
+        "errorCount": 1,
+        "warningCount": 1,
+        "informationCount": 0,
+        "timeInSec": 0.139
+    }
+}

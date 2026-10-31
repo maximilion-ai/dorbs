@@ -128,6 +128,8 @@ const workspaceDirs = (repo: RepoView, root: Manifest): ReadonlyArray<string> =>
 };
 
 type PackageManager = "pnpm" | "yarn" | "yarn-berry" | "npm" | "bun";
+const isPackageManager = (name: string): name is PackageManager =>
+  ["pnpm", "yarn", "npm", "bun"].includes(name);
 
 const LOCKFILES: ReadonlyArray<readonly [string, PackageManager]> = [
   ["pnpm-lock.yaml", "pnpm"],
@@ -147,7 +149,7 @@ const packageManager = (repo: RepoView, root: Manifest) => {
     ((pinned !== null && Number(pinned[2]) >= 2) ||
       repo.read(".yarnrc.yml") !== undefined ||
       (repo.read("yarn.lock") ?? "").includes("__metadata:"));
-  const manager: PackageManager = berry ? "yarn-berry" : (name as PackageManager);
+  const manager: PackageManager = berry ? "yarn-berry" : isPackageManager(name) ? name : "npm";
   const note =
     pinned !== null
       ? `${root.packageManager} from packageManager`
@@ -157,24 +159,16 @@ const packageManager = (repo: RepoView, root: Manifest) => {
   return { manager, lockfile: lockfile?.[0], note };
 };
 
-const install = (manager: PackageManager, locked: boolean): string => {
-  switch (manager) {
-    case "pnpm":
-      return locked
-        ? "pnpm install --frozen-lockfile --ignore-scripts"
-        : "pnpm install --ignore-scripts";
-    case "yarn":
-      return `yarn install${locked ? " --frozen-lockfile" : ""} --ignore-scripts --non-interactive`;
-    case "yarn-berry":
-      return `yarn install${locked ? " --immutable" : ""} --mode=skip-build`;
-    case "npm":
-      return locked
-        ? "npm ci --ignore-scripts --no-audit --no-fund"
-        : "npm install --ignore-scripts --no-audit --no-fund";
-    case "bun":
-      return `bun install${locked ? " --frozen-lockfile" : ""} --ignore-scripts`;
-  }
-};
+const install = (manager: PackageManager, locked: boolean): string =>
+  ({
+    pnpm: `pnpm install${locked ? " --frozen-lockfile" : ""} --ignore-scripts --ignore-pnpmfile`,
+    yarn: `yarn install${locked ? " --frozen-lockfile" : ""} --ignore-scripts --non-interactive`,
+    "yarn-berry": `yarn install${locked ? " --immutable" : ""} --mode=skip-build`,
+    npm: locked
+      ? "npm ci --ignore-scripts --no-audit --no-fund"
+      : "npm install --ignore-scripts --no-audit --no-fund",
+    bun: `bun install${locked ? " --frozen-lockfile" : ""} --ignore-scripts`,
+  })[manager];
 
 const runScript = (manager: PackageManager, script: string): string =>
   manager === "npm"
@@ -182,18 +176,14 @@ const runScript = (manager: PackageManager, script: string): string =>
     : `${manager === "yarn-berry" ? "yarn" : manager} run ${script}`;
 
 /** A package binary, run the way the manager finds it. */
-const exec = (manager: PackageManager, bin: string): string => {
-  switch (manager) {
-    case "pnpm":
-      return `pnpm exec ${bin}`;
-    case "yarn":
-    case "yarn-berry":
-      return `yarn ${bin}`;
-    case "npm":
-    case "bun":
-      return `node_modules/.bin/${bin}`;
-  }
-};
+const exec = (manager: PackageManager, bin: string): string =>
+  ({
+    pnpm: `pnpm exec ${bin}`,
+    yarn: `yarn ${bin}`,
+    "yarn-berry": `yarn ${bin}`,
+    npm: `node_modules/.bin/${bin}`,
+    bun: `node_modules/.bin/${bin}`,
+  })[manager];
 
 /** The TypeScript version the lockfile pins, if it pins one. */
 const typescriptVersion = (repo: RepoView, lockfile: string | undefined): string | undefined => {

@@ -1,0 +1,5 @@
+::warning title=lint/correctness/noUnusedVariables,file=/env/repo/src/App.svelte,line=2,endLine=2,col=7,endColumn=8::This variable x is unused.
+::warning title=lint/correctness/noUnusedVariables,file=/env/repo/src/a.ts,line=2,endLine=2,col=7,endColumn=13::This variable unused is unused.
+::warning title=lint/correctness/noUnusedVariables,file=/env/repo/src/c.js,line=1,endLine=1,col=7,endColumn=8::This variable a is unused.
+::error title=lint/suspicious/noDebugger,file=/env/repo/src/b.ts,line=1,endLine=1,col=1,endColumn=10::This is an unexpected use of the debugger statement.
+::error title=lint/suspicious/noDebugger,file=/env/repo/src/c.js,line=2,endLine=2,col=1,endColumn=10::This is an unexpected use of the debugger statement.

@@ -1,0 +1,15 @@
+=== RUN   TestOk
+--- PASS: TestOk (0.00s)
+=== RUN   TestBad
+    a_test.go:6: boom
+--- FAIL: TestBad (0.00s)
+=== RUN   TestSkip
+    a_test.go:7: later
+--- SKIP: TestSkip (0.00s)
+=== RUN   TestSub
+=== RUN   TestSub/inner
+--- PASS: TestSub (0.00s)
+    --- PASS: TestSub/inner (0.00s)
+FAIL
+FAIL	example.com/w/pkg/a	0.001s
+FAIL

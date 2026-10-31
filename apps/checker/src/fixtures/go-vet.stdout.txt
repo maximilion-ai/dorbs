@@ -1,0 +1,11 @@
+{
+	"example.com/w/pkg/a": {
+		"printf": [
+			{
+				"posn": "/env/repo/pkg/a/a.go:5:24",
+				"end": "/env/repo/pkg/a/a.go:5:26",
+				"message": "fmt.Printf format %d has arg \"x\" of wrong type string"
+			}
+		]
+	}
+}

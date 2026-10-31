@@ -1,14 +1,9 @@
 import type { CommitSha } from "@dorbs/protocol/typecheck";
 
 /**
- * Where an environment is in its life. One environment is one repo at one recipe, key-file content and
- * image; every thread on that repo shares it, one run at a time.
- *
- *   Absent ─▶ SettingUp ─▶ Ready ⇄ Busy
- *                 │          │ ▲
- *                 ▼          ▼ │
- *              Failed      Idle (container stopped)
- *   Ready, Idle and Failed ─▶ Evicted ─▶ SettingUp
+ * Where an environment is in its life: one repo at one recipe, key-file content and image, shared by
+ * every thread on the repo, one run at a time. Absent → SettingUp → Ready ⇄ Busy; SettingUp → Failed;
+ * Ready ⇄ Idle, its container stopped; Ready, Idle and Failed → Evicted; Failed and Evicted → SettingUp.
  */
 export type EnvState =
   | { readonly _tag: "Absent" }

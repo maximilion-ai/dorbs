@@ -35,7 +35,7 @@ it("runs a pnpm repo's own typecheck and lint scripts after a frozen install", (
     "test/fixtures/package.json": json({ name: "fixture" }),
     "src/index.ts": "",
   });
-  assert.deepStrictEqual(detected, {
+  assert.deepStrictEqual<unknown>(detected, {
     image: "node",
     keyFiles: [
       "package.json",
@@ -48,7 +48,7 @@ it("runs a pnpm repo's own typecheck and lint scripts after a frozen install", (
     setup: [
       {
         id: "install",
-        run: "pnpm install --frozen-lockfile --ignore-scripts",
+        run: "pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile",
         cwd: ".",
         network: true,
       },
@@ -91,7 +91,7 @@ it("runs tsc -b for project references and eslint with JSON output when the repo
     "eslint.config.js": "export default [];",
   });
   assert.deepStrictEqual(detected.setup[0]?.run, "npm ci --ignore-scripts --no-audit --no-fund");
-  assert.deepStrictEqual(detected.checks, [
+  assert.deepStrictEqual<unknown>(detected.checks, [
     {
       id: "tsc",
       run: "node_modules/.bin/tsc -b --pretty false",
@@ -134,7 +134,7 @@ it("tells yarn classic from berry and passes legacy eslint the TypeScript extens
   });
   assert.deepStrictEqual(berry.setup[0]?.run, "yarn install --immutable --mode=skip-build");
   assert.deepStrictEqual(berry.checks[0]?.run, "yarn run lint");
-  assert.includeMembers(berry.keyFiles, [".yarnrc.yml", ".yarn/releases/yarn-4.5.0.cjs"]);
+  assert.includeMembers([...berry.keyFiles], [".yarnrc.yml", ".yarn/releases/yarn-4.5.0.cjs"]);
 });
 
 it("installs a bun repo with bun", () => {
@@ -162,7 +162,7 @@ it("syncs each SvelteKit workspace package offline after the install", () => {
     "sites/old/package.json": json({ devDependencies: { "@sveltejs/kit": "1" } }),
     "fixtures/kit/package.json": json({ devDependencies: { "@sveltejs/kit": "2" } }),
   });
-  assert.deepStrictEqual(detected.setup.slice(1), [
+  assert.deepStrictEqual<unknown>(detected.setup.slice(1), [
     {
       id: "svelte-kit sync sites/docs",
       run: "pnpm exec svelte-kit sync",
@@ -179,7 +179,7 @@ it("runs node --test with the test script's flags, and a workspace's tests per p
     }),
     "package-lock.json": "{}",
   });
-  assert.deepStrictEqual(node.test, {
+  assert.deepStrictEqual<unknown>(node.test, {
     run: "node --experimental-strip-types --test",
     cwd: ".",
     target: "files",
@@ -190,7 +190,7 @@ it("runs node --test with the test script's flags, and a workspace's tests per p
     "package-lock.json": "{}",
     "apps/web/package.json": json({ scripts: { test: "vitest run" } }),
   });
-  assert.deepStrictEqual(workspace.test, {
+  assert.deepStrictEqual<unknown>(workspace.test, {
     run: "npm test -w {dir} --",
     cwd: ".",
     target: "workspace",
@@ -205,7 +205,7 @@ it("syncs a uv project and runs the type checkers, linters and pytest it locks",
     "uv.lock": 'name = "pyright"\nname = "ruff"\nname = "pytest"\n',
     ".python-version": "3.12\n",
   });
-  assert.deepStrictEqual(detected, {
+  assert.deepStrictEqual<unknown>(detected, {
     image: "python",
     keyFiles: [".python-version", "libs/a/pyproject.toml", "pyproject.toml", "uv.lock"],
     setup: [
@@ -251,7 +251,7 @@ it("installs requirements files into a venv and prefers basedpyright", () => {
     "go.mod": "module x\n",
   });
   assert.deepStrictEqual(detected.image, "python");
-  assert.deepStrictEqual(detected.setup, [
+  assert.deepStrictEqual<unknown>(detected.setup, [
     {
       id: "install",
       run: "uv venv && uv pip install -r requirements-dev.txt -r requirements.txt",
@@ -271,7 +271,7 @@ it("checks a cargo workspace offline with JSON messages and filters its tests by
     "Cargo.lock": "",
     "axum/Cargo.toml": '[package]\nname = "axum"\n',
   });
-  assert.deepStrictEqual(detected, {
+  assert.deepStrictEqual<unknown>(detected, {
     image: "rust",
     keyFiles: ["Cargo.lock", "Cargo.toml", "axum/Cargo.toml"],
     setup: [{ id: "fetch", run: "cargo fetch --locked", cwd: ".", network: true }],
@@ -296,7 +296,7 @@ it("checks a cargo workspace offline with JSON messages and filters its tests by
 
 it("builds and vets a Go module and tests the packages of the given files", () => {
   const detected = recipe({ "go.mod": "module github.com/cli/cli/v2\n", "go.sum": "" });
-  assert.deepStrictEqual(detected, {
+  assert.deepStrictEqual<unknown>(detected, {
     image: "go",
     keyFiles: ["go.mod", "go.sum"],
     setup: [{ id: "download", run: "go mod download", cwd: ".", network: true }],
@@ -321,14 +321,17 @@ it("lets .dorbs/check.json replace what detection found, and keys the environmen
     }),
     "tools/setup.sh": "",
   });
-  assert.deepStrictEqual(detected.setup, [
+  assert.deepStrictEqual<unknown>(detected.setup, [
     { id: "install", run: "npm ci --legacy-peer-deps --ignore-scripts", cwd: ".", network: true },
   ]);
-  assert.deepStrictEqual(detected.checks, [
+  assert.deepStrictEqual<unknown>(detected.checks, [
     { id: "tsc", run: "npx tsc -b packages", cwd: ".", format: "text", scope: "repo" },
   ]);
   assert.strictEqual(detected.test, undefined);
-  assert.includeMembers(detected.keyFiles, [".dorbs/check.json", "tools/setup.sh", "package.json"]);
+  assert.includeMembers(
+    [...detected.keyFiles],
+    [".dorbs/check.json", "tools/setup.sh", "package.json"],
+  );
   assert.include(detected.notes, ".dorbs/check.json overrides setup, checks, test");
 });
 

@@ -6,9 +6,8 @@ export type Ecosystem = "node" | "python" | "rust" | "go";
 export const ECOSYSTEMS: ReadonlyArray<Ecosystem> = ["node", "python", "rust", "go"];
 
 /**
- * How a check's output turns into diagnostics. `text` reads the line formats of tsc, svelte-check,
- * eslint's stylish, prettier --check, GitHub annotations and file:line:col compilers, which is what a
- * repo's own script prints.
+ * How a check's output turns into diagnostics. `text` reads what repos' own scripts print: tsc,
+ * svelte-check, eslint's stylish, prettier --check, GitHub annotations and file:line:col lines.
  */
 export type DiagnosticFormat =
   | "text"
@@ -39,17 +38,14 @@ export type Check = Command & {
 };
 
 /**
- * How a test request becomes a command. The runner's summary gives the counts, whichever runner it is.
- * - files: the files follow `run`.
- * - packages: Go's packages of the files, such as ./pkg/x, follow `run`; ./... without files.
- * - workspace: one run per workspace package of the files, `{dir}` in `run` naming it and the files,
- *   relative to it, following.
- * - filter: the runner takes no files, only the filter.
+ * How a test request becomes a command. files: the files follow `run`. packages: their Go packages
+ * follow, ./... without files. workspace: one run per package of the files, `{dir}` in `run` naming
+ * it and the files relative to it following. filter: the runner takes only a name filter.
  */
 export type TestCommand = Command & {
   readonly target: "files" | "packages" | "workspace" | "filter";
-  /** The flag before a name filter, such as -t; empty when the filter is positional, as cargo's is. */
-  readonly filterFlag: string;
+  /** The flag before a name filter, such as -t: empty when it is positional, undefined without filters. */
+  readonly filterFlag: string | undefined;
 };
 
 /** How to set up, check and test one repo, detected from its files or read from .dorbs/check.json. */
