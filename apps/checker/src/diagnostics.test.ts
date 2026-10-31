@@ -223,3 +223,24 @@ it("keeps JSON it cannot read as output lines", () => {
     },
   );
 });
+
+it("reads pyright's and basedpyright's human output", () => {
+  assert.deepStrictEqual(
+    parse(
+      "text",
+      [
+        "/env/repo/searx/webapp.py",
+        '  /env/repo/searx/webapp.py:10:5 - error: "x" is not defined (reportUndefinedVariable)',
+        "  /env/repo/searx/webapp.py:12:1 - warning: Import cycle",
+        "2 errors, 1 warning, 0 notes",
+      ].join("\n"),
+    ),
+    {
+      diagnostics: [
+        'searx/webapp.py:9:4-9:4 1 pyright reportUndefinedVariable "x" is not defined',
+        "searx/webapp.py:11:0-11:0 2 pyright Import cycle",
+      ],
+      output: ["/env/repo/searx/webapp.py", "2 errors, 1 warning, 0 notes"],
+    },
+  );
+});

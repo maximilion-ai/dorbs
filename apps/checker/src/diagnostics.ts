@@ -122,6 +122,7 @@ type Collector = ReturnType<typeof collector>;
 const TSC = /^((?:(?!: ).)+?)\((\d+),(\d+)\): (error|warning|message) (TS\d+): (.*)$/;
 const GITHUB = /^::(error|warning|notice) ([^:]*)::(.*)$/;
 const PRETTIER = /^\[warn\] (\S+)$/;
+const PYRIGHT = /^\s*(\S.*?):(\d+):(\d+) - (error|warning|information): (.*?)(?: \((\w+)\))?$/;
 const SVELTE_MACHINE =
   /^\d+ (ERROR|WARNING|HINT) ("(?:[^"\\]|\\.)*") (\d+):(\d+) ("(?:[^"\\]|\\.)*")$/;
 const SVELTE_LOCATION = /^(\S.*):(\d+):(\d+)$/;
@@ -182,6 +183,19 @@ const lineDiagnostic = (
       severity: severityOf(severity),
       code: title,
       source: title !== undefined && BIOME_CATEGORY.test(title) ? "biome" : context.source,
+      message,
+    });
+  }
+  const pyright = PYRIGHT.exec(line);
+  if (pyright !== null) {
+    const [, path = "", row, column, severity = "", message = "", rule] = pyright;
+    return diagnostic(context, cwd, {
+      path,
+      line: Number(row),
+      column: Number(column),
+      severity: severityOf(severity),
+      code: rule,
+      source: "pyright",
       message,
     });
   }

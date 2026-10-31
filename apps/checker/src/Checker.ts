@@ -15,7 +15,7 @@ import type {
   TestRequest,
   TestResponse,
 } from "@dorbs/protocol/checker";
-import type { CommitSha, RelativePath } from "@dorbs/protocol/typecheck";
+import type { CommitSha } from "@dorbs/protocol/typecheck";
 
 import { parseOutput } from "./diagnostics.ts";
 import { Docker, type ImageMissing, REPO_ROOT } from "./Docker.ts";
@@ -23,10 +23,11 @@ import { detect, workspacePackages } from "./detect.ts";
 import { type EnvSpec, Environments, type Session } from "./Environments.ts";
 import { type FetchFailed, Git } from "./Git.ts";
 import type { Check, Recipe, RepoView } from "./Recipe.ts";
-import { type Repo, ServiceConfig } from "./ServiceConfig.ts";
+import { ServiceConfig } from "./ServiceConfig.ts";
 import { quote, testCommands } from "./testCommand.ts";
 import { testCounts } from "./testSummary.ts";
 import type { UnsafePath } from "./Tree.ts";
+import { setupChange, viewOf } from "./view.ts";
 
 export class Checker extends Context.Service<
   Checker,
@@ -40,7 +41,6 @@ export class Checker extends Context.Service<
   }
 >()("dorbs/checker/Checker") {}
 
-const OVERRIDE = ".dorbs/check.json";
 // What a check's answer carries of the lines no parser read, and a test's of its output.
 const OUTPUT_LINES = 200;
 const OUTPUT_BYTES = 32 * 1024;
@@ -51,28 +51,6 @@ const unsafe = (error: UnsafePath) =>
   Effect.succeed(rejected({ _tag: "UnsafePath", paths: error.paths }));
 
 const sha256 = (text: string) => NodeCrypto.createHash("sha256").update(text).digest("hex");
-
-/**
- * The commit's files with the change laid over them. The recipe file comes from the operator or the
- * commit, never from the change: setup steps reach the network, so only those who can push choose them.
- */
-const viewOf = (
-  paths: ReadonlyArray<RelativePath>,
-  inputs: ReadonlyMap<string, string>,
-  change: Change,
-  repo: Repo,
-): RepoView => {
-  const files = new Map(inputs);
-  const deleted = new Set<string>(change.deleted);
-  for (const path of deleted) if (path !== OVERRIDE) files.delete(path);
-  for (const file of change.files) if (file.path !== OVERRIDE) files.set(file.path, file.content);
-  if (repo.recipe !== undefined) files.set(OVERRIDE, repo.recipe);
-  const all = new Set<RelativePath>([
-    ...paths.filter((path) => !deleted.has(path)),
-    ...change.files.map((f) => f.path),
-  ]);
-  return { paths: [...all].toSorted(), read: (path) => files.get(path) };
-};
 
 /** Workspace package directories by package name, for output that names packages rather than paths. */
 const packagesByName = (view: RepoView): ReadonlyMap<string, string> => {
@@ -126,7 +104,7 @@ const make = Effect.gen(function* () {
       .pipe(Effect.catchTags({ UnknownCommit: () => Effect.succeed(undefined) }));
     if (gitDir === undefined) return rejected({ _tag: "UnknownCommit" });
     const { paths, inputs } = yield* git.files(gitDir, request.commit);
-    const view = viewOf(paths, inputs, request.change, repo);
+    const view = viewOf(paths, inputs, request.change, repo.recipe);
     const recipe = detect(view);
     if ("reason" in recipe) return rejected({ _tag: "NoRecipe", reason: recipe.reason });
     const image = yield* docker.imageId(recipe.image);
@@ -145,10 +123,7 @@ const make = Effect.gen(function* () {
       gitDir,
       recipe,
       image,
-      keyChange: {
-        files: request.change.files.filter((file) => keyFiles.has(file.path)),
-        deleted: request.change.deleted.filter((path) => keyFiles.has(path)),
-      },
+      keyChange: setupChange(request.change, keyFiles),
     };
     return { spec, view };
   });
