@@ -33,9 +33,9 @@ it("sets up, serves runs one at a time, idles and comes back", () => {
 it("keeps a failed setup's output and sets up again on the next request", () => {
   const failed = run([
     { _tag: "SetupStarted" },
-    { _tag: "SetupFailed", step: "install", output: "E404" },
+    { _tag: "SetupFailed", step: "install", output: "E404", at: 3 },
   ]);
-  assert.deepStrictEqual(failed, { _tag: "Failed", step: "install", output: "E404" });
+  assert.deepStrictEqual(failed, { _tag: "Failed", step: "install", output: "E404", at: 3 });
   assert.deepStrictEqual(transition(failed, { _tag: "SetupStarted" }), { _tag: "SettingUp" });
 });
 

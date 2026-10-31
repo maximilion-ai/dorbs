@@ -84,8 +84,27 @@ export const make = (spawner: ChildProcessSpawner.ChildProcessSpawner["Service"]
     );
   });
 
+  /**
+   * Removes whatever a run left in place of a directory on the way to `path`, a link above all, so
+   * nothing that follows deletes or writes outside the tree.
+   */
+  const clearWay = Effect.fn("Tree.clearWay")(function* (tree: Tree, path: string) {
+    const names = path.split("/");
+    for (let end = 1; end < names.length; end += 1) {
+      const prefix = NodePath.join(tree.workTree, ...names.slice(0, end));
+      const stat = yield* lstat(prefix);
+      if (stat === undefined) return;
+      if (!stat.isDirectory()) {
+        // rm removes a link itself, never what it points to.
+        yield* Effect.promise(() => NodeFSP.rm(prefix, { force: true }));
+        return;
+      }
+    }
+  });
+
   /** Takes an overlay off: tracked paths get the index's content back, new files and their directories go. */
   const restore = Effect.fn("Tree.restore")(function* (tree: Tree, overlay: Overlay) {
+    for (const path of [...overlay.touched, ...overlay.created]) yield* clearWay(tree, path);
     if (overlay.touched.length > 0) {
       const tracked = (yield* git(spawner, tree, ["ls-files", "-z", "--", ...overlay.touched]))
         .split("\0")

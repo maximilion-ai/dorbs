@@ -11,13 +11,18 @@ export type EnvState =
   | { readonly _tag: "Ready"; readonly tree: CommitSha; readonly lastUsed: number }
   | { readonly _tag: "Busy"; readonly tree: CommitSha; readonly lastUsed: number }
   | { readonly _tag: "Idle"; readonly tree: CommitSha; readonly lastUsed: number }
-  | { readonly _tag: "Failed"; readonly step: string; readonly output: string }
+  | { readonly _tag: "Failed"; readonly step: string; readonly output: string; readonly at: number }
   | { readonly _tag: "Evicted" };
 
 export type EnvEvent =
   | { readonly _tag: "SetupStarted" }
   | { readonly _tag: "SetupSucceeded"; readonly tree: CommitSha; readonly at: number }
-  | { readonly _tag: "SetupFailed"; readonly step: string; readonly output: string }
+  | {
+      readonly _tag: "SetupFailed";
+      readonly step: string;
+      readonly output: string;
+      readonly at: number;
+    }
   | { readonly _tag: "Acquired" }
   /** A run ended; the tree is at `tree` again, with no change laid over it. */
   | { readonly _tag: "Released"; readonly tree: CommitSha; readonly at: number }
@@ -45,7 +50,7 @@ export const transition = (state: EnvState, event: EnvEvent): EnvState => {
       break;
     case "SetupFailed":
       if (state._tag === "SettingUp") {
-        return { _tag: "Failed", step: event.step, output: event.output };
+        return { _tag: "Failed", step: event.step, output: event.output, at: event.at };
       }
       break;
     case "Acquired":

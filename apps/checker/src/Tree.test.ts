@@ -154,3 +154,32 @@ it.effect("takes off an overlay a crash left behind", () =>
     yield* ops.recover(tree);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
+
+it.effect("takes an overlay off without following a link a run put in its way", () =>
+  Effect.gen(function* () {
+    const { root, tree, first } = fixture();
+    const ops = yield* trees;
+    yield* ops.materialize(tree, first);
+    const outside = NodePath.join(root, "outside");
+    NodeFS.mkdirSync(NodePath.join(outside, "deep"), { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(outside, "deep/b.ts"), "keep me");
+    NodeFS.writeFileSync(NodePath.join(outside, "a.ts"), "keep me too");
+    const overlay = yield* ops.overlay(tree, {
+      files: [
+        { path: path("src/new/deep/b.ts"), content: "1" },
+        { path: path("lib/a.ts"), content: "2" },
+      ],
+      deleted: [],
+    });
+    // A check swaps the directories the overlay wrote into for links out of the tree.
+    NodeFS.rmSync(NodePath.join(tree.workTree, "src/new"), { recursive: true });
+    NodeFS.symlinkSync(outside, NodePath.join(tree.workTree, "src/new"));
+    NodeFS.rmSync(NodePath.join(tree.workTree, "lib"), { recursive: true });
+    NodeFS.symlinkSync(outside, NodePath.join(tree.workTree, "lib"));
+    yield* ops.restore(tree, overlay);
+    assert.strictEqual(NodeFS.readFileSync(NodePath.join(outside, "deep/b.ts"), "utf8"), "keep me");
+    assert.strictEqual(NodeFS.readFileSync(NodePath.join(outside, "a.ts"), "utf8"), "keep me too");
+    assert.isFalse(NodeFS.existsSync(NodePath.join(tree.workTree, "src/new")));
+    assert.isFalse(NodeFS.existsSync(NodePath.join(tree.workTree, "lib")));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
