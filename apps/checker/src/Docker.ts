@@ -38,6 +38,8 @@ const CONTAINER_ENV: Readonly<Record<string, string>> = {
   // The tree has no .git, so packages that take their version from git get a fixed one.
   SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0",
   UV_DYNAMIC_VERSIONING_BYPASS: "0.0.0",
+  // The pyright wheel's nodeenv fails to parse a pre-release in nodejs.org's index; a pinned version skips it.
+  PYRIGHT_PYTHON_NODE_VERSION: "24.22.1",
 };
 
 export class ImageMissing extends Schema.TaggedError<ImageMissing>()("ImageMissing", {
