@@ -160,6 +160,7 @@ fn recipe(setup: Vec<SetupStep>) -> Recipe {
         setup,
         checks: vec![],
         test: None,
+        warm: vec![],
         notes: vec![],
     }
 }

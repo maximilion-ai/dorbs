@@ -63,6 +63,7 @@ An adapter is one TOML file per ecosystem in `adapters/`, which the binary embed
 - `output.errorformat`: the patterns a check without its own format is read with. `output.prefixes` and `output.names`: how a `pnpm -r` or turbo prefix names the package a line comes from. `workspace`: which directories are workspace packages.
 - `[[let.NAME]]`: options for a value the templates name as `{NAME.field}`; the first whose `when` holds wins.
 - `[[setup]]`, `[[checks]]`, `[[tests]]`: the defaults, each with an optional `when`. A setup step's `each` runs it in each workspace package whose files match.
+- `[[warm]]`: a cache under the repo root, with an optional `when`, that each run gets back as a warm-up on the commit left it.
 
 A `when` holds when each field it gives does: `exists` (a path matches one of these globs), `absent` (none matches), `contains` (a matching file's content matches a regex, whose named groups the templates can use), `vars` (template values equal these) and `any` (one of these conditions holds).
 
@@ -70,16 +71,16 @@ A `when` holds when each field it gives does: `exists` (a path matches one of th
 
 A check or test names one of five formats. A run whose command names `{report}` is read from the file it writes there; its stdout and stderr stay output. Whatever no format reads comes back as output lines.
 
-- `errorformat`: vim's patterns, as `:help errorformat` and reviewdog have them, with `%E %W %I %N %A %C %Z` for multi-line messages and `%P %Q` for a file's lines. `%n` reads a code such as TS2322 or no-unused-vars.
+- `errorformat`: vim's patterns, as `:help errorformat` and reviewdog have them, with `%E %W %I %N %A %C %Z` for multi-line messages `%P %Q` for a file's lines and `%D %X` for a directory's. `%n` reads a code such as TS2322 or no-unused-vars.
 - `sarif`: SARIF 2.1 results, as ruff writes them.
 - `junit`, `tap`: test counts from a runner's report.
 - `raw`: nothing to read.
 
 ## Environments
 
-An environment is one repo at one recipe, setup key-file content and image; its key is their hash, so a change to a lockfile or manifest selects a new environment. Every request on the repo shares it, one run at a time in the order they came. `REPLICAS` (1) copies of it, each with its own tree and container, let that many runs on one repo go at once: a request takes a free copy, sets up a new one while there are fewer, or queues on the copy with the fewest requests; `RUN_SLOTS` (4) caps the runs across all environments. States: absent, setting up, ready, busy, idle (container stopped), failed (its output answered again for `RETRY_SETUP_AFTER`, 10 minutes), evicted.
+An environment is one repo at one recipe, setup key-file content and image; its key is their hash, so a change to a lockfile or manifest selects a new environment. Every request on the repo shares it, one run at a time in the order they came. `REPLICAS` (1) copies of it, each with its own tree and container, let that many runs on one repo go at once: requests wait in one line, and the earliest takes a free ready copy, else sets up a new one while there are fewer, else takes whichever copy comes free first; `RUN_SLOTS` (4) caps the runs across all environments. A request that is the same change as a run holding a copy runs beside it. States: absent, setting up, ready, busy, idle (container stopped), failed (its output answered again for `RETRY_SETUP_AFTER`, 10 minutes), evicted.
 
-Setup checks the online steps' key files out into `$DATA_DIR/envs/<key>/repo`, with an empty file for each stub, and runs the online steps; then that tree goes, the commit is checked out, the change's key files are laid over it, and the other steps run, each step in a container of its own. A run lays the change over the tree in place, runs, kills whatever it left running, and takes the change off: new files go, and every tracked file that differs from the index gets the commit's content back.
+Setup checks the online steps' key files out into `$DATA_DIR/envs/<key>/repo`, with an empty file for each stub, and runs the online steps; then that tree goes, the commit is checked out, the change's key files are laid over it, and the other steps run, each step in a container of its own. With `[[warm]]` caches, the checks then run once on the commit, and those caches are kept in `warm.tar` in the environment's directory. A run lays the change over the tree in place, runs, kills whatever it left running, and takes the change off: new files go, and every tracked file that differs from the index gets the commit's content back; the warm caches go back to what the warm-up left, so a run pays for its own change and not the last one's.
 
 Past `DISK_BUDGET` (12 GiB) of environments, the least recently used are evicted. A container idle for `IDLE_AFTER` (10 minutes) stops. After a restart, environments come back idle and their containers are made anew.
 

@@ -8,7 +8,9 @@
 //!   backslash atoms: `\s \d \w \S \D \W`, `\(...\)`, `\|`, `\=`, `\?`, `\+`, `\{-}`, `\{n,m}`, `\,`.
 //!   Every other character is literal.
 //! - Prefixes: `%E %W %I %N %A` start a multi-line message, `%C` continues and `%Z` ends it (`%+C`
-//!   adds the whole line, `%-C` nothing), `%P` sets the file of the lines that follow, `%Q` clears it.
+//!   adds the whole line, `%-C` nothing), `%P` sets the file of the lines that follow, `%Q` clears it,
+//!   `%D` sets the directory relative paths in the lines that follow are under (none without `%f`),
+//!   `%X` clears it.
 //!
 //! A line that ends up in no diagnostic is kept as output.
 
@@ -25,6 +27,8 @@ enum Kind {
     End,
     PushFile,
     PopFile,
+    EnterDir,
+    LeaveDir,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +108,14 @@ impl Errorformat {
                     state.file = None;
                     into.raw(&line.raw);
                 }
+                Kind::EnterDir => {
+                    state.dir = caps.name("f").map(|f| f.as_str().to_owned());
+                    into.raw(&line.raw);
+                }
+                Kind::LeaveDir => {
+                    state.dir = None;
+                    into.raw(&line.raw);
+                }
                 Kind::Continue | Kind::End => unreachable!("continuations are tried above"),
             }
         }
@@ -123,6 +135,8 @@ struct State {
     open: Option<Pending>,
     /// The file `%P` set, and where its line is in the output until a diagnostic uses it.
     file: Option<(String, Option<usize>)>,
+    /// The directory `%D` set.
+    dir: Option<String>,
 }
 
 impl State {
@@ -133,7 +147,11 @@ impl State {
         let path = pending
             .path
             .clone()
-            .or_else(|| self.file.as_ref().map(|f| f.0.clone()));
+            .or_else(|| self.file.as_ref().map(|f| f.0.clone()))
+            .map(|path| match &self.dir {
+                Some(dir) if !path.starts_with('/') => format!("{dir}/{path}"),
+                _ => path,
+            });
         // A pattern without %m, such as prettier's [warn] %f, says it all in its line.
         let message = (pending.message.as_deref())
             .map(str::trim_end)
@@ -317,7 +335,9 @@ fn prefix(chars: &[char]) -> Result<(Kind, Text, usize), String> {
         Some('Z') => Kind::End,
         Some('P') => Kind::PushFile,
         Some('Q') => Kind::PopFile,
-        Some(c @ ('G' | 'O' | 'D' | 'X' | '>' | 'r' | 's' | 'p' | 'v')) => {
+        Some('D') => Kind::EnterDir,
+        Some('X') => Kind::LeaveDir,
+        Some(c @ ('G' | 'O' | '>' | 'r' | 's' | 'p' | 'v')) => {
             return Err(format!("%{c} is not supported"));
         }
         _ if text.is_some() => return Err("a + or - prefix names no kind".into()),

@@ -54,6 +54,8 @@ pub struct Recipe {
     pub setup: Vec<SetupStep>,
     pub checks: Vec<Check>,
     pub test: Option<Test>,
+    /// The adapter's caches each run gets back as the warm-up on the commit left them.
+    pub warm: Vec<String>,
     /// Where each part came from, for the operator's log.
     #[serde(skip)]
     pub notes: Vec<String>,
@@ -156,6 +158,7 @@ pub struct Defaults {
     /// How the image runs a repo command, by source key, `{name}` naming the command.
     pub commands: BTreeMap<String, String>,
     pub errorformat: Vec<String>,
+    pub warm: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +216,7 @@ pub fn merge(
         setup,
         checks,
         test,
+        warm: defaults.warm.clone(),
         notes,
     }
 }
@@ -391,6 +395,10 @@ pub fn defaults(scope: &Scope, local: bool) -> Result<Defaults, String> {
         test,
         commands,
         errorformat: adapter.output.errorformat.clone(),
+        warm: (adapter.warm.iter())
+            .filter(|warm| scope.holds(&warm.when, &mut BTreeMap::new()))
+            .map(|warm| warm.path.clone())
+            .collect(),
     })
 }
 

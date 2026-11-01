@@ -295,6 +295,18 @@ pub struct Adapter {
     pub checks: Vec<CheckDef>,
     #[serde(default)]
     pub tests: Vec<TestDef>,
+    /// Caches under the repo root, such as a task runner's, that a run leaves for the next: setup runs
+    /// the checks once on the commit, and every run gets these paths back as that left them.
+    #[serde(default)]
+    pub warm: Vec<WarmDef>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WarmDef {
+    pub path: String,
+    #[serde(default)]
+    pub when: When,
 }
 
 impl Adapter {

@@ -526,6 +526,19 @@ fn reads_oxlint_github_annotations_with_the_rule_last() {
 }
 
 #[test]
+fn reads_tsc_errors_under_the_package_vp_run_names() {
+    let stdout = fixture("vp-typecheck.stdout");
+    let (diagnostics, _, _) = Run::errorformat("node", &stdout).parse();
+    assert_eq!(
+        diagnostics,
+        strings(&[
+            "packages/shared/src/String.ts:9:13-9:13 1 TS2322 Type 'string' is not assignable to type 'number'.",
+            "scripts/a.ts:1:0-1:0 1 TS2304 Cannot find name 'x'.",
+        ])
+    );
+}
+
+#[test]
 fn refuses_a_pattern_it_cannot_read() {
     let adapters = Adapters::load(None).unwrap();
     for adapter in &adapters.list {
