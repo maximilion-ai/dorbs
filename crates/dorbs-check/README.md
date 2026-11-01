@@ -106,4 +106,5 @@ systemctl --user enable --now dorbs-checker
 pnpm rust                                                   # anywhere: fmt, clippy, the parsers, recipes, trees, the CLI
 cargo test --test live -- --ignored                         # on the host: the setup and tree escapes
 node scripts/checker-accept.ts [owner/name ...]             # on the host: the spike repos against their own commands
+node scripts/checker-bench.ts up --binary PATH | run | down   # on the host: 20 eval jobs on a bench instance, port 8791
 ```
