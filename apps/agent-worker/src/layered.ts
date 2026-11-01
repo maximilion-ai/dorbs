@@ -499,7 +499,7 @@ export class LayeredFs {
       const encoding = typeof options === "string" ? options : option(options, "encoding");
       return encoding === "utf8" || encoding === "utf-8"
         ? decoder.decode(bytes)
-        : NodeBuffer.Buffer.from(bytes);
+        : searchable(NodeBuffer.Buffer.from(bytes));
     },
     writeFile: (path, data, options) => this.#write(path, data, options),
     mkdir: async (link, options) => {
@@ -683,6 +683,21 @@ const byPathLine = (
   a: { path: string; line: number },
   b: { path: string; line: number },
 ): number => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line);
+
+/**
+ * `buffer` with a byte search that takes time in the bytes it scans. celld's Buffer#indexOf takes about 57 ms on a
+ * 3 MB buffer wherever it starts, and isomorphic-git calls it once per index entry: 28 minutes for T3 Code's index.
+ */
+const searchable = (buffer: NodeBuffer.Buffer): NodeBuffer.Buffer => {
+  const search = buffer.indexOf.bind(buffer);
+  Object.defineProperty(buffer, "indexOf", {
+    value: (value: string | number | Uint8Array, offset?: number, encoding?: BufferEncoding) =>
+      typeof value === "number"
+        ? Uint8Array.prototype.indexOf.call(buffer, value & 0xff, offset ?? 0)
+        : search(value, offset ?? 0, encoding ?? "utf8"),
+  });
+  return buffer;
+};
 
 // As Linux's limit on links followed in one lookup.
 const MAX_LINKS = 40;
