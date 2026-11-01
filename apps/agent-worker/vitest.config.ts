@@ -109,7 +109,7 @@ export default defineConfig({
   test: {
     // Each project has its own doubles, whose request log and held check its tests assert on.
     projects: [
-      harness("pi", "pi", ["src/**/*.test.ts", "test/acp.test.ts"]),
+      harness("pi", "pi", ["src/**/*.test.ts", "test/acp.test.ts", "test/clone.test.ts"]),
       // The ACP behaviours again with OpenCode as the agent loop, then what only OpenCode has to show.
       harness("opencode", "opencode", ["test/acp.test.ts"]),
       // Minting under both loops, apart from the suites above, whose tokens sessions share.

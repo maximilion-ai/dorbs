@@ -4,6 +4,9 @@ import type { GitCliResult } from "@cloudflare/computer/git";
 import { parseArgv } from "./argv.ts";
 import type { Clone } from "./Checker.ts";
 
+/** Repo paths the agent's tools wrote since the clone, or "all" once a git command may have changed any file. */
+export type Touched = ReadonlyArray<string> | "all";
+
 /** The cloned repo git runs in, and how pushes reach origin. */
 export type GitContext = {
   readonly workspace: Workspace;
@@ -15,6 +18,146 @@ export type GitContext = {
   readonly url: string | undefined;
   /** Credentials for origin's url; see GitHub's headers. */
   readonly headers: (url: string) => Promise<Readonly<Record<string, string>> | undefined>;
+  readonly touched: () => Touched;
+  readonly touch: (paths: Touched) => void;
+};
+
+// Subcommands that change no file in the work tree; any other may, so it widens what later commands look at to all.
+const LEAVES_FILES = new Set([
+  "status",
+  "diff",
+  "log",
+  "show",
+  "add",
+  "commit",
+  "push",
+  "branch",
+  "rev-parse",
+  "ls-files",
+  "ls-tree",
+  "cat-file",
+  "tag",
+  "describe",
+  "shortlog",
+  "blame",
+  "grep",
+  "reflog",
+  "show-ref",
+  "merge-base",
+  "--version",
+  "--help",
+  "-h",
+]);
+
+/** Whether `checkout -b x` or `switch -c x` only makes a branch at HEAD, which leaves every file as it is. */
+const onlyBranches = (subcommand: string, args: ReadonlyArray<string>): boolean => {
+  if (subcommand !== "checkout" && subcommand !== "switch") return false;
+  const creates = args.some((arg) => ["-b", "-B", "-c", "-C"].includes(arg));
+  return creates && args.filter((arg) => !arg.startsWith("-")).length === 1;
+};
+
+/** The blob ids a git index records, by path; dorbs's clone and isomorphic-git write version 2. */
+const indexOids = (index: Uint8Array): ReadonlyMap<string, string> => {
+  const view = new DataView(index.buffer, index.byteOffset, index.byteLength);
+  const oids = new Map<string, string>();
+  let at = 12;
+  for (let n = view.getUint32(8); n > 0; n -= 1) {
+    const oid = Array.from(index.subarray(at + 40, at + 60), (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
+    const length = view.getUint16(at + 60) & 0xfff;
+    oids.set(new TextDecoder().decode(index.subarray(at + 62, at + 62 + length)), oid);
+    at += Math.ceil((62 + length + 1) / 8) * 8;
+  }
+  return oids;
+};
+
+const bytesOf = async (stream: ReadableStream<Uint8Array>): Promise<Uint8Array> =>
+  new Uint8Array(await new Response(stream).arrayBuffer());
+
+/**
+ * git status over the paths the agent changed, printed as Computer's git prints it. A whole-repo status walks every
+ * file and holds every index and tree entry at once, which a large repo's cannot afford in 128 MB.
+ */
+const scopedStatus = async (
+  context: GitContext,
+  paths: ReadonlyArray<string>,
+  args: ReadonlyArray<string>,
+): Promise<string> => {
+  const { workspace, dir } = context;
+  const stage = indexOids(await bytesOf(await workspace.fs.readFile(`${dir}/.git/index`)));
+  const trees = new Map<string, ReadonlyMap<string, string>>();
+  const headOid = async (path: string): Promise<string | undefined> => {
+    const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+    if (!trees.has(parent)) {
+      const entries = await workspace.git
+        .lsTree({ dir, ref: "HEAD", ...(parent === "" ? {} : { path: parent }) })
+        .catch(() => []);
+      trees.set(parent, new Map(entries.map((entry) => [entry.path, entry.oid])));
+    }
+    return trees.get(parent)?.get(path.slice(path.lastIndexOf("/") + 1));
+  };
+  const lines: string[] = [];
+  for (const path of [...paths].toSorted()) {
+    const stat = await workspace.fs.lstat(`${dir}/${path}`).catch(() => undefined);
+    const content =
+      stat === undefined
+        ? undefined
+        : stat.isSymbolicLink
+          ? await workspace.fs.readlink(`${dir}/${path}`)
+          : await bytesOf(await workspace.fs.readFile(`${dir}/${path}`));
+    const work =
+      content === undefined ? undefined : await workspace.git.hashObject({ dir, content });
+    const head = await headOid(path);
+    const staged = stage.get(path);
+    // isomorphic-git's statusMatrix numbers, which Computer's status codes read.
+    const h = head === undefined ? 0 : 1;
+    const w = work === undefined ? 0 : work === head ? 1 : 2;
+    const s = staged === undefined ? 0 : staged === head ? 1 : staged === work ? 2 : 3;
+    const index = h === 0 && s > 0 ? "A" : h === 1 && s === 0 ? "D" : h === 1 && s >= 2 ? "M" : " ";
+    const tree =
+      w === 0 && s > 0 ? "D" : h === 0 && s === 0 && w > 0 ? "?" : w === 2 && s !== 3 ? "M" : " ";
+    if (index === " " && tree === " ") continue;
+    const short = args.includes("-s") || args.includes("--short");
+    const v1 = args.some((arg) => arg === "--porcelain=v1" || arg === "--porcelain=1");
+    if (tree === "?") lines.push(short ? ` ? ${path}` : v1 ? `?? ${path}` : `? ${path}`);
+    else lines.push(short || v1 ? `${index}${tree} ${path}` : `1 ${index}${tree} ${path}`);
+  }
+  return lines.length === 0 ? "(no output)" : lines.join("\n");
+};
+
+/**
+ * The command line to run with whole-repo forms narrowed to the paths the agent changed: `diff` without paths,
+ * `add -A` or `add .`, and `commit -a`, which stages them first.
+ */
+const narrowed = (
+  argv: ReadonlyArray<string>,
+  paths: ReadonlyArray<string>,
+): ReadonlyArray<string> => {
+  const [subcommand, ...args] = argv;
+  if (subcommand === "diff" && !args.includes("--")) return [...argv, "--", ...paths];
+  if (subcommand === "add" && args.some((arg) => ["-A", "--all", "."].includes(arg))) {
+    return ["add", ...args.filter((arg) => !["-A", "--all", "."].includes(arg)), "--", ...paths];
+  }
+  return argv;
+};
+
+/** `commit -a`, `-am` and `--all` without the stage-all flag, or undefined when the commit has none. */
+const withoutCommitAll = (args: ReadonlyArray<string>): ReadonlyArray<string> | undefined => {
+  let found = false;
+  const kept = args.flatMap((arg) => {
+    if (arg === "--all") {
+      found = true;
+      return [];
+    }
+    if (/^-[a-zA-Z]+$/u.test(arg) && arg.includes("a")) {
+      found = true;
+      const rest = arg.replaceAll("a", "");
+      return rest === "-" ? [] : [rest];
+    }
+    return [arg];
+  });
+  return found ? kept : undefined;
 };
 
 // The agent owns the network and the remotes; push is the one way out, and the tool runs it.
@@ -156,5 +299,34 @@ export const git = async (line: string, context: GitContext): Promise<string> =>
     return failed(`git does not take paths in the repo's git directory, such as ${gitPath}.`);
   }
   if (subcommand === "push") return push(args, context);
-  return cliText(await context.workspace.git.cli({ argv: [...argv], cwd: context.dir }));
+  const run = async (line: ReadonlyArray<string>) =>
+    cliText(await context.workspace.git.cli({ argv: [...line], cwd: context.dir }));
+  if (
+    subcommand !== undefined &&
+    !LEAVES_FILES.has(subcommand) &&
+    !onlyBranches(subcommand, args)
+  ) {
+    context.touch("all");
+  }
+  const touched = context.touched();
+  if (touched === "all") return run(argv);
+  if (subcommand === "status") return scopedStatus(context, touched, args);
+  if (subcommand === "commit") {
+    const rest = withoutCommitAll(args);
+    if (rest !== undefined && touched.length > 0) {
+      const staged = await context.workspace.git.cli({
+        argv: ["add", "--", ...touched],
+        cwd: context.dir,
+      });
+      if (staged.exitCode !== 0) return cliText(staged);
+      return run(["commit", ...rest]);
+    }
+    if (rest !== undefined) return run(["commit", ...rest]);
+  }
+  if ((subcommand === "diff" || subcommand === "add") && touched.length === 0) {
+    return subcommand === "diff"
+      ? "(no output)"
+      : run(argv.filter((arg) => !["-A", "--all", "."].includes(arg)));
+  }
+  return run(narrowed(argv, touched));
 };

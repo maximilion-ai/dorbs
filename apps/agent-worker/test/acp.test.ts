@@ -339,7 +339,11 @@ it("sends only the files changed since the cloned commit, and the deleted ones",
       },
     },
   ]);
-  await inSession(sessionId, (instance) => instance.workspace.fs.rm("/workspace/src/old.ts"));
+  // As a tool's change would, the deletion is recorded among the paths the agent touched.
+  await inSession(sessionId, async (instance) => {
+    await instance.workspace.fs.rm("/workspace/src/old.ts");
+    instance.toolHost.touch(["src/old.ts"]);
+  });
   const record = await recordSince();
   const checked = await client.request(3, "session/prompt", prompt(sessionId, "change and check"));
   assert.deepStrictEqual(checked.result, { stopReason: "end_turn" });
@@ -794,6 +798,7 @@ it("cuts each tool result to 64 KB and says how to read the rest", async () => {
     await instance.workspace.fs.writeFile("/workspace/big.txt", `${lines.join("\n")}\n`);
     await instance.workspace.fs.writeFile("/workspace/src/index.ts", `${lines.join("\n")}\n`);
     await instance.workspace.fs.writeFile("/workspace/min.js", minified);
+    instance.toolHost.touch(["big.txt", "src/index.ts", "min.js"]);
   });
   await client.request(3, "session/prompt", prompt(sessionId, "read big"));
   const frames = updates(client.frames);

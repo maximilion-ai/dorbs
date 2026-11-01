@@ -12,6 +12,7 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 
 import * as GitHub from "./GitHub.ts";
 import { tokenCache } from "./GitHubTokens.ts";
+import type { Touched } from "./git.ts";
 import type { Loop, LoopHost } from "./Loop.ts";
 import { ModelChoices, ModelProvider, type ModelUnavailable } from "./ModelProvider.ts";
 import { makeOpenCodeLoop } from "./OpenCodeLoop.ts";
@@ -38,6 +39,7 @@ const RECORD_KEY = "acp/session";
 const ATTACHED_KEY = "acp/attached";
 const PROMPTS_KEY = "acp/prompts";
 const CLONE_KEY = "workspace/clone";
+const TOUCHED_KEY = "workspace/touched";
 /** The Lifecycle job that deletes this session once it has been idle for the retention period. */
 const RETIRE = "retire";
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -77,6 +79,13 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
       repos: () => this.runtime.runPromise(Effect.service(Repos.Repos)),
       clone: () => this.ctx.storage.kv.get<Checker.Clone>(CLONE_KEY),
       saveClone: (clone) => this.ctx.storage.kv.put(CLONE_KEY, clone),
+      touched: () => this.ctx.storage.kv.get<Touched>(TOUCHED_KEY) ?? [],
+      touch: (paths) => {
+        const current = this.ctx.storage.kv.get<Touched>(TOUCHED_KEY) ?? [];
+        const next =
+          paths === "all" || current === "all" ? "all" : [...new Set([...current, ...paths])];
+        this.ctx.storage.kv.put(TOUCHED_KEY, next);
+      },
       check: (clone, change, only) =>
         this.runtime.runPromise(
           Effect.flatMap(Effect.service(Checker.Checker), (checker) =>

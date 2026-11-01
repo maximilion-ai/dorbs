@@ -20,6 +20,7 @@ import { git, isGitPath } from "./git.ts";
 import type { GitHub } from "./GitHub.ts";
 import type { Change, Clone, TestSelection } from "./Checker.ts";
 import { shallowClone } from "./clone.ts";
+import type { Touched } from "./git.ts";
 
 export const WORKSPACE_ROOT = "/workspace";
 
@@ -31,6 +32,9 @@ export type ToolHost = {
   /** The repo the workspace was cloned from, once clone_repo has run. */
   readonly clone: () => Clone | undefined;
   readonly saveClone: (clone: Clone) => void;
+  /** Repo paths the tools wrote since the clone; git status, diff and check look at these, not the whole repo. */
+  readonly touched: () => Touched;
+  readonly touch: (paths: Touched) => void;
   /** Runs the repo's static checks, or only the named ones, on the commit with the change laid over it. */
   readonly check: (
     clone: Clone,
@@ -245,6 +249,7 @@ const write = async (
   const oldText = await readIfPresent(host.workspace, target);
   await host.workspace.fs.mkdir(target.slice(0, target.lastIndexOf("/")), { recursive: true });
   await host.workspace.fs.writeFile(target, newText);
+  host.touch([relative(target)]);
   const change: FileChange = {
     path: decodePath(relative(target)),
     ...(oldText === undefined ? {} : { oldText }),
@@ -256,9 +261,18 @@ const write = async (
 // The clone keeps its git directory in the workspace; no tool lists or searches it.
 const NOT_GIT = { exclude: [".git"] };
 
-/** The workspace's files that differ from `commit`, new ones included, and those deleted since. */
-const changesSince = async (workspace: Workspace, commit: CommitSha): Promise<Change> => {
-  const entries = await workspace.git.diffSummary({ dir: WORKSPACE_ROOT, ref: commit });
+/** The workspace's files that differ from `commit`, new ones included, and those deleted since, among `touched`. */
+const changesSince = async (
+  workspace: Workspace,
+  commit: CommitSha,
+  touched: Touched,
+): Promise<Change> => {
+  if (touched !== "all" && touched.length === 0) return { files: [], deleted: [] };
+  const entries = await workspace.git.diffSummary({
+    dir: WORKSPACE_ROOT,
+    ref: commit,
+    ...(touched === "all" ? {} : { paths: [...touched] }),
+  });
   const files = await Promise.all(
     entries
       .filter((entry) => entry.status !== "D")
@@ -490,7 +504,11 @@ const TOOLS = [
       const ids = only?.map((id) => decodeCheckId(id));
       return text(
         checkText(
-          await host.check(clone, await changesSince(host.workspace, clone.commit), ids),
+          await host.check(
+            clone,
+            await changesSince(host.workspace, clone.commit, host.touched()),
+            ids,
+          ),
           clone,
         ),
         "Fix these first, or check with only to see one check at a time.",
@@ -529,7 +547,11 @@ const TOOLS = [
       // The checker keeps the end of a long run's output, where the failures and the summary are.
       return text(
         testText(
-          await host.test(clone, await changesSince(host.workspace, clone.commit), selection),
+          await host.test(
+            clone,
+            await changesSince(host.workspace, clone.commit, host.touched()),
+            selection,
+          ),
           clone,
         ),
         "Run fewer tests to see the rest.",
@@ -567,6 +589,8 @@ const TOOLS = [
           },
           url,
           headers,
+          touched: host.touched,
+          touch: host.touch,
         }),
         "Narrow the command, such as git log -n 20 or git diff -- <path>.",
       );
