@@ -49,7 +49,6 @@ const TOKEN_FILE = NodePath.join(DIR, "check-token");
 const ENV_FILE = NodePath.join(DIR, "checker.env");
 const ROOT = NodePath.resolve(import.meta.dirname, "..");
 const UID = process.getuid?.() ?? 0;
-const CGROUP_USER = `/sys/fs/cgroup/user.slice/user-${UID}.slice/user@${UID}.service`;
 /** With SLICE=1, the service and its containers run in this slice, which holds the whole budget. */
 const SLICE = "dorbs-checker-bench.slice";
 const SLICE_FILE = NodePath.join(HOME, ".config/systemd/user", SLICE);
@@ -515,7 +514,16 @@ const sampler = () => {
     const now = cgroup === undefined ? undefined : counters(cgroup);
     if (now !== undefined) containers.set(id, { name, first: now, last: now, peak: 0 });
   }
-  const slice = `${CGROUP_USER}/${SLICE}`;
+  // systemd nests a slice under one per dash of its name, so ask it where; only a run in the slice has one.
+  const inSlice = NodeFS.readFileSync(ENV_FILE, "utf8").includes("CONTAINER_CGROUP_PARENT=");
+  const sliceGroup = quiet("systemctl", [
+    "--user",
+    "show",
+    "--property=ControlGroup",
+    "--value",
+    SLICE,
+  ]);
+  const slice = inSlice ? `/sys/fs/cgroup${sliceGroup.stdout.trim()}` : "/nonexistent";
   const sliced = { first: counters(slice), last: counters(slice), peak: 0 };
   const sample = () => {
     let memory = 0;
