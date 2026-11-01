@@ -9,6 +9,7 @@
       "entry": [
         "scripts/checker.ts",
         "scripts/checker-accept.ts",
+        "scripts/checker-bench.ts",
         "scripts/checkerEscapeProbe.ts",
         "scripts/hillclimb/plans.ts",
         "scripts/hillclimb/replay.ts",
