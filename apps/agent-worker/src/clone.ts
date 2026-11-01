@@ -3,6 +3,8 @@ import * as NodeCrypto from "node:crypto";
 import type { Workspace } from "@cloudflare/computer";
 import * as pako from "pako";
 
+import { isGitPath } from "./git.ts";
+
 /**
  * A clone that never holds a repo's whole pack, which overruns a Durable Object's 128 MB on a large repo. It fetches
  * the tip commit and its trees with `filter blob:none`, then the blobs by id in batches, and keeps each pack as git
@@ -358,7 +360,14 @@ const listFiles = (
   const walk = (oid: string, prefix: string) => {
     const object = objects.get(oid);
     if (object?.type !== "tree") throw new Error(`origin sent no tree ${oid}`);
+    const names = new Set<string>();
     for (const entry of treeEntries(object.data)) {
+      // Git's fsck refuses these; a clone that writes files from a tree refuses them too.
+      const unsafe = ["", ".", ".."].includes(entry.name) || /[/\\\0]/u.test(entry.name);
+      if (unsafe || entry.name.toLowerCase() === ".git" || names.has(entry.name)) {
+        throw new Error(`origin's tree has an entry named ${JSON.stringify(entry.name)}`);
+      }
+      names.add(entry.name);
       const path = `${prefix}${entry.name}`;
       if (entry.mode === "40000") walk(entry.oid, `${path}/`);
       else files.push({ path, mode: entry.mode, oid: entry.oid });
@@ -464,6 +473,7 @@ export const shallowClone = async (
     await mkdir(`${dir}/${entry.path}`);
     await record(entry, `${dir}/${entry.path}`);
   }
+  const links: Array<{ entry: Entry; target: string; path: string }> = [];
   const byBlob = new Map<string, Entry[]>();
   for (const entry of files.filter((file) => file.mode !== "160000")) {
     byBlob.set(entry.oid, [...(byBlob.get(entry.oid) ?? []), entry]);
@@ -481,13 +491,18 @@ export const shallowClone = async (
       (byBlob.get(object.oid) ?? []).map((entry) => async () => {
         const path = `${dir}/${entry.path}`;
         await mkdir(parentOf(path));
-        if (entry.mode === "120000") await workspace.fs.symlink(decoder.decode(object.data), path);
-        else
-          await workspace.fs.writeFile(
-            path,
-            object.data,
-            entry.mode === "100755" ? { mode: 0o777 } : {},
-          );
+        if (entry.mode === "120000") {
+          // Links come last, so no file or directory of the clone is written through one.
+          const target = decoder.decode(object.data);
+          if (isGitPath(target)) throw new Error(`${entry.path} links into a git directory`);
+          links.push({ entry, target, path });
+          return;
+        }
+        await workspace.fs.writeFile(
+          path,
+          object.data,
+          entry.mode === "100755" ? { mode: 0o777 } : {},
+        );
         await record(entry, path);
       }),
     );
@@ -497,6 +512,10 @@ export const shallowClone = async (
     }
   }
 
+  for (const { entry, target, path } of links) {
+    await workspace.fs.symlink(target, path);
+    await record(entry, path);
+  }
   await workspace.fs.writeFile(`${gitDir}/index`, gitIndex(index));
   await workspace.fs.writeFile(`${gitDir}/HEAD`, `ref: refs/heads/${branch}\n`);
   await workspace.fs.mkdir(`${gitDir}/refs/heads`, { recursive: true });
