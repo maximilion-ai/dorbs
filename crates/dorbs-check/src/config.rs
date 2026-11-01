@@ -49,6 +49,7 @@ pub struct Settings {
     pub test_timeout: Duration,
     /// How many checks and tests run at once across environments; each environment runs one at a time.
     pub run_slots: usize,
+    pub replicas: usize,
     pub limits: Limits,
     pub egress: Egress,
     /// The egress proxy's allowed hosts; the adapters' when EGRESS_ALLOW is unset.
@@ -183,6 +184,7 @@ pub fn load() -> Result<Settings, String> {
         check_timeout: timeout("CHECK_TIMEOUT", Duration::from_secs(300))?,
         test_timeout: timeout("TEST_TIMEOUT", Duration::from_secs(600))?,
         run_slots: parsed("RUN_SLOTS", 4)?,
+        replicas: parsed("REPLICAS", 1)?,
         limits: Limits {
             memory: var("CONTAINER_MEMORY").unwrap_or_else(|| "8g".into()),
             setup_memory: var("SETUP_MEMORY").unwrap_or_else(|| "8g".into()),

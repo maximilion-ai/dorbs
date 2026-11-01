@@ -77,7 +77,7 @@ A check or test names one of five formats. A run whose command names `{report}` 
 
 ## Environments
 
-An environment is one repo at one recipe, setup key-file content and image; its key is their hash, so a change to a lockfile or manifest selects a new environment. Every request on the repo shares it, one run at a time in the order they came. States: absent, setting up, ready, busy, idle (container stopped), failed (its output answered again for `RETRY_SETUP_AFTER`, 10 minutes), evicted.
+An environment is one repo at one recipe, setup key-file content and image; its key is their hash, so a change to a lockfile or manifest selects a new environment. Every request on the repo shares it, one run at a time in the order they came. `REPLICAS` (1) copies of it, each with its own tree and container, let that many runs on one repo go at once: a request takes a free copy, sets up a new one while there are fewer, or queues on the copy with the fewest requests; `RUN_SLOTS` (4) caps the runs across all environments. States: absent, setting up, ready, busy, idle (container stopped), failed (its output answered again for `RETRY_SETUP_AFTER`, 10 minutes), evicted.
 
 Setup checks the online steps' key files out into `$DATA_DIR/envs/<key>/repo`, with an empty file for each stub, and runs the online steps; then that tree goes, the commit is checked out, the change's key files are laid over it, and the other steps run, each step in a container of its own. A run lays the change over the tree in place, runs, kills whatever it left running, and takes the change off: new files go, and every tracked file that differs from the index gets the commit's content back.
 

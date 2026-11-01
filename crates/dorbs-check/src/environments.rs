@@ -1,8 +1,10 @@
 //! The environments: each one repo at one recipe, key-file content and image, set up once and
-//! shared by every request on the repo, one run at a time, with a disk budget over them all.
+//! shared by every request on the repo, one run at a time in each of up to REPLICAS copies, with a
+//! disk budget over them all.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -64,6 +66,32 @@ struct Env {
     inner: Mutex<Inner>,
     /// Signals the run holding the tree that a request that joined it is done.
     left: Notify,
+    /// The requests on this replica, the one running included.
+    waiting: AtomicUsize,
+}
+
+/// A request's claim on a replica, which counts it as waiting there until it ends.
+struct Claim(Arc<Env>);
+
+impl std::ops::Deref for Claim {
+    type Target = Arc<Env>;
+    fn deref(&self) -> &Arc<Env> {
+        &self.0
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        self.0.waiting.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// The key of an environment's replica; the first keeps the environment's own.
+fn replica_key(key: &str, replica: usize) -> String {
+    match replica {
+        0 => key.to_owned(),
+        n => format!("{key}-{n}"),
+    }
 }
 
 /// The run holding the tree, which a request for the same commit and change joins instead of queueing
@@ -106,6 +134,9 @@ pub struct Limits {
     pub idle_after: Duration,
     pub retry_setup_after: Duration,
     pub setup_timeout: Duration,
+    /// The most copies of one environment, each with its own tree and container, so runs on one
+    /// repo need not queue behind each other.
+    pub replicas: usize,
 }
 
 pub struct Environments {
@@ -286,14 +317,38 @@ impl Environments {
                 shared: None,
             }),
             left: Notify::new(),
+            waiting: AtomicUsize::new(0),
         })
     }
 
-    fn env_for(&self, spec: &EnvSpec) -> Arc<Env> {
+    /// The replica a request takes: a free one, else a new one while there are fewer than REPLICAS,
+    /// else the one with the fewest requests on it.
+    fn env_for(&self, spec: &EnvSpec) -> Claim {
         let mut envs = self.envs.lock().expect("the envs");
-        envs.entry(spec.key.clone())
-            .or_insert_with(|| self.new_env(&spec.key, &spec.repo))
-            .clone()
+        let replicas: Vec<(String, Option<Arc<Env>>)> = (0..self.limits.replicas.max(1))
+            .map(|n| replica_key(&spec.key, n))
+            .map(|key| {
+                let env = envs.get(&key).cloned();
+                (key, env)
+            })
+            .collect();
+        let waiting = |env: &Arc<Env>| env.waiting.load(Ordering::Relaxed);
+        let env = (replicas.iter())
+            .find_map(|(_, env)| env.clone().filter(|env| waiting(env) == 0))
+            .or_else(|| {
+                let (key, _) = replicas.iter().find(|(_, env)| env.is_none())?;
+                let env = self.new_env(key, &spec.repo);
+                envs.insert(key.clone(), env.clone());
+                Some(env)
+            })
+            .or_else(|| {
+                (replicas.iter())
+                    .filter_map(|(_, env)| env.clone())
+                    .min_by_key(waiting)
+            })
+            .expect("one replica at least");
+        env.waiting.fetch_add(1, Ordering::Relaxed);
+        Claim(env)
     }
 
     fn tree(&self, env: &Env, git_dir: &Path) -> Tree {

@@ -103,7 +103,7 @@ fn repo(git_dir: &Path, files: &[(&str, &str)]) -> CommitSha {
     CommitSha::try_from(git(&["--git-dir", &g, "rev-parse", "HEAD"])).unwrap()
 }
 
-async fn environments(host: &Host) -> (Arc<Docker>, Arc<Environments>, String) {
+async fn environments(host: &Host, replicas: usize) -> (Arc<Docker>, Arc<Environments>, String) {
     let limits = Limits {
         memory: "1g".into(),
         setup_memory: "1g".into(),
@@ -133,8 +133,9 @@ async fn environments(host: &Host) -> (Arc<Docker>, Arc<Environments>, String) {
         idle_after: Duration::from_secs(600),
         retry_setup_after: Duration::from_secs(600),
         setup_timeout: Duration::from_secs(120),
+        replicas,
     };
-    let envs = Environments::start(&host.root.join("data"), docker.clone(), limits, 1)
+    let envs = Environments::start(&host.root.join("data"), docker.clone(), limits, replicas)
         .await
         .unwrap();
     (docker, envs, image)
@@ -174,7 +175,7 @@ async fn gives_setup_code_no_source_while_it_has_the_network_and_no_network_once
         &git_dir,
         &[("package.json", &manifest), ("src/secret.ts", &secret)],
     );
-    let (_, envs, image) = environments(&host).await;
+    let (_, envs, image) = environments(&host, 1).await;
     let run = |phase: &str| {
         format!("PHASE={phase} node -e \"eval(require('./package.json').dorbsProbe)\"")
     };
@@ -243,7 +244,7 @@ async fn writes_nothing_of_the_host_when_a_run_swaps_the_trees_root_for_a_link()
     let canary = host.root.join("canary");
     std::fs::create_dir_all(&canary).unwrap();
     std::fs::write(canary.join(".bashrc"), "the host's own\n").unwrap();
-    let (_, envs, image) = environments(&host).await;
+    let (_, envs, image) = environments(&host, 1).await;
     let spec = Arc::new(EnvSpec {
         key: "swap".into(),
         repo: RepoId::try_from("test/swap").unwrap(),
@@ -305,7 +306,7 @@ async fn runs_requests_for_one_change_at_once_and_queues_other_changes() {
             ("src/a.ts", "export const a = 1;\n"),
         ],
     );
-    let (_, envs, image) = environments(&host).await;
+    let (_, envs, image) = environments(&host, 1).await;
     let spec = Arc::new(EnvSpec {
         key: "join".into(),
         repo: RepoId::try_from("test/join").unwrap(),
@@ -356,4 +357,61 @@ async fn runs_requests_for_one_change_at_once_and_queues_other_changes() {
         other_a.max(other_b) >= Duration::from_secs(4),
         "another change queues: {other_a:?} {other_b:?}"
     );
+}
+
+#[tokio::test]
+#[ignore = "needs rootless Docker"]
+async fn runs_other_changes_at_once_on_replicas_of_the_environment() {
+    let host = host("replicas");
+    let git_dir = host.root.join("repo.git");
+    let commit = repo(
+        &git_dir,
+        &[
+            ("package.json", "{}"),
+            ("src/a.ts", "export const a = 1;\n"),
+        ],
+    );
+    let (_, envs, image) = environments(&host, 2).await;
+    let spec = Arc::new(EnvSpec {
+        key: "replicas".into(),
+        repo: RepoId::try_from("test/replicas").unwrap(),
+        git_dir,
+        recipe: recipe(vec![]),
+        image,
+        key_change: Change::default(),
+        online_paths: vec![],
+        online_change: Change::default(),
+    });
+    let timed = |content: &'static str| {
+        let (envs, spec, commit) = (envs.clone(), spec.clone(), commit.clone());
+        async move {
+            let change: Change = serde_json::from_value(serde_json::json!({ "files": [{ "path": "src/a.ts", "content": content }], "deleted": [] })).unwrap();
+            let command = run::Command {
+                cwd: ".".into(),
+                run: "sleep 2 && cat src/a.ts".into(),
+            };
+            let started = std::time::Instant::now();
+            let used = envs
+                .run(
+                    spec,
+                    commit,
+                    change,
+                    vec![(command, Duration::from_secs(60))],
+                )
+                .await
+                .ok()
+                .expect("the run");
+            (started.elapsed(), used.value[0].result.stdout.clone())
+        }
+    };
+    // The first pair sets the second replica up; the second finds both ready.
+    tokio::join!(timed("one"), timed("two"));
+    let ((a, read_a), (b, read_b)) = tokio::join!(timed("one"), timed("two"));
+    assert_eq!((read_a.as_str(), read_b.as_str()), ("one", "two"));
+    assert!(
+        a.max(b) < Duration::from_millis(3500),
+        "other changes run at once: {a:?} {b:?}"
+    );
+    let keys: Vec<String> = envs.list().into_iter().map(|env| env.key).collect();
+    assert_eq!(keys, ["replicas", "replicas-1"]);
 }

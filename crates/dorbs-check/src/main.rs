@@ -106,6 +106,7 @@ async fn serve() -> Result<bool, String> {
         idle_after: settings.idle_after,
         retry_setup_after: settings.retry_setup_after,
         setup_timeout: settings.setup_timeout,
+        replicas: settings.replicas,
     };
     let environments = Environments::start(
         &settings.data_dir,
