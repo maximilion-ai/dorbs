@@ -254,6 +254,8 @@ key = [
   "bunfig.toml",
   ".pnpmfile.cjs",
   "patches/**",
+  # Local tarball dependencies a lockfile names as file:<path>.tgz.
+  "**/*.tgz",
   ".yarn/releases/**",
   ".yarn/plugins/**",
   ".yarn/patches/**",
@@ -277,6 +279,8 @@ key = [
   "bunfig.toml",
   ".pnpmfile.cjs",
   "patches/**",
+  # Local tarball dependencies a lockfile names as file:<path>.tgz.
+  "**/*.tgz",
   ".yarn/releases/**",
   ".yarn/plugins/**",
   ".yarn/patches/**",
