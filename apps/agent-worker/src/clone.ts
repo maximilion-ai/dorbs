@@ -129,7 +129,7 @@ export const fetchPack = async (
 };
 
 const TYPES = { 1: "commit", 2: "tree", 3: "blob", 4: "tag" } as const;
-type ObjectType = (typeof TYPES)[keyof typeof TYPES];
+export type ObjectType = (typeof TYPES)[keyof typeof TYPES];
 
 export type PackObject = {
   readonly oid: string;
@@ -325,7 +325,7 @@ export const packIndex = (objects: ReadonlyArray<PackObject>, pack: Uint8Array):
 
 export type Entry = { readonly path: string; readonly mode: string; readonly oid: string };
 
-const treeEntries = (
+export const treeEntries = (
   data: Uint8Array,
 ): ReadonlyArray<{ mode: string; name: string; oid: string }> => {
   const entries = [];
@@ -416,4 +416,84 @@ export const gitIndex = (entries: ReadonlyArray<IndexEntry>): Uint8Array => {
   }
   const body = concat(parts);
   return concat([body, sha1(body)]);
+};
+
+const TYPE_CODES: Record<ObjectType, number> = { commit: 1, tree: 2, blob: 3, tag: 4 };
+
+/** The type and content of a loose object file. */
+export const looseObject = (
+  file: Uint8Array,
+): { readonly type: ObjectType; readonly data: Uint8Array } => {
+  const raw = pako.inflate(file);
+  const nul = raw.indexOf(0);
+  const name = decoder.decode(raw.subarray(0, raw.indexOf(0x20)));
+  const type = Object.values(TYPES).find((known) => known === name);
+  if (type === undefined) throw new Error(`loose object of unknown type ${name}`);
+  return { type, data: raw.subarray(nul + 1) };
+};
+
+/** A packfile of whole objects, as receive-pack takes them. */
+export const writePack = (
+  objects: ReadonlyArray<{ readonly type: ObjectType; readonly data: Uint8Array }>,
+): Uint8Array => {
+  const header = new Uint8Array(12);
+  header.set(encoder.encode("PACK"));
+  new DataView(header.buffer).setUint32(4, 2);
+  new DataView(header.buffer).setUint32(8, objects.length);
+  const parts: Uint8Array[] = [header];
+  for (const { type, data } of objects) {
+    const head = [(TYPE_CODES[type] << 4) | (data.length & 15)];
+    for (let size = data.length >>> 4; size > 0; size >>>= 7) {
+      head[head.length - 1] = (head.at(-1) ?? 0) | 0x80;
+      head.push(size & 0x7f);
+    }
+    parts.push(Uint8Array.from(head), pako.deflate(data));
+  }
+  const body = concat(parts);
+  return concat([body, sha1(body)]);
+};
+
+/** The branches origin advertises to a push, by name, with the commits they point at. */
+export const pushRefs = async (origin: Origin): Promise<ReadonlyMap<string, string>> => {
+  const response = await fetch(`${origin.url}/info/refs?service=git-receive-pack`, {
+    headers: { "user-agent": "git/dorbs", ...origin.headers },
+  });
+  if (!response.ok) throw new Error(`origin answered HTTP ${response.status} to a ref listing`);
+  // The advertisement is binary pkt-lines; its ref names are UTF-8.
+  const body = decoder.decode(await response.arrayBuffer());
+  const advertised = body.matchAll(/([0-9a-f]{40}) refs\/heads\/([^\0\n]+)/gu);
+  return new Map([...advertised].flatMap(([, oid, branch]) => (branch === undefined || oid === undefined ? [] : [[branch, oid]])));
+};
+
+/**
+ * Moves origin's `branch` from `old` (zeros when it is new) to `commit` and sends `pack`, which holds the objects
+ * origin lacks. Returns the reason origin gave when it refused either.
+ */
+export const receivePack = async (
+  origin: Origin,
+  update: { readonly branch: string; readonly old: string; readonly commit: string },
+  pack: Uint8Array,
+): Promise<string | undefined> => {
+  const command = pktLine(
+    `${update.old} ${update.commit} refs/heads/${update.branch}\0report-status agent=git/dorbs\n`,
+  );
+  const response = await fetch(`${origin.url}/git-receive-pack`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-git-receive-pack-request",
+      accept: "application/x-git-receive-pack-result",
+      "user-agent": "git/dorbs",
+      ...origin.headers,
+    },
+    body: concat([encoder.encode(`${command}0000`), pack]),
+  });
+  if (!response.ok) return `origin answered HTTP ${response.status}`;
+  const lines = [...pktLines(new Uint8Array(await response.arrayBuffer()))].flatMap((pkt) =>
+    pkt.kind === "data" ? [decoder.decode(pkt.data).trimEnd()] : [],
+  );
+  const unpack = lines.find((line) => line.startsWith("unpack "));
+  if (unpack !== "unpack ok") return unpack ?? "origin sent no report";
+  const status = lines.find((line) => line.startsWith("ok ") || line.startsWith("ng "));
+  if (status === undefined) return "origin reported nothing about the branch";
+  return status.startsWith("ok ") ? undefined : status.split(" ").slice(2).join(" ");
 };
