@@ -495,6 +495,16 @@ fn counts_vitest_and_jest_summaries_in_raw_output() {
             skipped: 1
         })
     );
+    let go = "=== RUN   TestA\n--- PASS: TestA (0.00s)\n=== RUN   TestB\n    --- FAIL: TestB/one (0.00s)\n\
+              --- SKIP: TestC (0.00s)\nFAIL\nFAIL\tgithub.com/x/y\t0.01s\n";
+    assert_eq!(
+        counts(go),
+        Some(Counts {
+            passed: 1,
+            failed: 1,
+            skipped: 1
+        })
+    );
     assert_eq!(
         counts(jest),
         Some(Counts {
