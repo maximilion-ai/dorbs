@@ -19,8 +19,8 @@ import { gh } from "./gh.ts";
 import { git, isGitPath } from "./git.ts";
 import type { GitHub } from "./GitHub.ts";
 import type { Change, Clone, TestSelection } from "./Checker.ts";
-import { shallowClone } from "./clone.ts";
-import type { Touched } from "./git.ts";
+import { type BaseStore, cloneRepo } from "./cloneRepo.ts";
+import type { LayeredFs } from "./layered.ts";
 
 export const WORKSPACE_ROOT = "/workspace";
 
@@ -32,9 +32,12 @@ export type ToolHost = {
   /** The repo the workspace was cloned from, once clone_repo has run. */
   readonly clone: () => Clone | undefined;
   readonly saveClone: (clone: Clone) => void;
-  /** Repo paths the tools wrote since the clone; git status, diff and check look at these, not the whole repo. */
-  readonly touched: () => Touched;
-  readonly touch: (paths: Touched) => void;
+  /** The repo as the session sees it: its own writes over the clone's shared base. */
+  readonly fs: LayeredFs;
+  /** Where clones keep their bases, and the leases that build them. */
+  readonly bases: BaseStore;
+  /** Who this session is, to the lease on a base it builds. */
+  readonly holder: () => string;
   /** Runs the repo's static checks, or only the named ones, on the commit with the change laid over it. */
   readonly check: (
     clone: Clone,
@@ -203,9 +206,8 @@ const GREP_LINE = 500;
 const isMissing = (error: unknown): boolean =>
   error instanceof Error && "code" in error && error.code === "ENOENT";
 
-// Computer 0.8.0 types `fs.exists`, but its filesystem has no such method at runtime.
-const readIfPresent = (workspace: Workspace, path: string): Promise<string | undefined> =>
-  workspace.fs.readFile(path, "utf8").catch((error: unknown) => {
+const readIfPresent = (fs: LayeredFs, path: string): Promise<string | undefined> =>
+  fs.readText(path).catch((error: unknown) => {
     if (isMissing(error)) return undefined;
     throw error;
   });
@@ -214,7 +216,7 @@ const readIfPresent = (workspace: Workspace, path: string): Promise<string | und
  * Where a model write to `path` lands. The git directory is refused in any case, since its config steers where
  * pushes send credentials, and so is any path through a symbolic link, which could lead there.
  */
-const writable = async (workspace: Workspace, path: string): Promise<string> => {
+const writable = async (fs: LayeredFs, path: string): Promise<string> => {
   const target = absolute(path);
   const names = relative(target).split("/");
   if (isGitPath(relative(target))) {
@@ -223,15 +225,9 @@ const writable = async (workspace: Workspace, path: string): Promise<string> => 
     );
   }
   for (let end = 1; end <= names.length; end += 1) {
-    // Computer 0.8.0's runtime filesystem has lstat but not the lstatOrNull it types.
-    const stat = await workspace.fs
-      .lstat(`${WORKSPACE_ROOT}/${names.slice(0, end).join("/")}`)
-      .catch((error: unknown) => {
-        if (isMissing(error)) return undefined;
-        throw error;
-      });
+    const stat = await fs.lstat(`${WORKSPACE_ROOT}/${names.slice(0, end).join("/")}`);
     if (stat === undefined) break;
-    if (stat.isSymbolicLink) {
+    if (stat.isSymbolicLink()) {
       throw new Error(
         `${path} goes through a symbolic link. Write to the file it points to instead.`,
       );
@@ -245,11 +241,9 @@ const write = async (
   path: string,
   newText: string,
 ): Promise<ToolExecutionResult> => {
-  const target = await writable(host.workspace, path);
-  const oldText = await readIfPresent(host.workspace, target);
-  await host.workspace.fs.mkdir(target.slice(0, target.lastIndexOf("/")), { recursive: true });
-  await host.workspace.fs.writeFile(target, newText);
-  host.touch([relative(target)]);
+  const target = await writable(host.fs, path);
+  const oldText = await readIfPresent(host.fs, target);
+  await host.fs.writeFile(target, newText);
   const change: FileChange = {
     path: decodePath(relative(target)),
     ...(oldText === undefined ? {} : { oldText }),
@@ -258,31 +252,16 @@ const write = async (
   return { ...text(`${oldText === undefined ? "Created" : "Updated"} ${path}`), details: change };
 };
 
-// The clone keeps its git directory in the workspace; no tool lists or searches it.
-const NOT_GIT = { exclude: [".git"] };
-
-/** The workspace's files that differ from `commit`, new ones included, and those deleted since, among `touched`. */
-const changesSince = async (
-  workspace: Workspace,
-  commit: CommitSha,
-  touched: Touched,
-): Promise<Change> => {
-  if (touched !== "all" && touched.length === 0) return { files: [], deleted: [] };
-  const entries = await workspace.git.diffSummary({
-    dir: WORKSPACE_ROOT,
-    ref: commit,
-    ...(touched === "all" ? {} : { paths: [...touched] }),
-  });
+/** The files the session wrote since the clone, and the clone's files it deleted. */
+const changesSince = async (fs: LayeredFs): Promise<Change> => {
+  const { written, deleted } = await fs.changes();
   const files = await Promise.all(
-    entries
-      .filter((entry) => entry.status !== "D")
-      .map(async (entry) => ({
-        path: decodePath(entry.path),
-        content: await workspace.fs.readFile(absolute(entry.path), "utf8"),
-      })),
+    written.map(async (path) => ({
+      path: decodePath(path),
+      content: await fs.readText(`${WORKSPACE_ROOT}/${path}`),
+    })),
   );
-  const deleted = entries.filter((entry) => entry.status === "D").map((e) => decodePath(e.path));
-  return { files, deleted };
+  return { files, deleted: deleted.map((path) => decodePath(path)) };
 };
 
 const rejectionText = ({ reason }: Rejected, clone: Clone): string =>
@@ -376,8 +355,8 @@ const TOOLS = [
       limit: Type.Optional(Type.Integer({ minimum: 1, description: "Most lines to read" })),
     }),
     replay: "safe",
-    run: async ({ path, offset = 1, limit }, { workspace }) =>
-      output(readLines(await workspace.fs.readFile(absolute(path), "utf8"), offset, limit)),
+    run: async ({ path, offset = 1, limit }, { fs }) =>
+      output(readLines(await fs.readText(absolute(path)), offset, limit)),
   }),
   row({
     name: "write_file",
@@ -397,10 +376,7 @@ const TOOLS = [
     // A rerun would not find oldText it already replaced.
     replay: "unsafe",
     run: async ({ path, oldText, newText }, host) => {
-      const current = await host.workspace.fs.readFile(
-        await writable(host.workspace, path),
-        "utf8",
-      );
+      const current = await host.fs.readText(await writable(host.fs, path));
       const at = current.indexOf(oldText);
       if (at === -1 || current.indexOf(oldText, at + 1) !== -1) {
         throw new Error(`oldText must occur exactly once in ${path}`);
@@ -415,9 +391,8 @@ const TOOLS = [
     description: "List the files under a workspace directory, or the whole workspace.",
     parameters: Type.Object({ path: Type.Optional(Path) }),
     replay: "safe",
-    run: async ({ path }, { workspace }) => {
-      const entries = await workspace.fs.find(directory(path), "**/*", NOT_GIT);
-      const files = entries.filter((entry) => entry.type === "file").map((e) => relative(e.path));
+    run: async ({ path }, { fs }) => {
+      const files = await fs.files(directory(path));
       return text(
         files.length === 0 ? "No files." : files.join("\n"),
         "List a subdirectory to see the rest.",
@@ -431,19 +406,21 @@ const TOOLS = [
     description: "Search workspace files for a regular expression.",
     parameters: Type.Object({ pattern: Type.String(), path: Type.Optional(Path) }),
     replay: "safe",
-    run: async ({ pattern, path }, { workspace }) => {
-      const matches = await workspace.fs.grep(pattern, directory(path), {
-        regex: true,
-        limit: 200,
-        ...NOT_GIT,
-      });
+    run: async ({ pattern, path }, { fs }) => {
+      let regex: RegExp;
+      try {
+        regex = new RegExp(pattern, "u");
+      } catch {
+        regex = new RegExp(pattern);
+      }
+      const matches = await fs.grep(regex, directory(path), 200);
       return text(
         matches.length === 0
           ? "No matches."
           : matches
               .map((m) => {
                 const line = m.text.length > GREP_LINE ? `${m.text.slice(0, GREP_LINE)}…` : m.text;
-                return `${relative(m.path)}:${m.line}: ${line}`;
+                return `${m.path}:${m.line}: ${line}`;
               })
               .join("\n"),
         "Narrow the pattern or the path.",
@@ -472,9 +449,16 @@ const TOOLS = [
         return text(`${id} is already cloned at ${existing.commit} into the workspace root.`);
       }
       const headers = await (await host.github()).headers(url);
-      const cloned = await shallowClone(host.workspace, { url, headers }, WORKSPACE_ROOT);
+      const cloned = await cloneRepo(
+        host.fs,
+        host.bases,
+        { url, headers },
+        id,
+        WORKSPACE_ROOT,
+        host.holder(),
+      );
       const commit = decodeCommit(cloned.commit);
-      host.saveClone({ repo: id, commit, branch: cloned.branch });
+      host.saveClone({ repo: id, commit, branch: cloned.branch, base: cloned.base });
       return text(
         `Cloned ${id} at ${commit} into the workspace root. Paths are relative to the repo root.`,
       );
@@ -503,14 +487,7 @@ const TOOLS = [
       }
       const ids = only?.map((id) => decodeCheckId(id));
       return text(
-        checkText(
-          await host.check(
-            clone,
-            await changesSince(host.workspace, clone.commit, host.touched()),
-            ids,
-          ),
-          clone,
-        ),
+        checkText(await host.check(clone, await changesSince(host.fs), ids), clone),
         "Fix these first, or check with only to see one check at a time.",
       );
     },
@@ -546,14 +523,7 @@ const TOOLS = [
       };
       // The checker keeps the end of a long run's output, where the failures and the summary are.
       return text(
-        testText(
-          await host.test(
-            clone,
-            await changesSince(host.workspace, clone.commit, host.touched()),
-            selection,
-          ),
-          clone,
-        ),
+        testText(await host.test(clone, await changesSince(host.fs), selection), clone),
         "Run fewer tests to see the rest.",
       );
     },
@@ -578,6 +548,7 @@ const TOOLS = [
       return text(
         await git(args, {
           workspace: host.workspace,
+          fs: host.fs,
           dir: WORKSPACE_ROOT,
           clone,
           // Read again, not the clone above: pushes in one round run at once.
@@ -589,8 +560,6 @@ const TOOLS = [
           },
           url,
           headers,
-          touched: host.touched,
-          touch: host.touch,
         }),
         "Narrow the command, such as git log -n 20 or git diff -- <path>.",
       );

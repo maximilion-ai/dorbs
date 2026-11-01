@@ -11,13 +11,16 @@
       { "name": "AcpSession", "class_name": "AcpSession" },
       { "name": "ChatGptAccount", "class_name": "ChatGptAccount" },
       { "name": "GitHubTokens", "class_name": "GitHubTokens" },
+      { "name": "RepoBase", "class_name": "RepoBase" },
     ],
   },
+  "r2_buckets": [{ "binding": "Bases", "bucket_name": "dorbs-bases" }],
   // celld ends an event's storage transactions and RPCs with the event, so AcpSession holds events open.
   "vars": { "HOLD_EVENTS": "true" },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["AcpConnection", "AcpSession"] },
     { "tag": "v2", "new_sqlite_classes": ["ChatGptAccount"] },
     { "tag": "v3", "new_sqlite_classes": ["GitHubTokens"] },
+    { "tag": "v4", "new_sqlite_classes": ["RepoBase"] },
   ],
 }

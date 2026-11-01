@@ -25,6 +25,8 @@ export type Clone = {
   readonly commit: CommitSha;
   readonly branch: string;
   readonly created?: ReadonlyArray<string>;
+  /** The R2 prefix of the base the workspace reads untouched files from. */
+  readonly base?: string;
 };
 
 /** Which tests a test call runs: files, or for pytest test ids, and a name filter. */

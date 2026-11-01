@@ -19,6 +19,7 @@ declare global {
 
 export { AcpConnection } from "./AcpConnection.ts";
 export { GitHubTokens } from "./GitHubTokens.ts";
+export { RepoBase } from "./RepoBase.ts";
 export { ChatGptAccount } from "./ChatGptAccount.ts";
 export class AcpSession extends makeAcpSession((env) => ModelProvider.layer(env)) {}
 
@@ -71,7 +72,6 @@ const purgeSessions = async (request: Request, env: Cloudflare.Env): Promise<Res
   const body = decodeSessionIds(await request.json().catch(() => undefined));
   if (body._tag === "None")
     return new Response("Expected { sessions: string[] } of at most 100", { status: 400 });
-  // Purging aborts the object, so its call fails once the storage is gone; that failure is the success.
   await Promise.all(
     body.value.sessions.map((id) =>
       env.AcpSession.getByName(id)

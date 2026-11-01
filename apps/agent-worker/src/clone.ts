@@ -1,18 +1,12 @@
 import * as NodeCrypto from "node:crypto";
 
-import type { Workspace } from "@cloudflare/computer";
 import * as pako from "pako";
 
-import { isGitPath } from "./git.ts";
-
 /**
- * A clone that never holds a repo's whole pack, which overruns a Durable Object's 128 MB on a large repo. It fetches
- * the tip commit and its trees with `filter blob:none`, then the blobs by id in batches, and keeps each pack as git
- * sent it with an index beside it, so isomorphic-git reads any object later.
+ * Git's smart HTTP protocol v2 as clone_repo needs it, and packfile reading. Fetches never hold a repo's whole pack,
+ * which overruns a Durable Object's 128 MB on a large repo: base.ts fetches the tip commit and its trees with
+ * `filter blob:none`, then the blobs by id in batches.
  */
-
-const BLOBS_PER_FETCH = 200;
-const FILE_WRITES_AT_ONCE = 32;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -90,7 +84,7 @@ const command = async (
 };
 
 /** The commit origin's HEAD points at and the branch it names. */
-const head = async (
+export const head = async (
   origin: Origin,
 ): Promise<{ readonly commit: string; readonly branch: string }> => {
   for (const pkt of pktLines(await command(origin, "ls-refs", ["symrefs", "ref-prefix HEAD"]))) {
@@ -105,7 +99,7 @@ const head = async (
 };
 
 /** A fetch's packfile and the commits it made shallow. */
-const fetchPack = async (
+export const fetchPack = async (
   origin: Origin,
   args: ReadonlyArray<string>,
 ): Promise<{ readonly pack: Uint8Array; readonly shallow: ReadonlyArray<string> }> => {
@@ -219,7 +213,7 @@ const objectId = (type: ObjectType, data: Uint8Array): string =>
   hex(sha1(encoder.encode(`${type} ${data.length}\0`), data));
 
 /** Every object in a pack, deltas resolved; refuses a pack whose trailing checksum does not match. */
-const readPack = (pack: Uint8Array): ReadonlyArray<PackObject> => {
+export const readPack = (pack: Uint8Array): ReadonlyArray<PackObject> => {
   if (decoder.decode(pack.subarray(0, 4)) !== "PACK") throw new Error("not a packfile");
   const view = new DataView(pack.buffer, pack.byteOffset, pack.byteLength);
   const count = view.getUint32(8);
@@ -329,7 +323,7 @@ export const packIndex = (objects: ReadonlyArray<PackObject>, pack: Uint8Array):
   return out;
 };
 
-type Entry = { readonly path: string; readonly mode: string; readonly oid: string };
+export type Entry = { readonly path: string; readonly mode: string; readonly oid: string };
 
 const treeEntries = (
   data: Uint8Array,
@@ -350,7 +344,7 @@ const treeEntries = (
 };
 
 /** The files a commit's trees list, with their modes and blob ids. */
-const listFiles = (
+export const listFiles = (
   commit: PackObject,
   objects: ReadonlyMap<string, PackObject>,
 ): ReadonlyArray<Entry> => {
@@ -422,118 +416,4 @@ export const gitIndex = (entries: ReadonlyArray<IndexEntry>): Uint8Array => {
   }
   const body = concat(parts);
   return concat([body, sha1(body)]);
-};
-
-const writePack = async (
-  workspace: Workspace,
-  gitDir: string,
-  pack: Uint8Array,
-  objects: ReadonlyArray<PackObject>,
-) => {
-  const name = `${gitDir}/objects/pack/pack-${hex(pack.subarray(pack.length - 20))}`;
-  await workspace.fs.writeFile(`${name}.pack`, pack);
-  await workspace.fs.writeFile(`${name}.idx`, packIndex(objects, pack));
-};
-
-const parentOf = (path: string): string => path.slice(0, path.lastIndexOf("/"));
-
-/** Clones origin's HEAD into `dir` at depth 1 and returns the commit and branch it checked out. */
-export const shallowClone = async (
-  workspace: Workspace,
-  origin: Origin,
-  dir: string,
-): Promise<{ readonly commit: string; readonly branch: string }> => {
-  const gitDir = `${dir}/.git`;
-  // A clone a restart cut off starts over.
-  await workspace.fs.rm(dir, { recursive: true, force: true });
-  await workspace.fs.mkdir(`${gitDir}/objects/pack`, { recursive: true });
-  const { commit, branch } = await head(origin);
-
-  const trees = await fetchPack(origin, [`want ${commit}`, "deepen 1", "filter blob:none"]);
-  const treeObjects = readPack(trees.pack);
-  await writePack(workspace, gitDir, trees.pack, treeObjects);
-  const tip = treeObjects.find((object) => object.oid === commit);
-  if (tip === undefined) throw new Error(`origin sent no commit ${commit}`);
-  const files = listFiles(tip, new Map(treeObjects.map((object) => [object.oid, object])));
-
-  const made = new Set<string>([dir]);
-  const mkdir = async (path: string) => {
-    if (made.has(path)) return;
-    await workspace.fs.mkdir(path, { recursive: true });
-    for (let at = path; at.length > dir.length; at = parentOf(at)) made.add(at);
-  };
-  const index: IndexEntry[] = [];
-  const record = async (entry: Entry, path: string) => {
-    const stat = await workspace.fs.lstat(path);
-    index.push({ ...entry, mtime: stat.mtime, inode: stat.inode, size: stat.size });
-  };
-
-  // Submodules are gitlinks: a directory in the work tree, recorded in the index, fetched never.
-  for (const entry of files.filter((file) => file.mode === "160000")) {
-    await mkdir(`${dir}/${entry.path}`);
-    await record(entry, `${dir}/${entry.path}`);
-  }
-  const links: Array<{ entry: Entry; target: string; path: string }> = [];
-  const byBlob = new Map<string, Entry[]>();
-  for (const entry of files.filter((file) => file.mode !== "160000")) {
-    byBlob.set(entry.oid, [...(byBlob.get(entry.oid) ?? []), entry]);
-  }
-  const blobs = [...byBlob.keys()];
-  for (let start = 0; start < blobs.length; start += BLOBS_PER_FETCH) {
-    const wanted = blobs.slice(start, start + BLOBS_PER_FETCH);
-    const { pack } = await fetchPack(
-      origin,
-      wanted.map((oid) => `want ${oid}`),
-    );
-    const objects = readPack(pack);
-    await writePack(workspace, gitDir, pack, objects);
-    const writes = objects.flatMap((object) =>
-      (byBlob.get(object.oid) ?? []).map((entry) => async () => {
-        const path = `${dir}/${entry.path}`;
-        await mkdir(parentOf(path));
-        if (entry.mode === "120000") {
-          // Links come last, so no file or directory of the clone is written through one.
-          const target = decoder.decode(object.data);
-          if (isGitPath(target)) throw new Error(`${entry.path} links into a git directory`);
-          links.push({ entry, target, path });
-          return;
-        }
-        await workspace.fs.writeFile(
-          path,
-          object.data,
-          entry.mode === "100755" ? { mode: 0o777 } : {},
-        );
-        await record(entry, path);
-      }),
-    );
-    if (writes.length < wanted.length) throw new Error("origin left blobs out of a fetch");
-    for (let at = 0; at < writes.length; at += FILE_WRITES_AT_ONCE) {
-      await Promise.all(writes.slice(at, at + FILE_WRITES_AT_ONCE).map((write) => write()));
-    }
-  }
-
-  for (const { entry, target, path } of links) {
-    await workspace.fs.symlink(target, path);
-    await record(entry, path);
-  }
-  await workspace.fs.writeFile(`${gitDir}/index`, gitIndex(index));
-  await workspace.fs.writeFile(`${gitDir}/HEAD`, `ref: refs/heads/${branch}\n`);
-  await workspace.fs.mkdir(`${gitDir}/refs/heads`, { recursive: true });
-  await workspace.fs.mkdir(`${gitDir}/refs/remotes/origin`, { recursive: true });
-  await workspace.fs.mkdir(`${gitDir}/refs/tags`, { recursive: true });
-  await workspace.fs.writeFile(`${gitDir}/refs/heads/${branch}`, `${commit}\n`);
-  await workspace.fs.writeFile(`${gitDir}/refs/remotes/origin/${branch}`, `${commit}\n`);
-  await workspace.fs.writeFile(
-    `${gitDir}/refs/remotes/origin/HEAD`,
-    `ref: refs/remotes/origin/${branch}\n`,
-  );
-  if (trees.shallow.length > 0)
-    await workspace.fs.writeFile(`${gitDir}/shallow`, `${trees.shallow.join("\n")}\n`);
-  await workspace.fs.writeFile(
-    `${gitDir}/config`,
-    "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n" +
-      `[remote "origin"]\n\turl = ${origin.url}\n\tfetch = +refs/heads/${branch}:refs/remotes/origin/${branch}\n` +
-      `[branch "${branch}"]\n\tremote = origin\n\tmerge = refs/heads/${branch}\n`,
-  );
-  return { commit, branch };
 };

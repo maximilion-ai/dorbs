@@ -1,4 +1,11 @@
-export { AcpConnection, AcpSession, ChatGptAccount, GitHubTokens, default } from "../src/worker.ts";
+export {
+  AcpConnection,
+  AcpSession,
+  ChatGptAccount,
+  GitHubTokens,
+  RepoBase,
+  default,
+} from "../src/worker.ts";
 
 declare global {
   namespace Cloudflare {

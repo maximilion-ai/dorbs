@@ -342,10 +342,9 @@ it("sends only the files changed since the cloned commit, and the deleted ones",
       },
     },
   ]);
-  // As a tool's change would, the deletion is recorded among the paths the agent touched.
+  // As a git rm would, the deletion leaves a tombstone over the base file.
   await inSession(sessionId, async (instance) => {
-    await instance.workspace.fs.rm("/workspace/src/old.ts");
-    instance.toolHost.touch(["src/old.ts"]);
+    await instance.fs.promises.unlink("/workspace/src/old.ts");
   });
   const record = await recordSince();
   const checked = await client.request(3, "session/prompt", prompt(sessionId, "change and check"));
@@ -600,14 +599,14 @@ it("replays a history longer than one page of rows in order", async () => {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-it("deletes a session's history, workspace and agent loop session once it has been idle for 30 days", async () => {
+it("deletes a session's history, workspace and agent loop session once it has been idle for 7 days", async () => {
   const start = Date.UTC(2030, 0, 1);
   vi.useFakeTimers({ toFake: ["Date"], now: start });
   try {
     const client = await connect();
     const sessionId = await client.newSession();
     await client.request(2, "session/prompt", prompt(sessionId, "write hello"));
-    vi.setSystemTime(start + 10 * DAY_MS);
+    vi.setSystemTime(start + 3 * DAY_MS);
     await client.request(3, "session/prompt", prompt(sessionId, "read hello"));
     const stub = env.AcpSession.getByName(sessionId);
     const kept = () =>
@@ -628,12 +627,12 @@ it("deletes a session's history, workspace and agent loop session once it has be
       [true, true, true, true],
     );
 
-    // Thirty days after the first prompt, the second one ten days later still holds it.
-    vi.setSystemTime(start + 39 * DAY_MS);
+    // Seven days after the first prompt, the second one three days later still holds it.
+    vi.setSystemTime(start + 9 * DAY_MS);
     await runDurableObjectAlarm(stub);
     assert.deepStrictEqual(await kept(), before);
 
-    vi.setSystemTime(start + 40 * DAY_MS + 1);
+    vi.setSystemTime(start + 10 * DAY_MS + 1);
     await runDurableObjectAlarm(stub).catch(() => "the object resets itself after deleting");
     assert.deepStrictEqual(await kept(), { record: false, history: 0, workspace: false, loop: 0 });
     const { response } = await (await connect()).load(1, sessionId);
@@ -644,6 +643,17 @@ it("deletes a session's history, workspace and agent loop session once it has be
   } finally {
     vi.useRealTimers();
   }
+});
+
+it("deletes a purged session at once, through its alarm, rather than after the retention period", async () => {
+  const client = await connect();
+  const sessionId = await client.newSession();
+  await client.request(2, "session/prompt", prompt(sessionId, "write hello"));
+  const stub = env.AcpSession.getByName(sessionId);
+  await stub.purge();
+  await runDurableObjectAlarm(stub).catch(() => "the object resets itself after deleting");
+  const { response } = await (await connect()).load(1, sessionId);
+  assert.deepStrictEqual(response.error, { code: -32002, message: `Unknown session ${sessionId}` });
 });
 
 it("refuses a prompt from a connection the session moved away from", async () => {
@@ -693,7 +703,7 @@ it("commits on a new branch and pushes it to origin, as git on a command line", 
       toolText(frames, id),
     ),
     [
-      "(no output)",
+      "Switched to a new branch 'dorbs/test'",
       "(no output)",
       // Computer 0.8.0 marks a file just added with git add -A as modified in the worktree too.
       "1 AM src/hello.ts",
@@ -798,10 +808,9 @@ it("cuts each tool result to 64 KB and says how to read the rest", async () => {
   const sessionId = await client.newSession();
   await client.request(2, "session/prompt", prompt(sessionId, "clone"));
   await inSession(sessionId, async (instance) => {
-    await instance.workspace.fs.writeFile("/workspace/big.txt", `${lines.join("\n")}\n`);
-    await instance.workspace.fs.writeFile("/workspace/src/index.ts", `${lines.join("\n")}\n`);
-    await instance.workspace.fs.writeFile("/workspace/min.js", minified);
-    instance.toolHost.touch(["big.txt", "src/index.ts", "min.js"]);
+    await instance.fs.writeFile("/workspace/big.txt", `${lines.join("\n")}\n`);
+    await instance.fs.writeFile("/workspace/src/index.ts", `${lines.join("\n")}\n`);
+    await instance.fs.writeFile("/workspace/min.js", minified);
   });
   await client.request(3, "session/prompt", prompt(sessionId, "read big"));
   const frames = updates(client.frames);
@@ -850,8 +859,8 @@ it("refuses model writes to the clone's git directory, by any spelling or link, 
   const sessionId = await client.newSession();
   await client.request(2, "session/prompt", prompt(sessionId, "clone github"));
   const original = await inSession(sessionId, async (instance) => {
-    await instance.workspace.fs.symlink(".git", "/workspace/meta");
-    await instance.workspace.fs.symlink(".git/config", "/workspace/cfg");
+    await instance.fs.promises.symlink(".git", "/workspace/meta");
+    await instance.fs.promises.symlink(".git/config", "/workspace/cfg");
     return instance.workspace.fs.readFile("/workspace/.git/config", "utf8");
   });
   const response = await client.request(3, "session/prompt", prompt(sessionId, "git metadata"));
