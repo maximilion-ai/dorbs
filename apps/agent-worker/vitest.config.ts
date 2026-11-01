@@ -129,7 +129,7 @@ export default defineConfig({
       // Only with DORBS_BENCH_REPO, a bare clone of a large repo: clone, read, grep and commit on it, timed and metered.
       ...(process.env["DORBS_BENCH_REPO"] === undefined
         ? []
-        : [harness("bench", "pi", ["test/bench.test.ts"])]),
+        : [harness("bench", "pi", ["test/bench.ts"])]),
     ],
   },
 });

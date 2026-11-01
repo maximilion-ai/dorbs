@@ -23,8 +23,15 @@
     },
     "apps/agent-worker": {
       // alchemy dev loads alchemy.run.ts and the vitest plugin loads test/worker.ts, both by path;
-      // vitest.config.ts aliases @opencode/sdk/workerd to test/opencode-native.ts.
-      "entry": ["alchemy.run.ts", "src/worker.ts", "test/worker.ts", "test/opencode-native.ts"],
+      // vitest.config.ts aliases @opencode/sdk/workerd to test/opencode-native.ts, and runs test/bench.ts with
+      // DORBS_BENCH_REPO set.
+      "entry": [
+        "alchemy.run.ts",
+        "src/worker.ts",
+        "test/worker.ts",
+        "test/opencode-native.ts",
+        "test/bench.ts",
+      ],
       // cloudflare:workers and cloudflare:test are workerd built-ins, not packages.
       "ignoreDependencies": ["cloudflare"],
     },

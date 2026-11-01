@@ -453,3 +453,29 @@ it("builds the base of a moved main from the last base's parts and fetches only 
     },
   );
 });
+
+it("shows commits with their changes, files at a revision, remote branches and the branch in status", async () => {
+  await withClone("show-log", async ({ fs, git }) => {
+    await fs.writeFile(`${ROOT}/d/a.ts`, "changed\n");
+    await git("checkout -b dorbs/show");
+    await git("add d/a.ts");
+    await git('commit -m "change a"');
+    assert.include(await git("show"), "+changed");
+    assert.include(await git("show --stat"), "d/a.ts");
+    assert.include(await git("show --stat"), "change a");
+    assert.strictEqual(await git("show HEAD~1:d/a.ts"), "a\n");
+    assert.strictEqual(await git("show HEAD:d/a.ts"), "changed\n");
+    assert.include(await git("show HEAD~1 --name-only"), "its parent is not in the clone");
+    const log = await git("log --oneline --name-only -n 1");
+    assert.include(log, "change a");
+    assert.include(log, "d/a.ts");
+    assert.include(await git("log --all --oneline"), "change a");
+    const branches = await git("branch -a");
+    assert.include(branches, "* dorbs/show");
+    assert.include(branches, "remotes/origin/main");
+    assert.include(branches, "remotes/origin/HEAD -> origin/main");
+    assert.notInclude(await git("branch -r"), "dorbs/show");
+    await fs.writeFile(`${ROOT}/file.txt`, "edited\n");
+    assert.strictEqual(await git("status -sb"), "## dorbs/show\n M file.txt");
+  });
+});
