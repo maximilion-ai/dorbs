@@ -34,6 +34,8 @@ const ensureBase = async (
   const lease = store.lease(prefix);
   while ((await openBase(store.bucket, prefix)) === undefined) {
     if (await lease.lease(holder)) {
+      // The deletion clock starts with the build, so the parts of one that never finishes go too.
+      await lease.used(prefix);
       const renew = setInterval(() => void lease.lease(holder).catch(() => undefined), RENEW_MS);
       try {
         await buildBase(store.bucket, origin, repo, commit);

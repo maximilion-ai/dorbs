@@ -174,6 +174,7 @@ it("puts no file under a file and no file over a directory", async () => {
     await fs.writeFile(`${ROOT}/mine.txt`, "x");
     assert.strictEqual(await codeOf(fs.promises.readdir(`${ROOT}/mine.txt`)), "ENOTDIR");
     assert.strictEqual(await codeOf(fs.writeFile(`${ROOT}/d`, "x")), "EISDIR");
+    assert.strictEqual(await codeOf(fs.promises.unlink(`${ROOT}/d`)), "EISDIR");
     assert.deepStrictEqual((await fs.changes()).written, ["mine.txt"]);
   });
 });
@@ -248,5 +249,17 @@ it("restores, checks out and moves paths", async () => {
     assert.strictEqual(await git("mv file.txt docs"), "(no output)");
     assert.strictEqual(await fs.readText(`${ROOT}/docs/file.txt`), "file\n");
     assert.strictEqual(await git("status --short"), "A  docs/file.txt\nD  file.txt");
+  });
+});
+
+it("starts a clone over from an empty overlay", async () => {
+  await withClone("reclone", async ({ fs }) => {
+    await fs.writeFile(`${ROOT}/stale.txt`, "x\n");
+    await fs.promises.mkdir(`${ROOT}/.git/refs/heads/stale`, { recursive: true });
+  });
+  await withClone("reclone", async ({ fs, git }) => {
+    assert.isUndefined(await fs.lstat(`${ROOT}/stale.txt`));
+    assert.notInclude(await fs.promises.readdir(`${ROOT}/.git/refs/heads`), "stale");
+    assert.strictEqual(await git("status"), "(no output)");
   });
 });

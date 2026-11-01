@@ -12,7 +12,7 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 
 import * as GitHub from "./GitHub.ts";
 import { tokenCache } from "./GitHubTokens.ts";
-import { openBase } from "./base.ts";
+import { openBase, type Base } from "./base.ts";
 import { LayeredFs, type OverlayState } from "./layered.ts";
 import type { Loop, LoopHost } from "./Loop.ts";
 import { ModelChoices, ModelProvider, type ModelUnavailable } from "./ModelProvider.ts";
@@ -79,6 +79,8 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
     });
 
     /** The repo as the session sees it: what it wrote over the shared base of its clone. */
+    #base: { readonly prefix: string; readonly base: Promise<Base> } | undefined;
+
     readonly fs: LayeredFs = new LayeredFs({
       overlay: overlayFs(this.workspace.provider()),
       root: WORKSPACE_ROOT,
@@ -87,9 +89,17 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
       base: async () => {
         const prefix = this.ctx.storage.kv.get<Checker.Clone>(CLONE_KEY)?.base;
         if (prefix === undefined) return undefined;
-        const base = await openBase(this.env.Bases, prefix);
-        if (base === undefined) throw new Error("The repo's base is gone. Clone the repo again.");
-        return base;
+        // The session holds its own base, so another repo's in the isolate's cache never pushes it out.
+        if (this.#base?.prefix !== prefix) {
+          const base = openBase(this.env.Bases, prefix).then((opened) => {
+            if (opened === undefined)
+              throw new Error("The repo's base is gone. Clone the repo again.");
+            return opened;
+          });
+          base.catch(() => (this.#base = undefined));
+          this.#base = { prefix, base };
+        }
+        return this.#base.base;
       },
     });
 

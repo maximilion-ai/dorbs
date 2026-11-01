@@ -70,18 +70,32 @@ it("keeps a large repo out of the session's SQLite: clone, reads, grep and a com
         );
       const writes = rows();
 
-      const cli = (...argv: string[]) => instance.workspace.git.cli({ argv, cwd: ROOT });
-      await cli("checkout", "-b", "dorbs/cost");
-      const added = await cli("add", "--", "pkg3/src/f3.ts", "pkg4/src/f4.ts", "pkg5/src/f5.ts");
-      const committed = await cli("commit", "-m", "change three files");
+      const { git } = await import("../src/git.ts");
+      const context = {
+        workspace: instance.workspace,
+        fs: instance.fs,
+        dir: ROOT,
+        clone: {
+          repo: decodeRepo("test/large"),
+          commit: decodeCommit(cloned.commit),
+          branch: cloned.branch,
+          base: cloned.base,
+        },
+        created: () => {},
+        url: undefined,
+        headers: async () => undefined,
+      };
+      await git("checkout -b dorbs/cost", context);
+      const added = await git("add pkg3/src/f3.ts pkg4/src/f4.ts pkg5/src/f5.ts", context);
+      const committed = await git('commit -m "change three files"', context);
       const commit = rows();
 
       assert.deepStrictEqual(
         matches.map((match) => match.path),
         ["pkg19/src/f1999.ts"],
       );
-      assert.strictEqual(added.exitCode, 0, added.stderr);
-      assert.strictEqual(committed.exitCode, 0, committed.stderr);
+      assert.strictEqual(added, "(no output)");
+      assert.include(committed, "change three files");
       const measured = { clone, reads, grep, writes, commit };
       // Writing every file of this repo into the VFS cost 26,000 rows and every read about 900.
       assert.isBelow(clone.written, 300, JSON.stringify(measured));
