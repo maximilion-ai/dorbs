@@ -153,6 +153,9 @@
             "overlayMs": {
               "type": "number"
             },
+            "queueMs": {
+              "type": "number"
+            },
             "scope": {
               "type": "string",
               "enum": [
@@ -514,6 +517,9 @@
               "type": "number"
             },
             "overlayMs": {
+              "type": "number"
+            },
+            "queueMs": {
               "type": "number"
             },
             "command": {

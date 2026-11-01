@@ -1,10 +1,11 @@
 //! The environments: each one repo at one recipe, key-file content and image, set up once and
 //! shared by every request on the repo, one run at a time in each of up to REPLICAS copies, with a
-//! disk budget over them all.
+//! disk budget over them all. Requests take the copies in the order they arrived, whichever copy
+//! comes free first.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -39,6 +40,10 @@ pub struct Used<T> {
     pub value: T,
     pub setup_ms: u64,
     pub overlay_ms: u64,
+    /// Time spent waiting for a free copy of the environment and a run slot.
+    pub queue_ms: u64,
+    /// The copy that ran it, 0 for the environment's own.
+    pub replica: usize,
 }
 
 pub enum UseError {
@@ -68,24 +73,61 @@ struct Env {
     inner: Mutex<Inner>,
     /// Signals the run holding the tree that a request that joined it is done.
     left: Notify,
-    /// The requests on this replica, the one running included.
-    waiting: AtomicUsize,
+    /// Whether a request has taken this copy.
+    taken: AtomicBool,
 }
 
-/// A request's claim on a replica, which counts it as waiting there until it ends.
-struct Claim(Arc<Env>);
-
-impl std::ops::Deref for Claim {
-    type Target = Arc<Env>;
-    fn deref(&self) -> &Arc<Env> {
-        &self.0
-    }
+/// The copies of one environment and the requests waiting for one, by their arrival.
+#[derive(Default)]
+struct Group {
+    queue: Mutex<GroupQueue>,
+    /// Signals the waiting requests that a copy came free or one left the line.
+    changed: Notify,
 }
 
-impl Drop for Claim {
+#[derive(Default)]
+struct GroupQueue {
+    waiting: BTreeSet<u64>,
+    taken: usize,
+}
+
+/// A request's copy of an environment, which it holds until it ends.
+struct Turn {
+    group: Arc<Group>,
+    env: Arc<Env>,
+}
+
+impl Drop for Turn {
     fn drop(&mut self) {
-        self.0.waiting.fetch_sub(1, Ordering::Relaxed);
+        self.env.taken.store(false, Ordering::Release);
+        self.group.queue.lock().expect("the group").taken -= 1;
+        self.group.changed.notify_waiters();
     }
+}
+
+/// A request's place in its group's line, which it leaves when it takes a copy or gives up.
+struct Place<'a> {
+    group: &'a Group,
+    ticket: u64,
+}
+
+impl Drop for Place<'_> {
+    fn drop(&mut self) {
+        self.group
+            .queue
+            .lock()
+            .expect("the group")
+            .waiting
+            .remove(&self.ticket);
+        self.group.changed.notify_waiters();
+    }
+}
+
+/// Which copy a replica's key names.
+fn replica_index(key: &str) -> usize {
+    key.rsplit_once('-')
+        .and_then(|(_, n)| n.parse().ok())
+        .unwrap_or(0)
 }
 
 /// The key of an environment's replica; the first keeps the environment's own.
@@ -145,6 +187,7 @@ pub struct Environments {
     docker: Arc<Docker>,
     limits: Limits,
     envs: Mutex<HashMap<String, Arc<Env>>>,
+    groups: Mutex<HashMap<String, Arc<Group>>>,
     slots: Semaphore,
     setups: Semaphore,
     evict_turn: tokio::sync::Mutex<()>,
@@ -234,6 +277,7 @@ impl Environments {
             docker,
             limits,
             envs: Mutex::new(HashMap::new()),
+            groups: Mutex::new(HashMap::new()),
             slots: Semaphore::new(run_slots),
             setups: Semaphore::new(2),
             evict_turn: tokio::sync::Mutex::new(()),
@@ -319,38 +363,90 @@ impl Environments {
                 shared: None,
             }),
             left: Notify::new(),
-            waiting: AtomicUsize::new(0),
+            taken: AtomicBool::new(false),
         })
     }
 
-    /// The replica a request takes: a free one, else a new one while there are fewer than REPLICAS,
-    /// else the one with the fewest requests on it.
-    fn env_for(&self, spec: &EnvSpec) -> Claim {
+    fn group(&self, key: &str) -> Arc<Group> {
+        (self.groups.lock().expect("the groups"))
+            .entry(key.to_owned())
+            .or_default()
+            .clone()
+    }
+
+    /// Waits until the request with `ticket` is the earliest waiting and a copy is free, then takes one:
+    /// a ready copy no one holds, else a new one while there are fewer than REPLICAS, else any free one.
+    /// Gives up once nobody is `wanted` it any more.
+    async fn take_turn(
+        &self,
+        spec: &EnvSpec,
+        ticket: u64,
+        wanted: &impl Fn() -> bool,
+    ) -> Option<Turn> {
+        let group = self.group(&spec.key);
+        let replicas = self.limits.replicas.max(1);
+        let place = Place {
+            group: &group,
+            ticket,
+        };
+        group
+            .queue
+            .lock()
+            .expect("the group")
+            .waiting
+            .insert(ticket);
+        loop {
+            let changed = group.changed.notified();
+            {
+                let mut queue = group.queue.lock().expect("the group");
+                if queue.taken < replicas && queue.waiting.first() == Some(&ticket) {
+                    queue.taken += 1;
+                    queue.waiting.remove(&ticket);
+                    drop(queue);
+                    drop(place);
+                    let env = self.free_copy(spec, replicas);
+                    return Some(Turn {
+                        group: group.clone(),
+                        env,
+                    });
+                }
+            }
+            if !wanted() {
+                return None;
+            }
+            // A wake-up now and then, so a request nobody wants any more leaves the line.
+            let _ = tokio::time::timeout(Duration::from_secs(5), changed).await;
+        }
+    }
+
+    fn free_copy(&self, spec: &EnvSpec, replicas: usize) -> Arc<Env> {
         let mut envs = self.envs.lock().expect("the envs");
-        let replicas: Vec<(String, Option<Arc<Env>>)> = (0..self.limits.replicas.max(1))
+        let copies: Vec<(String, Option<Arc<Env>>)> = (0..replicas)
             .map(|n| replica_key(&spec.key, n))
             .map(|key| {
                 let env = envs.get(&key).cloned();
                 (key, env)
             })
             .collect();
-        let waiting = |env: &Arc<Env>| env.waiting.load(Ordering::Relaxed);
-        let env = (replicas.iter())
-            .find_map(|(_, env)| env.clone().filter(|env| waiting(env) == 0))
+        let free = |env: &Arc<Env>| !env.taken.load(Ordering::Acquire);
+        let ready = |env: &Arc<Env>| {
+            matches!(
+                Self::state(env).phase(),
+                Phase::Ready | Phase::Idle | Phase::Busy
+            )
+        };
+        let env = (copies.iter())
+            .find_map(|(_, env)| env.clone().filter(|env| free(env) && ready(env)))
             .or_else(|| {
-                let (key, _) = replicas.iter().find(|(_, env)| env.is_none())?;
+                let (key, _) = copies.iter().find(|(_, env)| env.is_none())?;
                 let env = self.new_env(key, &spec.repo);
                 envs.insert(key.clone(), env.clone());
                 Some(env)
             })
-            .or_else(|| {
-                (replicas.iter())
-                    .filter_map(|(_, env)| env.clone())
-                    .min_by_key(waiting)
-            })
-            .expect("one replica at least");
-        env.waiting.fetch_add(1, Ordering::Relaxed);
-        Claim(env)
+            .or_else(|| copies.iter().find_map(|(_, env)| env.clone().filter(free)))
+            .expect("a free copy while fewer than REPLICAS are taken");
+        env.taken.store(true, Ordering::Release);
+        env
     }
 
     fn tree(&self, env: &Env, git_dir: &Path) -> Tree {
@@ -711,30 +807,37 @@ impl Environments {
     /// any run before it there: sets the environment up first if needed, and takes the change off.
     /// Once nobody is `wanted` it any more, a request gives up before it sets up or takes the
     /// environment, never once its run has begun.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         self: &Arc<Self>,
         spec: Arc<EnvSpec>,
+        ticket: u64,
         commit: CommitSha,
         change: Change,
         commands: Vec<(Command, Duration)>,
         wanted: impl Fn() -> bool,
     ) -> Result<Used<Vec<Ran>>, UseError> {
-        let env = self.env_for(&spec);
+        let arrived = Instant::now();
+        if let Some((value, replica)) = self.join_any(&spec, &commit, &change, &commands).await {
+            return Ok(Used {
+                value,
+                setup_ms: 0,
+                overlay_ms: 0,
+                queue_ms: 0,
+                replica,
+            });
+        }
         loop {
-            if !wanted() {
+            let Some(turn) = self.take_turn(&spec, ticket, &wanted).await else {
                 return Err(UseError::Abandoned);
-            }
+            };
+            let env = turn.env.clone();
+            let waited = arrived.elapsed();
             let setup_ms = self
                 .ready(&env, &spec, &commit)
                 .await
                 .map_err(UseError::SetupFailed)?;
-            if let Some(value) = self.join(&env, &commit, &change, &commands).await {
-                return Ok(Used {
-                    value,
-                    setup_ms,
-                    overlay_ms: 0,
-                });
-            }
+            let queued = Instant::now();
             let queue = env.queue.lock().await;
             if !wanted() {
                 return Err(UseError::Abandoned);
@@ -775,14 +878,17 @@ impl Environments {
             };
             Self::take(&env, EnvEvent::Acquired);
             let tree = self.tree(&env, &spec.git_dir);
-            let ran = {
+            let (ran, queue_ms) = {
                 let _slot = self
                     .slots
                     .acquire()
                     .await
                     .map_err(|e| UseError::Internal(e.to_string()))?;
-                self.run_held(&env, &tree, &from, &commit, &change, &keeper, &commands)
-                    .await
+                let queue_ms = (waited + queued.elapsed()).as_millis() as u64;
+                let ran = self
+                    .run_held(&env, &tree, &from, &commit, &change, &keeper, &commands)
+                    .await;
+                (ran, queue_ms)
             };
             let recovered = tree.recover().await;
             Self::take(
@@ -809,11 +915,14 @@ impl Environments {
                 let env = env.clone();
                 tokio::spawn(async move { this.measure(&env).await });
             }
+            drop(turn);
             let (value, overlay_ms) = ran?;
             return Ok(Used {
                 value,
                 setup_ms,
                 overlay_ms,
+                queue_ms,
+                replica: replica_index(&env.key),
             });
         }
     }
@@ -880,6 +989,29 @@ impl Environments {
         let restoring = Instant::now();
         tree.restore(&overlay).await.map_err(UseError::Internal)?;
         Ok((ran, (laid + restoring.elapsed()).as_millis() as u64))
+    }
+
+    /// Runs `commands` beside a copy's run that holds the tree at `commit` with `change`, and answers
+    /// which copy; None when no copy's run does.
+    async fn join_any(
+        &self,
+        spec: &EnvSpec,
+        commit: &CommitSha,
+        change: &Change,
+        commands: &[(Command, Duration)],
+    ) -> Option<(Vec<Ran>, usize)> {
+        let copies: Vec<Arc<Env>> = {
+            let envs = self.envs.lock().expect("the envs");
+            (0..self.limits.replicas.max(1))
+                .filter_map(|n| envs.get(&replica_key(&spec.key, n)).cloned())
+                .collect()
+        };
+        for env in copies {
+            if let Some(value) = self.join(&env, commit, change, commands).await {
+                return Some((value, replica_index(&env.key)));
+            }
+        }
+        None
     }
 
     /// Runs `commands` beside the run holding the tree when it holds it at `commit` with `change`.

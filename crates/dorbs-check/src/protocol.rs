@@ -247,6 +247,9 @@ pub struct CheckResult {
     pub setup_ms: u64,
     /// Time spent laying the change over the environment's tree and taking it off again.
     pub overlay_ms: u64,
+    /// Time spent waiting for a free copy of the environment and a run slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_ms: Option<u64>,
     pub scope: Scope,
     /// Whether every check ran to its end with its whole output read.
     pub complete: bool,
@@ -260,6 +263,8 @@ pub struct TestResult {
     pub duration_ms: u64,
     pub setup_ms: u64,
     pub overlay_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_ms: Option<u64>,
     pub command: String,
     pub status: RunStatus,
     pub exit_code: Option<i32>,

@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dorbs_check::adapter::{Adapters, Phase};
@@ -109,6 +109,7 @@ async fn environments(host: &Host, replicas: usize) -> (Arc<Docker>, Arc<Environ
         setup_memory: "1g".into(),
         cpus: "1".into(),
         pids: 256,
+        cgroup_parent: None,
     };
     let docker = Arc::new(Docker::new(
         &host.prefix,
@@ -163,6 +164,12 @@ fn recipe(setup: Vec<SetupStep>) -> Recipe {
     }
 }
 
+/// A request's place in line, as the service numbers requests on arrival.
+fn ticket() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 #[tokio::test]
 #[ignore = "needs rootless Docker and the network"]
 async fn gives_setup_code_no_source_while_it_has_the_network_and_no_network_once_it_has_the_source()
@@ -193,7 +200,14 @@ async fn gives_setup_code_no_source_while_it_has_the_network_and_no_network_once
         online_change: Change::default(),
     };
     let used = envs
-        .run(Arc::new(spec), commit, Change::default(), vec![], || true)
+        .run(
+            Arc::new(spec),
+            ticket(),
+            commit,
+            Change::default(),
+            vec![],
+            || true,
+        )
         .await;
     assert!(
         used.is_ok(),
@@ -265,6 +279,7 @@ async fn writes_nothing_of_the_host_when_a_run_swaps_the_trees_root_for_a_link()
     let ran = envs
         .run(
             spec.clone(),
+            ticket(),
             commit.clone(),
             change,
             vec![(
@@ -293,7 +308,7 @@ async fn writes_nothing_of_the_host_when_a_run_swaps_the_trees_root_for_a_link()
     );
     // The next request sets the environment up anew.
     let again = envs
-        .run(spec, commit, Change::default(), vec![], || true)
+        .run(spec, ticket(), commit, Change::default(), vec![], || true)
         .await;
     assert!(again.is_ok());
 }
@@ -335,6 +350,7 @@ async fn runs_requests_for_one_change_at_once_and_queues_other_changes() {
     };
     envs.run(
         spec.clone(),
+        ticket(),
         commit.clone(),
         Change::default(),
         vec![],
@@ -348,7 +364,14 @@ async fn runs_requests_for_one_change_at_once_and_queues_other_changes() {
         async move {
             let started = std::time::Instant::now();
             let used = envs
-                .run(spec, commit, change(content), sleep_and_read(), || true)
+                .run(
+                    spec,
+                    ticket(),
+                    commit,
+                    change(content),
+                    sleep_and_read(),
+                    || true,
+                )
                 .await
                 .ok()
                 .expect("the run");
@@ -367,6 +390,92 @@ async fn runs_requests_for_one_change_at_once_and_queues_other_changes() {
         other_a.max(other_b) >= Duration::from_secs(4),
         "another change queues: {other_a:?} {other_b:?}"
     );
+}
+
+#[tokio::test]
+#[ignore = "needs rootless Docker"]
+async fn runs_queued_requests_in_the_order_they_arrived() {
+    let host = host("order");
+    let git_dir = host.root.join("repo.git");
+    let commit = repo(
+        &git_dir,
+        &[
+            ("package.json", "{}"),
+            ("src/a.ts", "export const a = 1;\n"),
+        ],
+    );
+    let (_, envs, image) = environments(&host, 1).await;
+    let spec = Arc::new(EnvSpec {
+        key: "order".into(),
+        repo: RepoId::try_from("test/order").unwrap(),
+        git_dir,
+        recipe: recipe(vec![]),
+        image,
+        key_change: Change::default(),
+        online_paths: vec![],
+        online_change: Change::default(),
+    });
+    let change = |content: &str| -> Change {
+        serde_json::from_value(serde_json::json!({ "files": [{ "path": "src/a.ts", "content": content }], "deleted": [] })).unwrap()
+    };
+    let read = |seconds: u32| {
+        vec![(
+            run::Command {
+                cwd: ".".into(),
+                run: format!("sleep {seconds} && cat src/a.ts"),
+            },
+            Duration::from_secs(60),
+        )]
+    };
+    envs.run(
+        spec.clone(),
+        ticket(),
+        commit.clone(),
+        Change::default(),
+        vec![],
+        || true,
+    )
+    .await
+    .ok()
+    .expect("the environment sets up");
+    let finished = Arc::new(Mutex::new(Vec::new()));
+    let queued = |ticket: u64, content: &'static str, after: u64| {
+        let (envs, spec, commit, finished) =
+            (envs.clone(), spec.clone(), commit.clone(), finished.clone());
+        async move {
+            // Each reaches the line later than the one before it, but with an earlier ticket.
+            tokio::time::sleep(Duration::from_millis(after)).await;
+            let used = envs
+                .run(spec, ticket, commit, change(content), read(0), || true)
+                .await
+                .ok()
+                .expect("the run");
+            finished
+                .lock()
+                .unwrap()
+                .push(used.value[0].result.stdout.clone());
+        }
+    };
+    let holder = envs.run(
+        spec.clone(),
+        ticket(),
+        commit.clone(),
+        change("first"),
+        read(2),
+        || true,
+    );
+    let base = 1_000_000;
+    let (held, (), (), ()) = tokio::join!(
+        holder,
+        queued(base + 3, "fourth", 200),
+        queued(base + 2, "third", 400),
+        queued(base + 1, "second", 600),
+    );
+    assert_eq!(
+        held.ok().expect("the first run").value[0].result.stdout,
+        "first"
+    );
+    assert_eq!(*finished.lock().unwrap(), ["second", "third", "fourth"]);
 }
 
 #[tokio::test]
@@ -406,6 +515,7 @@ async fn gives_up_a_queued_request_nobody_waits_for_and_runs_the_next() {
     };
     envs.run(
         spec.clone(),
+        ticket(),
         commit.clone(),
         Change::default(),
         vec![],
@@ -417,6 +527,7 @@ async fn gives_up_a_queued_request_nobody_waits_for_and_runs_the_next() {
     let waits = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let ahead = envs.run(
         spec.clone(),
+        ticket(),
         commit.clone(),
         change("one"),
         sleep_and_read(),
@@ -426,6 +537,7 @@ async fn gives_up_a_queued_request_nobody_waits_for_and_runs_the_next() {
         let waits = waits.clone();
         envs.run(
             spec.clone(),
+            ticket(),
             commit.clone(),
             change("two"),
             sleep_and_read(),
@@ -449,7 +561,14 @@ async fn gives_up_a_queued_request_nobody_waits_for_and_runs_the_next() {
         started.elapsed()
     );
     let next = envs
-        .run(spec, commit, change("three"), sleep_and_read(), || true)
+        .run(
+            spec,
+            ticket(),
+            commit,
+            change("three"),
+            sleep_and_read(),
+            || true,
+        )
         .await
         .ok()
         .expect("the next run");
@@ -491,6 +610,7 @@ async fn runs_other_changes_at_once_on_replicas_of_the_environment() {
             let used = envs
                 .run(
                     spec,
+                    ticket(),
                     commit,
                     change,
                     vec![(command, Duration::from_secs(60))],

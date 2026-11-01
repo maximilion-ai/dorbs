@@ -67,6 +67,7 @@ impl Checkout {
             started,
             setup_ms: 0,
             overlay_ms: 0,
+            queue_ms: None,
         }
     }
 

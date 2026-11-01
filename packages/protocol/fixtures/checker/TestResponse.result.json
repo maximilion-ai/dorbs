@@ -4,6 +4,7 @@
   "durationMs": 942,
   "setupMs": 0,
   "overlayMs": 187,
+  "queueMs": 0,
   "command": "cd 'test/unit' && pnpm exec vitest run 'test/basic.test.ts'",
   "status": "failed",
   "exitCode": 1,
