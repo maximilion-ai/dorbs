@@ -90,7 +90,7 @@ it("deletes a base once no session has used it for 14 days, and keeps it while o
     assert.isAbove(await stored(), 0);
     // While a deletion runs, no session may count on the base and no build may start.
     await runInDurableObject(repoBase, (_, state) => {
-      state.storage.kv.put("deleting", true);
+      state.storage.kv.put("deleting", start);
     });
     assert.isFalse(await repoBase.used(prefix));
     assert.isFalse(await repoBase.lease("another"));
@@ -376,5 +376,15 @@ it("restores a directory from a commit, leaving untracked files and putting a fi
     await fs.writeFile(`${ROOT}/file.txt/child`, "child\n");
     assert.strictEqual(await git("restore file.txt"), "(no output)");
     assert.strictEqual(await fs.readText(`${ROOT}/file.txt`), "file\n");
+  });
+});
+
+it("checks a file out of HEAD~1", async () => {
+  await withClone("checkout-parent", async ({ fs, git }) => {
+    await fs.writeFile(`${ROOT}/file.txt`, "edited\n");
+    await git("commit -am edit");
+    assert.strictEqual(await git("checkout HEAD~1 -- file.txt"), "Updated 1 paths from the index");
+    assert.strictEqual(await fs.readText(`${ROOT}/file.txt`), "file\n");
+    assert.strictEqual(await git("status --short"), "M  file.txt");
   });
 });

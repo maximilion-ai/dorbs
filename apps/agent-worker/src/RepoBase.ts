@@ -8,14 +8,21 @@ import { DurableObject } from "cloudflare:workers";
 // A builder renews its lease while it fetches; one silent this long has died, and another may take over.
 const LEASE_MS = 2 * 60 * 1000;
 const UNUSED_MS = 14 * 24 * 60 * 60 * 1000;
+// A deletion takes seconds; one marked longer ago than this died, and its base is open to builds again.
+const DELETING_MS = 60 * 60 * 1000;
 
 type Lease = { readonly holder: string; readonly at: number };
 
 export class RepoBase extends DurableObject {
+  #deleting(): boolean {
+    const since = this.ctx.storage.kv.get<number>("deleting");
+    return since !== undefined && Date.now() - since < DELETING_MS;
+  }
+
   /** Grants or renews the build lease for `holder`; false while another holder's lease is live or the base is being deleted. */
   lease(holder: string): boolean {
     const now = Date.now();
-    if (this.ctx.storage.kv.get<boolean>("deleting") === true) return false;
+    if (this.#deleting()) return false;
     const current = this.ctx.storage.kv.get<Lease>("lease");
     if (current !== undefined && current.holder !== holder && now - current.at < LEASE_MS)
       return false;
@@ -33,7 +40,7 @@ export class RepoBase extends DurableObject {
    * runs: the caller drops its copy, and a clone waits to build the base again.
    */
   async used(prefix: string): Promise<boolean> {
-    if (this.ctx.storage.kv.get<boolean>("deleting") === true) return false;
+    if (this.#deleting()) return false;
     const now = Date.now();
     const last = this.ctx.storage.kv.get<number>("used");
     // Renewing more often than hourly only costs writes.
@@ -53,7 +60,7 @@ export class RepoBase extends DurableObject {
     }
     if (prefix !== undefined) {
       // No build starts until the deletion ends, so none writes a part this deletes.
-      this.ctx.storage.kv.put("deleting", true);
+      this.ctx.storage.kv.put("deleting", Date.now());
       // The manifest first, so no session trusts a base that is half deleted.
       await this.env.Bases.delete(`${prefix}/manifest.json`);
       let cursor: string | undefined;
