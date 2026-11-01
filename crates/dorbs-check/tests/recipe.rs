@@ -117,7 +117,10 @@ fn runs_a_pnpm_repos_own_typecheck_and_lint_scripts_after_a_frozen_install() {
         checks(&recipe),
         pairs(&[
             ("typecheck", "pnpm run typecheck"),
-            ("lint", "pnpm run lint")
+            (
+                "lint",
+                "pnpm exec oxlint --format github --no-error-on-unmatched-pattern {changed}"
+            )
         ])
     );
     let test = recipe.test.unwrap();
@@ -688,4 +691,33 @@ fn seeds_and_keeps_vite_plus_caches_only_where_the_repo_uses_vite_plus() {
             .all(|(id, _, _)| id != "vite-plus package manager")
     );
     assert!(plain.warm.is_empty());
+}
+
+#[test]
+fn lints_only_the_changed_files_when_the_repos_lint_covers_the_whole_repo() {
+    let lint = |script: &str| {
+        let manifest = json!({ "packageManager": "pnpm@10.0.0", "scripts": { "lint": script } });
+        let recipe = recipe(&[
+            ("package.json", &manifest.to_string()),
+            ("pnpm-lock.yaml", PNPM_LOCK),
+        ]);
+        let lint = recipe
+            .checks
+            .iter()
+            .find(|check| check.id.as_str() == "lint");
+        lint.map(|check| check.run.clone()).unwrap_or_default()
+    };
+    assert_eq!(
+        lint("vp lint --deny-warnings --report-unused-disable-directives"),
+        "pnpm exec vp lint --deny-warnings --report-unused-disable-directives --format github \
+         --no-error-on-unmatched-pattern {changed}"
+    );
+    for whole in [
+        "oxlint src",
+        "oxlint --fix",
+        "vp lint --format unix",
+        "eslint .",
+    ] {
+        assert_eq!(lint(whole), "pnpm run lint", "{whole}");
+    }
 }

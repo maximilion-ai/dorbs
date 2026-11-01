@@ -299,6 +299,21 @@ pub struct Adapter {
     /// the checks once on the commit, and every run gets these paths back as that left them.
     #[serde(default)]
     pub warm: Vec<WarmDef>,
+    /// The repo's own check commands this adapter can run on the changed files alone.
+    #[serde(default)]
+    pub narrow: Vec<NarrowDef>,
+}
+
+/// A repo check command whose `body` matches runs as `run` instead, which names `{changed}` and the
+/// body's named groups, so a session's check looks at its own files, not the whole repo.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NarrowDef {
+    pub role: Role,
+    pub body: Pattern,
+    /// A body this matches keeps running as it is.
+    pub unless: Option<Pattern>,
+    pub run: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

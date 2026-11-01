@@ -1,7 +1,7 @@
-// The checker's benchmark on its host: fixed checks and tests from the celld2 eval's PRs, sent at once as the Worker
-// sends them, to a bench instance under 4 CPUs and 16 GiB. BENCH_DIR (~/dorbs-checker-bench) holds its files.
-//   node scripts/checker-bench.ts up [--binary PATH] [--recipe FILE] | run [--label NAME] | down [--purge]
-// up starts the unit dorbs-checker-bench on port 8791, run writes results/<time>-<label>.json, down stops it.
+// The checker's benchmark on its host: a set of real changes to one repo, checked and tested at once as the Worker
+// sends them, on a bench instance under 4 CPUs and 16 GiB. Sets are scripts/checker-bench/<set>.json.
+//   node scripts/checker-bench.ts up [--binary PATH] [--set S --recipe FILE] | run [--set S] [--label L] | down [--purge]
+// up starts the unit dorbs-checker-bench on port 8791 with every set's repo, run writes results/<time>-<label>.json.
 
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
@@ -10,32 +10,17 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
-const REPO = "maximilionai/t3code-eval-celld";
-const REPO_URL = `https://github.com/${REPO}.git`;
-const BASE = "8d1fb7dc7e5007637c14fb7cf9ed4f5443f619f9";
-/** 12 checks and 8 tests, the eval's mix (125 to 82), in the order they are submitted: PR and its head. */
-const JOBS: ReadonlyArray<readonly ["check" | "test", number, string]> = [
-  ["check", 107, "99680f3bb1b38e110ffa32907cfc0a8666d36eef"],
-  ["check", 113, "f53d5b06442ecfd4939bccfacfd3f16aed6d4078"],
-  ["test", 179, "c56ffda007b56ccf2b213404de2897f181ccd7c3"],
-  ["check", 108, "8d296be7eb603f0f5fc5bb53121f714adc7b64f4"],
-  ["test", 120, "cf049457cd2c5cb87a6eba21a5fbac07f032748f"],
-  ["check", 127, "1b3e9eb4a52f6da31ddc3edd4de214ff9aa690dd"],
-  ["check", 138, "6e0bdad41f409399b274a47b96ea610e51118392"],
-  ["test", 167, "41ce47a179602767b1b3176405037d118d105f28"],
-  ["check", 136, "9eb3018902ee454494ea4a2d68f36ed3d7f3686d"],
-  ["test", 192, "ea03302106f170f619dfab99b46f193d421bbb43"],
-  ["check", 116, "232476d64819fcd2d60e1c673dfc9ed158ac22c3"],
-  ["check", 155, "979be30fb5071583657b6cbdb62246b1724f3ca0"],
-  ["test", 151, "ba5742735beb6970d8ee6b59c3c12e6811e90d3b"],
-  ["check", 115, "87bff942856ee1f604a8262f769aad88f439a57f"],
-  ["test", 144, "046aac61144e6fdf44c6af716abd71d7693c35a0"],
-  ["check", 126, "7955eb937a0c528729c4b984a69265b3240f6c41"],
-  ["check", 195, "a3e1e8b4b1ba262c3a80a1ae1bc5c98b97e07c69"],
-  ["test", 152, "63a0d3564406e4705e88409908dc8d9b1d41d346"],
-  ["check", 200, "0338e93efcc0eb7378ad99b561c9d1499ab2f0b9"],
-  ["test", 112, "8c36e9db70aa3d0311b5ea8ed6ee6c6785185467"],
-];
+/**
+ * A set: the repo, the commit every request names, and jobs in the order they are sent. A job's change is what
+ * `head` changed from `from`, the base when it names none, laid over the base; a test runs the test files it touched.
+ */
+type JobSet = {
+  repo: string;
+  url: string;
+  public?: boolean;
+  base: string;
+  jobs: ReadonlyArray<{ kind: "check" | "test"; head: string; from?: string; ref?: string }>;
+};
 
 const BUDGET = { cpus: 4, mib: 16 * 1024 };
 const UNIT = "dorbs-checker-bench";
@@ -49,6 +34,10 @@ const TOKEN_FILE = NodePath.join(DIR, "check-token");
 const ENV_FILE = NodePath.join(DIR, "checker.env");
 const ROOT = NodePath.resolve(import.meta.dirname, "..");
 const UID = process.getuid?.() ?? 0;
+const SETS = NodePath.join(import.meta.dirname, "checker-bench");
+
+const jobSet = (name: string): JobSet =>
+  JSON.parse(NodeFS.readFileSync(NodePath.join(SETS, `${name}.json`), "utf8"));
 /** With SLICE=1, the service and its containers run in this slice, which holds the whole budget. */
 const SLICE = "dorbs-checker-bench.slice";
 const SLICE_FILE = NodePath.join(HOME, ".config/systemd/user", SLICE);
@@ -58,6 +47,7 @@ const { positionals, values } = NodeUtil.parseArgs({
   options: {
     binary: { type: "string" },
     recipe: { type: "string" },
+    set: { type: "string", default: "t3code-eval" },
     label: { type: "string" },
     purge: { type: "boolean" },
   },
@@ -128,20 +118,19 @@ const up = async () => {
   if (!NodeFS.existsSync(TOKEN_FILE)) {
     NodeFS.writeFileSync(TOKEN_FILE, NodeCrypto.randomBytes(32).toString("hex"), { mode: 0o600 });
   }
-  const production: ReadonlyArray<{ id: string; recipe?: unknown }> = JSON.parse(
-    NodeFS.readFileSync(NodePath.join(HOME, "dorbs-checker/repos.json"), "utf8"),
-  );
   const repos = NodePath.join(DIR, "repos.json");
+  const sets = NodeFS.readdirSync(SETS).filter((file) => file.endsWith(".json"));
   NodeFS.writeFileSync(
     repos,
     JSON.stringify(
-      production
-        .filter((repo) => repo.id === REPO)
-        .map((repo) =>
-          values.recipe === undefined
-            ? repo
-            : { ...repo, recipe: JSON.parse(NodeFS.readFileSync(values.recipe, "utf8")) },
-        ),
+      sets.map((file) => {
+        const set = jobSet(file.replace(/\.json$/, ""));
+        const recipe =
+          values.recipe !== undefined && file === `${values.set}.json`
+            ? { recipe: JSON.parse(NodeFS.readFileSync(values.recipe, "utf8")) }
+            : {};
+        return { id: set.repo, url: set.url, ...(set.public ? { public: true } : {}), ...recipe };
+      }),
       null,
       2,
     ),
@@ -235,52 +224,52 @@ type Change = {
 type Job = {
   id: string;
   kind: "check" | "test";
-  pr: number;
+  head: string;
   body: { repo: string; commit: string; change: Change; files?: ReadonlyArray<string> };
 };
 
-/** The PR heads in a repo of the bench's own, each a change against BASE; tests run the test files it touched. */
-const jobs = (): ReadonlyArray<Job> => {
+const TEST_FILE = /\.test\.[cm]?[jt]sx?$|_test\.go$|(?:^|\/)test_[^/]*\.py$|_test\.py$/;
+
+/** The set's jobs from a repo of the bench's own, fetched once and checked against the heads the set pins. */
+const jobs = (set: JobSet): ReadonlyArray<Job> => {
   const gitDir = NodePath.join(DIR, "jobs.git");
   const git = (...args: ReadonlyArray<string>) => sh("git", ["--git-dir", gitDir, ...args]);
   if (!NodeFS.existsSync(gitDir)) sh("git", ["init", "--quiet", "--bare", gitDir]);
-  const missing = JOBS.filter(
-    ([, , head]) => quiet("git", ["--git-dir", gitDir, "cat-file", "-e", head]).status !== 0,
-  );
-  if (missing.length > 0) {
-    git(
-      "fetch",
-      "--quiet",
-      "--depth=1",
-      REPO_URL,
-      BASE,
-      ...missing.map(([, pr]) => `refs/pull/${pr}/head:refs/pull/${pr}`),
+  const has = (sha: string) =>
+    quiet("git", ["--git-dir", gitDir, "cat-file", "-e", sha]).status === 0;
+  const wanted = [set.base, ...set.jobs.flatMap((job) => [job.head, job.from ?? set.base])];
+  if (!wanted.every(has)) {
+    const refs = set.jobs.flatMap((job) => (job.ref === undefined ? [] : [job.ref]));
+    const shas = [...new Set(wanted)].filter(
+      (sha) => !set.jobs.some((job) => job.ref !== undefined && job.head === sha),
     );
+    git("fetch", "--quiet", "--depth=1", set.url, ...shas, ...refs);
   }
-  return JOBS.map(([kind, pr, head], n) => {
-    const fetched = git("rev-parse", `refs/pull/${pr}`).trim();
-    if (fetched !== head) throw new Error(`PR ${pr} is at ${fetched}, not ${head}`);
+  return set.jobs.map((job, n) => {
+    if (!has(job.head)) throw new Error(`${set.repo} has no ${job.head}`);
     const files: Array<{ path: string; content: string }> = [];
     const deleted: Array<string> = [];
-    const entries = git("diff", "--name-status", "--no-renames", "-z", BASE, head).split("\0");
+    const from = job.from ?? set.base;
+    const entries = git("diff", "--name-status", "--no-renames", "-z", from, job.head).split("\0");
     for (let i = 0; i + 1 < entries.length; i += 2) {
       const [status, path] = [entries[i]!, entries[i + 1]!];
       if (status === "D") deleted.push(path);
-      else files.push({ path, content: git("show", `${head}:${path}`) });
+      else files.push({ path, content: git("show", `${job.head}:${path}`) });
     }
-    const tests = files
-      .map((file) => file.path)
-      .filter((path) => /\.test\.[cm]?[jt]sx?$/.test(path));
-    if (kind === "test" && tests.length === 0) throw new Error(`PR ${pr} touches no test file`);
+    const tests = files.map((file) => file.path).filter((path) => TEST_FILE.test(path));
+    if (job.kind === "test" && tests.length === 0) {
+      throw new Error(`${job.head} touches no test file`);
+    }
+    const name = job.ref?.match(/pull\/(\d+)/)?.[1] ?? job.head.slice(0, 8);
     return {
-      id: `${String(n + 1).padStart(2, "0")}-${kind}-${pr}`,
-      kind,
-      pr,
+      id: `${String(n + 1).padStart(2, "0")}-${job.kind}-${name}`,
+      kind: job.kind,
+      head: job.head,
       body: {
-        repo: REPO,
-        commit: BASE,
+        repo: set.repo,
+        commit: set.base,
         change: { files, deleted },
-        ...(kind === "test" ? { files: tests } : {}),
+        ...(job.kind === "test" ? { files: tests } : {}),
       },
     };
   });
@@ -326,7 +315,7 @@ type Answer = {
 type JobResult = {
   id: string;
   kind: Job["kind"];
-  pr: number;
+  head: string;
   latencyMs: number;
   http?: number | undefined;
   error?: string | undefined;
@@ -386,7 +375,7 @@ const submit = async (job: Job, started: number): Promise<JobResult> => {
     return {
       id: job.id,
       kind: job.kind,
-      pr: job.pr,
+      head: job.head,
       latencyMs,
       http: answer.status,
       error: answer.text.slice(0, 500),
@@ -398,7 +387,7 @@ const submit = async (job: Job, started: number): Promise<JobResult> => {
   return {
     id: job.id,
     kind: job.kind,
-    pr: job.pr,
+    head: job.head,
     latencyMs,
     tag: result._tag,
     envKey: result.envKey,
@@ -618,7 +607,7 @@ const run = async () => {
   if (quiet("systemctl", ["--user", "is-active", "--quiet", UNIT]).status !== 0) {
     throw new Error(`${UNIT} does not run; start it with up`);
   }
-  const set = jobs();
+  const set = jobs(jobSet(values.set));
   const environments = async () => JSON.parse((await request("GET", "/environments")).text);
   const before = await environments();
   const stop = sampler();
@@ -645,7 +634,7 @@ const run = async () => {
     setupS: Math.max(0, ...ok.map((r) => (r.setupMs ?? 0) / 1000)),
     ...usage,
   };
-  const label = values.label ?? "run";
+  const label = `${values.set}-${values.label ?? "run"}`;
   const file = NodePath.join(
     DIR,
     "results",

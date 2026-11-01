@@ -1,0 +1,59 @@
+{
+  "repo": "cli/cli",
+  "url": "https://github.com/cli/cli.git",
+  "public": true,
+  "base": "4f168ce66da877f231bb30958e1e970b95885953",
+  "about": "Merges after 4f168ce6 on trunk with no go.mod change, each one's own change laid over that base.",
+  "jobs": [
+    {
+      "kind": "check",
+      "head": "a81663f7d80d620b092dab3056778a79ff3e279c",
+      "from": "4f168ce66da877f231bb30958e1e970b95885953"
+    },
+    {
+      "kind": "test",
+      "head": "b7887068cb6f883edee92181227a302e3a4fd6ae",
+      "from": "a81663f7d80d620b092dab3056778a79ff3e279c"
+    },
+    {
+      "kind": "check",
+      "head": "bd0b0e085fac756c1f521ade256a2cbeb9346398",
+      "from": "b7887068cb6f883edee92181227a302e3a4fd6ae"
+    },
+    {
+      "kind": "test",
+      "head": "d8474903cf4f3456713d3bf0508bdc8c5a61c8c1",
+      "from": "bd0b0e085fac756c1f521ade256a2cbeb9346398"
+    },
+    {
+      "kind": "check",
+      "head": "4a289a9e19cac88013626378185f8debb690a59c",
+      "from": "316e7a80fba9ba68b45cb55e0ade5ab707a54cbd"
+    },
+    {
+      "kind": "test",
+      "head": "e62e84ca88f79e8cb1b26a07fe358687ca28a865",
+      "from": "4a289a9e19cac88013626378185f8debb690a59c"
+    },
+    {
+      "kind": "check",
+      "head": "56682b6faff1646a02246f0ed3ce56f8bcc78c18",
+      "from": "e62e84ca88f79e8cb1b26a07fe358687ca28a865"
+    },
+    {
+      "kind": "check",
+      "head": "6314d776e1e33d9b12679b73711e0cace56c8c2f",
+      "from": "abf0e0c25ae01573738adc9e9c59407b857f49b0"
+    },
+    {
+      "kind": "test",
+      "head": "547bf81aa5d68f6b4274abb6926c75252f254750",
+      "from": "6314d776e1e33d9b12679b73711e0cace56c8c2f"
+    },
+    {
+      "kind": "check",
+      "head": "ae7b9715976c5508398b11dc8546e1279e10f6fc",
+      "from": "547bf81aa5d68f6b4274abb6926c75252f254750"
+    }
+  ]
+}
