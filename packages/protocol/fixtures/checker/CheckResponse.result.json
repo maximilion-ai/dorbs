@@ -4,6 +4,7 @@
   "durationMs": 3038,
   "setupMs": 0,
   "overlayMs": 8,
+  "queueMs": 1200,
   "scope": "repo",
   "complete": false,
   "checks": [

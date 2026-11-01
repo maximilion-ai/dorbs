@@ -190,6 +190,7 @@ pub fn load() -> Result<Settings, String> {
             setup_memory: var("SETUP_MEMORY").unwrap_or_else(|| "8g".into()),
             cpus: var("CONTAINER_CPUS").unwrap_or_else(|| "4".into()),
             pids: parsed("CONTAINER_PIDS", 2048)?,
+            cgroup_parent: var("CONTAINER_CGROUP_PARENT"),
         },
         egress: match var("SETUP_EGRESS").as_deref() {
             None | Some("proxy") => Egress::Proxy,

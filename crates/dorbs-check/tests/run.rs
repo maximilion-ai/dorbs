@@ -181,6 +181,7 @@ fn timings() -> Timings {
         started: Instant::now(),
         setup_ms: 7,
         overlay_ms: 3,
+        queue_ms: None,
     }
 }
 

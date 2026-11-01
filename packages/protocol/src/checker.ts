@@ -126,6 +126,8 @@ const Timings = {
   setupMs: Schema.Finite,
   /** Time spent laying the change over the environment's tree and taking it off again. */
   overlayMs: Schema.Finite,
+  /** Time spent waiting for a free copy of the environment and a run slot. */
+  queueMs: Schema.optionalKey(Schema.Finite),
 };
 
 const CheckResult = Schema.TaggedStruct("CheckResult", {

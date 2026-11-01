@@ -1,8 +1,10 @@
 //! The service's two requests: resolve the repo's recipe at the commit, find or set up its
 //! environment, and run the checks or tests there with the change laid over the tree.
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
@@ -32,11 +34,20 @@ pub enum Failure {
     Abandoned,
 }
 
+/// A commit's paths and the contents of the files the adapters read, which never change.
+type Files = Arc<(Vec<RelativePath>, HashMap<String, String>)>;
+
+/// How many commits' files the service keeps; sessions start from few commits.
+const KEPT_COMMITS: usize = 16;
+
 pub struct Service {
     pub settings: Settings,
     caches: Caches,
     docker: Arc<Docker>,
     pub environments: Arc<Environments>,
+    /// Numbers requests as they arrive, so they take the environment in that order.
+    tickets: AtomicU64,
+    files: Mutex<HashMap<(PathBuf, CommitSha), Files>>,
 }
 
 struct Prepared {
@@ -81,7 +92,27 @@ impl Service {
             settings,
             docker,
             environments,
+            tickets: AtomicU64::new(0),
+            files: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The commit's paths and read files, listed once per commit.
+    async fn files(&self, git_dir: &Path, commit: &CommitSha) -> Result<Files, Failure> {
+        let key = (git_dir.to_owned(), commit.clone());
+        if let Some(files) = self.files.lock().expect("the files").get(&key) {
+            return Ok(files.clone());
+        }
+        let listed = git::files(git_dir, commit, &self.settings.adapters.reads)
+            .await
+            .map_err(Failure::Internal)?;
+        let files: Files = Arc::new(listed);
+        let mut kept = self.files.lock().expect("the files");
+        if kept.len() >= KEPT_COMMITS {
+            kept.clear();
+        }
+        kept.insert(key, files.clone());
+        Ok(files)
     }
 
     /// The recipe and environment a request runs in, or why it cannot run.
@@ -120,10 +151,9 @@ impl Service {
             }
         };
         let adapters = &self.settings.adapters;
-        let (paths, inputs) = git::files(&git_dir, commit, &adapters.reads)
-            .await
-            .map_err(Failure::Internal)?;
-        let view = View::new(paths.clone(), inputs, change, &adapters.commit_only);
+        let files = self.files(&git_dir, commit).await?;
+        let (paths, inputs) = (&files.0, &files.1);
+        let view = View::new(paths.clone(), inputs.clone(), change, &adapters.commit_only);
         let recipe = match recipe::resolve(adapters, &view, repo.recipe.as_deref(), false) {
             Ok(recipe) => recipe,
             Err(reason) => return Ok(Err(RejectReason::NoRecipe { reason })),
@@ -217,6 +247,7 @@ impl Service {
         wanted: impl Fn() -> bool,
     ) -> Result<CheckResponse, Failure> {
         let started = Instant::now();
+        let ticket = self.tickets.fetch_add(1, Ordering::Relaxed);
         let prepared = match self
             .prepare(&request.repo, &request.commit, &request.change)
             .await?
@@ -242,6 +273,7 @@ impl Service {
             .environments
             .run(
                 spec.clone(),
+                ticket,
                 request.commit.clone(),
                 request.change.clone(),
                 commands,
@@ -284,20 +316,31 @@ impl Service {
             started,
             setup_ms: used.setup_ms,
             overlay_ms: used.overlay_ms,
+            queue_ms: Some(used.queue_ms),
         };
         let result = run::check_result(&checks, runs, timings);
         let summary: Vec<String> = result
             .checks
             .iter()
-            .map(|run| format!("{}={:?}/{}", run.id, run.status, run.diagnostics.len()))
+            .map(|run| {
+                format!(
+                    "{}={:?}/{} {} ms",
+                    run.id,
+                    run.status,
+                    run.diagnostics.len(),
+                    run.duration_ms
+                )
+            })
             .collect();
         crate::log(&format!(
-            "check {}@{} env {}: {} in {} ms (setup {}, overlay {})",
+            "check {}@{} env {} replica {}: {} in {} ms (queue {}, setup {}, overlay {})",
             request.repo,
             &request.commit[..12],
             &spec.key[..12],
+            used.replica,
             summary.join(" "),
             result.duration_ms,
+            used.queue_ms,
             result.setup_ms,
             result.overlay_ms
         ));
@@ -310,6 +353,7 @@ impl Service {
         wanted: impl Fn() -> bool,
     ) -> Result<TestResponse, Failure> {
         let started = Instant::now();
+        let ticket = self.tickets.fetch_add(1, Ordering::Relaxed);
         let prepared = match self
             .prepare(&request.repo, &request.commit, &request.change)
             .await?
@@ -344,6 +388,7 @@ impl Service {
             .environments
             .run(
                 spec.clone(),
+                ticket,
                 request.commit.clone(),
                 request.change.clone(),
                 commands,
@@ -374,18 +419,23 @@ impl Service {
             started,
             setup_ms: used.setup_ms,
             overlay_ms: used.overlay_ms,
+            queue_ms: Some(used.queue_ms),
         };
         let result = run::test_result(&test, &used.value, timings);
         let count = |n: Option<u64>| n.map_or("?".to_owned(), |n| n.to_string());
+        let run_ms: u128 = used.value.iter().map(|ran| ran.duration.as_millis()).sum();
         crate::log(&format!(
-            "test {}@{} env {}: exit {:?}, {} passed, {} failed in {} ms (setup {}, overlay {})",
+            "test {}@{} env {} replica {}: exit {:?}, {} passed, {} failed, run {} ms in {} ms (queue {}, setup {}, overlay {})",
             request.repo,
             &request.commit[..12],
             &spec.key[..12],
+            used.replica,
             result.exit_code,
             count(result.passed),
             count(result.failed),
+            run_ms,
             result.duration_ms,
+            used.queue_ms,
             result.setup_ms,
             result.overlay_ms
         ));

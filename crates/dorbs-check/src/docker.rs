@@ -52,6 +52,8 @@ pub struct Limits {
     pub setup_memory: String,
     pub cpus: String,
     pub pids: u32,
+    /// The cgroup, such as a systemd slice, every container goes under, so one budget can hold them all.
+    pub cgroup_parent: Option<String>,
 }
 
 /// How setup steps with network reach out.
@@ -195,6 +197,8 @@ impl Docker {
     }
 
     fn limits(&self, memory: &str) -> Vec<String> {
+        let parent = (self.limits.cgroup_parent.iter())
+            .flat_map(|parent| ["--cgroup-parent".to_owned(), parent.clone()]);
         [
             "--read-only",
             "--tmpfs",
@@ -213,7 +217,9 @@ impl Docker {
             &self.limits.cpus,
         ]
         .map(str::to_owned)
-        .to_vec()
+        .into_iter()
+        .chain(parent)
+        .collect()
     }
 
     fn workdir(cwd: &str) -> String {
