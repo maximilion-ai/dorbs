@@ -46,6 +46,8 @@ pub enum UseError {
     /// Paths the change writes through a symbolic link of the tree.
     UnsafePath(Vec<RelativePath>),
     Internal(String),
+    /// Nobody wanted the answer any more before the run began.
+    Abandoned,
 }
 
 #[derive(Serialize)]
@@ -707,15 +709,21 @@ impl Environments {
 
     /// Runs `commands` in the spec's environment at `commit` with `change` laid over its tree, after
     /// any run before it there: sets the environment up first if needed, and takes the change off.
+    /// Once nobody is `wanted` it any more, a request gives up before it sets up or takes the
+    /// environment, never once its run has begun.
     pub async fn run(
         self: &Arc<Self>,
         spec: Arc<EnvSpec>,
         commit: CommitSha,
         change: Change,
         commands: Vec<(Command, Duration)>,
+        wanted: impl Fn() -> bool,
     ) -> Result<Used<Vec<Ran>>, UseError> {
         let env = self.env_for(&spec);
         loop {
+            if !wanted() {
+                return Err(UseError::Abandoned);
+            }
             let setup_ms = self
                 .ready(&env, &spec, &commit)
                 .await
@@ -728,6 +736,9 @@ impl Environments {
                 });
             }
             let queue = env.queue.lock().await;
+            if !wanted() {
+                return Err(UseError::Abandoned);
+            }
             // Eviction may have taken it while this request waited in the queue.
             let state = Self::state(&env);
             let (from, idle) = match &state {
