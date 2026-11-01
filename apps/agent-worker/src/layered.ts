@@ -155,6 +155,11 @@ export class LayeredFs {
         for (const entry of base?.entries ?? [])
           if (entry.path.startsWith(`${path}/`)) deleted.add(entry.path);
     }
+    // A base file the session turned into a directory is gone as a file.
+    for (const dir of this.#dirs) {
+      const entry = base?.entry(dir);
+      if (entry !== undefined && entry.mode !== "160000") deleted.add(dir);
+    }
     for (const path of this.#paths) deleted.delete(path);
     return {
       written: [...this.#paths].filter((path) => !isGit(path)).toSorted(),

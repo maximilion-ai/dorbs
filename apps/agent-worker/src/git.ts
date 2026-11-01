@@ -409,7 +409,11 @@ const stagePaths = async (
   const present: string[] = [];
   const gone: string[] = [];
   for (const path of paths) {
-    if ((await context.fs.lstat(`${context.dir}/${path}`)) !== undefined) present.push(path);
+    const stats = await context.fs.lstat(`${context.dir}/${path}`);
+    // A directory where a file was tracked is that file deleted; its files are paths of their own.
+    const file =
+      stats !== undefined && (!stats.isDirectory() || changes.stage.get(path)?.mode === 0o160000);
+    if (file) present.push(path);
     else if (changes.stage.has(path)) gone.push(path);
   }
   if (present.length > 0) {
@@ -602,18 +606,6 @@ const restored = async (
   source ??= staged ? "HEAD" : undefined;
   if (specs.length === 0) return failed(`git ${subcommand} needs the paths it acts on.`);
   const wanted = specs.map((spec) => specPath(spec, dir));
-  for (const spec of wanted)
-    if (
-      !changes.changed.some((path) => under(path, spec)) &&
-      ![...changes.stage.keys()].some((path) => under(path, spec)) &&
-      (await fs.lstat(`${dir}/${spec}`)) === undefined
-    )
-      return failed(`error: pathspec '${spec}' did not match any file(s) known to git`);
-  const picked = changes.changed.filter((path) => wanted.some((spec) => under(path, spec)));
-  if (picked.length > MAX_PATHS)
-    return failed(
-      `git ${subcommand} would restore ${picked.length} paths; restore at most ${MAX_PATHS} at once.`,
-    );
   const tree = source === undefined ? undefined : treeReader(context, source);
   if (
     source !== undefined &&
@@ -621,6 +613,28 @@ const restored = async (
       undefined
   )
     return failed(`fatal: could not resolve '${source}'`);
+  // A file the source holds counts even when nothing else does, such as one deleted since that commit.
+  const fromSource = new Set<string>();
+  for (const spec of wanted)
+    if (spec !== "" && tree !== undefined && (await tree(spec)) !== undefined) fromSource.add(spec);
+  for (const spec of wanted)
+    if (
+      !fromSource.has(spec) &&
+      !changes.changed.some((path) => under(path, spec)) &&
+      ![...changes.stage.keys()].some((path) => under(path, spec)) &&
+      (await fs.lstat(`${dir}/${spec}`)) === undefined
+    )
+      return failed(`error: pathspec '${spec}' did not match any file(s) known to git`);
+  const picked = [
+    ...new Set([
+      ...changes.changed.filter((path) => wanted.some((spec) => under(path, spec))),
+      ...fromSource,
+    ]),
+  ].toSorted();
+  if (picked.length > MAX_PATHS)
+    return failed(
+      `git ${subcommand} would restore ${picked.length} paths; restore at most ${MAX_PATHS} at once.`,
+    );
   const from = new Map<string, Entry | undefined>();
   for (const path of picked)
     from.set(path, tree === undefined ? changes.stage.get(path) : await tree(path));
