@@ -186,9 +186,10 @@ workspace_test = "npm test -w {dir} --"
 # The install: online into the manager's cache, then offline from it, frozen when there is a lockfile.
 [[let.install]]
 when = { vars = { "pm.name" = "pnpm" }, exists = ["pnpm-lock.yaml"] }
-# pnpm fetches a lockfile's packages into its store without installing them.
+# pnpm fetches a lockfile's packages into its store without installing them. A lockfile records the checksum of
+# the repo's .pnpmfile.cjs, so both steps read it; it is commit_only, so a change never replaces it.
 download = "pnpm fetch"
-offline = "pnpm install --offline --frozen-lockfile --ignore-scripts --ignore-pnpmfile"
+offline = "pnpm install --offline --frozen-lockfile --ignore-scripts"
 
 [[let.install]]
 when.vars = { "pm.name" = "pnpm" }
@@ -251,6 +252,7 @@ key = [
   ".yarnrc",
   ".yarnrc.yml",
   "bunfig.toml",
+  ".pnpmfile.cjs",
   "patches/**",
   ".yarn/releases/**",
   ".yarn/plugins/**",
@@ -273,6 +275,7 @@ key = [
   ".yarnrc",
   ".yarnrc.yml",
   "bunfig.toml",
+  ".pnpmfile.cjs",
   "patches/**",
   ".yarn/releases/**",
   ".yarn/plugins/**",

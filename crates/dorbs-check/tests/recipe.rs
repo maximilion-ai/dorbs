@@ -80,8 +80,7 @@ fn runs_a_pnpm_repos_own_typecheck_and_lint_scripts_after_a_frozen_install() {
             ("download".into(), "pnpm fetch".into(), Phase::Online),
             (
                 "install".into(),
-                "pnpm install --offline --frozen-lockfile --ignore-scripts --ignore-pnpmfile"
-                    .into(),
+                "pnpm install --offline --frozen-lockfile --ignore-scripts".into(),
                 Phase::Offline
             ),
         ]

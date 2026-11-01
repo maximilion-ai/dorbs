@@ -10,6 +10,7 @@
       { "name": "AcpConnection", "class_name": "AcpConnection" },
       { "name": "AcpSession", "class_name": "AcpSession" },
       { "name": "ChatGptAccount", "class_name": "ChatGptAccount" },
+      { "name": "GitHubTokens", "class_name": "GitHubTokens" },
     ],
   },
   // celld ends an event's storage transactions and RPCs with the event, so AcpSession holds events open.
@@ -17,5 +18,6 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["AcpConnection", "AcpSession"] },
     { "tag": "v2", "new_sqlite_classes": ["ChatGptAccount"] },
+    { "tag": "v3", "new_sqlite_classes": ["GitHubTokens"] },
   ],
 }
