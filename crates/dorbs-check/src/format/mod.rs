@@ -171,7 +171,8 @@ pub fn parse(
 }
 
 /// The counts of the summary lines vitest (`Tests  1 failed | 3 passed (4)`) and jest (`Tests: 1 failed, 3 passed,
-/// 4 total`) print, summed over every run the output holds; None when it holds none.
+/// 4 total`) print, summed over every run the output holds, else of go test -v's `--- PASS:` lines, subtests
+/// included; None when it holds none.
 fn summary(text: &str) -> Option<Counts> {
     static LINE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r"(?m)(?:^|: )\s*Tests:?\s+(\d+ (?:passed|failed|skipped|todo)\b.*)$")
@@ -193,6 +194,22 @@ fn summary(text: &str) -> Option<Counts> {
             }
         }
         found = Some(found.unwrap_or_default() + counts);
+    }
+    found.or_else(|| go_counts(&plain))
+}
+
+fn go_counts(text: &str) -> Option<Counts> {
+    static RESULT: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"(?m)^\s*--- (PASS|FAIL|SKIP): ").expect("a regex")
+    });
+    let mut found = None;
+    for result in RESULT.captures_iter(text) {
+        let counts: &mut Counts = found.get_or_insert_with(Counts::default);
+        match &result[1] {
+            "PASS" => counts.passed += 1,
+            "FAIL" => counts.failed += 1,
+            _ => counts.skipped += 1,
+        }
     }
     found
 }
