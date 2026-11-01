@@ -706,7 +706,7 @@ it("commits on a new branch and pushes it to origin, as git on a command line", 
       "Switched to a new branch 'dorbs/test'",
       "(no output)",
       // Computer 0.8.0 marks a file just added with git add -A as modified in the worktree too.
-      "1 AM src/hello.ts",
+      "1 A  src/hello.ts",
       `[${commit.slice(0, 7)}] add hello`,
       `Pushed dorbs/test to origin at ${commit}`,
       `${commit.slice(0, 7)} add hello`,
@@ -918,7 +918,10 @@ it("sends no credentials through a proxy the repo's git config names", async () 
   const frames = updates(client.frames);
   const pushed = await refOf("test/github.git", "refs/heads/dorbs/proxied");
   assert.isNotNull(pushed);
-  assert.strictEqual(toolText(frames, "call-push"), `Pushed dorbs/proxied to origin at ${pushed?.commit}`);
+  assert.strictEqual(
+    toolText(frames, "call-push"),
+    `Pushed dorbs/proxied to origin at ${pushed?.commit}`,
+  );
   assert.deepStrictEqual(
     (await record.log()).filter((line) => line.startsWith("stray")),
     [],

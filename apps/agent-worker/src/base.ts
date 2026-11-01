@@ -18,8 +18,11 @@ import { isGitPath } from "./git.ts";
  * builders write the same bytes.
  */
 
-const PART_BYTES = 16 * 1024 * 1024;
-const BLOBS_PER_FETCH = 200;
+// A build holds about a part, a fetch's pack and its blobs at once, and a Worker has 128 MB.
+const PART_BYTES = 8 * 1024 * 1024;
+// Each fetch asks for as many blobs as the last ones' sizes say fit in this, up to MAX_BLOBS.
+const FETCH_BYTES = 8 * 1024 * 1024;
+const MAX_BLOBS = 200;
 // Grep reads the content in ranges of about this size rather than file by file.
 const SCAN_BYTES = 8 * 1024 * 1024;
 
@@ -119,8 +122,10 @@ export const buildBase = async (
     buffer = [];
     filled = 0;
   };
-  for (let start = 0; start < blobs.length; start += BLOBS_PER_FETCH) {
-    const wanted = blobs.slice(start, start + BLOBS_PER_FETCH);
+  let count = 16;
+  for (let start = 0; start < blobs.length;) {
+    const wanted = blobs.slice(start, start + count);
+    start += wanted.length;
     const fetched = new Map(
       readPack(
         (
@@ -142,6 +147,8 @@ export const buildBase = async (
       buffer.push(data);
       filled += data.length;
     }
+    const got = [...fetched.values()].reduce((sum, data) => sum + data.length, 0);
+    count = Math.max(1, Math.min(MAX_BLOBS, Math.floor((count * FETCH_BYTES) / Math.max(got, 1))));
   }
   await flush();
 

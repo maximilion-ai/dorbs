@@ -112,6 +112,8 @@ export class LayeredFs {
   #paths: Set<string>;
   #dirs: Set<string>;
   #tombstones: Set<string>;
+  // A base link's target never changes; this saves an R2 read each time a path goes through one.
+  readonly #links = new Map<string, string>();
 
   constructor(options: {
     readonly overlay: FsPromises;
@@ -193,6 +195,65 @@ export class LayeredFs {
     return path === "" || this.#paths.has(path) || this.#dirs.has(path);
   }
 
+  /** The target of the link at a repo-relative path, or undefined when no link is there. */
+  async #linkTarget(path: string): Promise<string | undefined> {
+    if (this.#deleted(path) || this.#dirs.has(path)) return undefined;
+    if (this.#paths.has(path)) {
+      const absolute = `${this.#root}/${path}`;
+      const stats = await this.#overlay.lstat(absolute);
+      return stats.isSymbolicLink() ? String(await this.#overlay.readlink(absolute)) : undefined;
+    }
+    const base = await this.base();
+    const entry = base?.entry(path);
+    if (base === undefined || entry?.mode !== "120000") return undefined;
+    const known = this.#links.get(path);
+    if (known !== undefined) return known;
+    const target = decoder.decode(await base.read(entry));
+    this.#links.set(path, target);
+    return target;
+  }
+
+  /**
+   * `absolute` with each link along it followed, in either layer, and the last one too when `follow`. A path that
+   * leaves the repo comes back as it is.
+   */
+  async #resolve(absolute: string, follow: boolean): Promise<string> {
+    let path = normalize(absolute);
+    for (let hops = 0; hops <= MAX_LINKS; hops += 1) {
+      const relative = this.#relative(path);
+      if (relative === undefined || relative === "" || isGit(relative)) return path;
+      const names = relative.split("/");
+      const last = follow ? names.length : names.length - 1;
+      let next: string | undefined;
+      for (let at = 1; at <= last && next === undefined; at += 1) {
+        const prefix = names.slice(0, at).join("/");
+        const target = await this.#linkTarget(prefix);
+        if (target === undefined) continue;
+        const rest = names.slice(at).join("/");
+        const from = target.startsWith("/")
+          ? target
+          : `${this.#root}/${parentOf(prefix)}/${target}`;
+        next = normalize(`${from}/${rest}`);
+      }
+      if (next === undefined) return path;
+      path = next;
+    }
+    throw failure("ELOOP", absolute);
+  }
+
+  /** Throws ENOTDIR when a file or link stands where a directory above `path` would go. */
+  async #directoriesAbove(absolute: string, path: string): Promise<void> {
+    const base = await this.base();
+    for (const above of ancestors(path).toReversed()) {
+      if (this.#deleted(above)) return;
+      if (this.#dirs.has(above)) continue;
+      if (this.#paths.has(above)) throw failure("ENOTDIR", absolute);
+      const entry = base?.entry(above);
+      if (entry !== undefined && entry.mode !== "160000") throw failure("ENOTDIR", absolute);
+      if (!base?.isDirectory(above)) return;
+    }
+  }
+
   async #place(absolute: string): Promise<Place> {
     const path = this.#relative(absolute);
     if (path === undefined) return { at: "overlay" };
@@ -224,8 +285,8 @@ export class LayeredFs {
     return base.read(entry);
   }
 
-  async #read(absolute: string, follow: boolean, depth = 0): Promise<Uint8Array> {
-    if (depth > 8) throw failure("ELOOP", absolute);
+  async #read(path: string, follow: boolean): Promise<Uint8Array> {
+    const absolute = await this.#resolve(path, follow);
     const place = await this.#place(absolute);
     switch (place.at) {
       case "none":
@@ -249,23 +310,15 @@ export class LayeredFs {
         object.set(content, header.length);
         return deflate(object);
       }
-      case "base": {
-        const entry = place.base.entry(place.path);
-        if (follow && entry?.mode === "120000") {
-          const target = decoder.decode(await place.base.read(entry));
-          const next = target.startsWith("/")
-            ? target
-            : `${this.#root}/${[parentOf(place.path), target].filter(Boolean).join("/")}`;
-          return this.#read(normalize(next), true, depth + 1);
-        }
+      case "base":
         return this.#baseBytes(place.base, place.path);
-      }
       default:
         return exhausted(place);
     }
   }
 
-  async #stat(absolute: string, follow: boolean): Promise<Stats> {
+  async #stat(path: string, follow: boolean): Promise<Stats> {
+    const absolute = await this.#resolve(path, follow);
     const place = await this.#place(absolute);
     switch (place.at) {
       case "none":
@@ -300,13 +353,6 @@ export class LayeredFs {
           });
         const stats = place.base.stats(place.path);
         if (stats === undefined) throw failure("ENOENT", absolute);
-        if (follow && stats.kind === "symlink") {
-          const target = decoder.decode(await this.#read(absolute, false));
-          const next = target.startsWith("/")
-            ? target
-            : `${this.#root}/${[parentOf(place.path), target].filter(Boolean).join("/")}`;
-          return this.#stat(normalize(next), true);
-        }
         return baseStats(stats);
       }
       default:
@@ -314,10 +360,12 @@ export class LayeredFs {
     }
   }
 
-  async #readdir(absolute: string): Promise<string[]> {
+  async #readdir(link: string): Promise<string[]> {
+    const absolute = await this.#resolve(link, true);
     const path = this.#relative(absolute);
     if (path === undefined) return this.#overlay.readdir(absolute);
     if (this.#deleted(path)) throw failure("ENOENT", absolute);
+    if (this.#paths.has(path)) throw failure("ENOTDIR", absolute);
     const names = new Set<string>();
     const base = await this.base();
     const fromBase = base?.children(path);
@@ -329,7 +377,10 @@ export class LayeredFs {
       found = true;
     }
     if (this.#inOverlay(path)) {
-      const listed = await this.#overlay.readdir(absolute).catch(() => []);
+      const listed = await this.#overlay.readdir(absolute).catch((error: unknown) => {
+        if (codeOf(error) === "ENOENT") return [];
+        throw error;
+      });
       for (const name of listed) names.add(typeof name === "string" ? name : String(name));
       found = true;
     }
@@ -350,27 +401,33 @@ export class LayeredFs {
   }
 
   /**
-   * Makes `path` and the directories above it visible again. A deleted directory above it stays deleted apart from
-   * the way down to `path`: its other base entries get tombstones of their own.
+   * Makes `path` and the directories above it visible again. What a deleted directory held stays deleted, apart from
+   * the way down to `path`: from the deleted level down, each level's other base entries get tombstones of their own,
+   * and so does all a recreated directory held.
    */
   #revive(path: string, base: Base | undefined): void {
-    this.#tombstones.delete(path);
-    const chain = [...ancestors(path)].toReversed();
-    for (const [at, above] of chain.entries()) {
-      if (!this.#tombstones.delete(above)) continue;
-      const next = chain[at + 1] ?? path;
-      for (const name of base?.children(above) ?? []) {
-        const child = `${above}/${name}`;
+    const chain = [...ancestors(path).toReversed(), path];
+    let deleted = false;
+    for (const [at, level] of chain.entries()) {
+      deleted = this.#tombstones.delete(level) || deleted;
+      if (!deleted) continue;
+      const next = chain[at + 1];
+      for (const name of base?.children(level) ?? []) {
+        const child = level === "" ? name : `${level}/${name}`;
         if (child !== next) this.#tombstones.add(child);
       }
     }
   }
 
-  async #write(absolute: string, data: Uint8Array | string, options?: unknown): Promise<void> {
+  async #write(link: string, data: Uint8Array | string, options?: unknown): Promise<void> {
+    const absolute = await this.#resolve(link, true);
     const path = this.#relative(absolute);
     if (path === undefined) return this.#overlay.writeFile(absolute, data, options);
-    await this.#ensureParent(absolute, path);
+    await this.#directoriesAbove(absolute, path);
     const base = await this.base();
+    if (this.#dirs.has(path) || (base?.isDirectory(path) === true && !this.#deleted(path)))
+      throw failure("EISDIR", absolute);
+    await this.#ensureParent(absolute, path);
     const executable = !this.#paths.has(path) && base?.entry(path)?.mode === "100755";
     const mode =
       typeof options === "object" && options !== null && "mode" in options ? options : undefined;
@@ -380,7 +437,8 @@ export class LayeredFs {
     this.#persist();
   }
 
-  async #unlink(absolute: string): Promise<void> {
+  async #unlink(link: string): Promise<void> {
+    const absolute = await this.#resolve(link, false);
     const path = this.#relative(absolute);
     if (path === undefined) return this.#overlay.unlink(absolute);
     const place = await this.#place(absolute);
@@ -394,7 +452,8 @@ export class LayeredFs {
     this.#persist();
   }
 
-  async #removeTree(absolute: string): Promise<void> {
+  async #removeTree(link: string): Promise<void> {
+    const absolute = await this.#resolve(link, false);
     const path = this.#relative(absolute);
     if (path === undefined) {
       await (this.#overlay.rm?.(absolute, { recursive: true, force: true }) ??
@@ -417,7 +476,7 @@ export class LayeredFs {
   }
 
   /** The fs isomorphic-git takes, through Computer's git client's adapter seam. */
-  readonly promises: FsPromises = {
+  readonly promises: FsPromises & { readonly rm: NonNullable<FsPromises["rm"]> } = {
     readFile: async (path: string, options?: unknown) => {
       if (path === undefined) throw failure("EINVAL", "readFile");
       const bytes = await this.#read(path, true);
@@ -427,9 +486,11 @@ export class LayeredFs {
         : NodeBuffer.Buffer.from(bytes);
     },
     writeFile: (path, data, options) => this.#write(path, data, options),
-    mkdir: async (path, options) => {
+    mkdir: async (link, options) => {
+      const path = await this.#resolve(link, false);
       const relative = this.#relative(path);
       if (relative === undefined) return this.#overlay.mkdir(path, options);
+      await this.#directoriesAbove(path, relative);
       const place = await this.#place(path);
       const recursive = option(options, "recursive") === true;
       if (place.at !== "none" && !recursive) throw failure("EEXIST", path);
@@ -465,23 +526,28 @@ export class LayeredFs {
     stat: (path) => this.#stat(path, true),
     lstat: (path) => this.#stat(path, false),
     readdir: (path) => this.#readdir(path),
-    readlink: async (path) => {
+    readlink: async (link) => {
+      const path = await this.#resolve(link, false);
       const place = await this.#place(path);
       if (place.at === "overlay") return this.#overlay.readlink(path);
       if (place.at !== "base" || place.base.entry(place.path)?.mode !== "120000")
         throw failure("EINVAL", path);
       return decoder.decode(await this.#read(path, false));
     },
-    symlink: async (target, path) => {
+    symlink: async (target, link) => {
+      const path = await this.#resolve(link, false);
       const relative = this.#relative(path);
       if (relative === undefined) return this.#overlay.symlink(target, path);
+      await this.#directoriesAbove(path, relative);
+      if ((await this.#place(path)).at !== "none") throw failure("EEXIST", path);
       await this.#ensureParent(path, relative);
       await this.#overlay.symlink(target, path);
       this.#revive(relative, await this.base());
       this.#remember(relative);
       this.#persist();
     },
-    chmod: async (path, mode) => {
+    chmod: async (link, mode) => {
+      const path = await this.#resolve(link, true);
       const relative = this.#relative(path);
       if (relative !== undefined && !this.#paths.has(relative)) {
         await this.#write(path, await this.#read(path, false), { mode });
@@ -506,9 +572,22 @@ export class LayeredFs {
       throw error;
     });
 
+  /** Shows the base's file at `path` again, dropping what the session wrote or deleted there. */
+  async revert(link: string): Promise<void> {
+    const absolute = await this.#resolve(link, false);
+    const path = this.#relative(absolute);
+    if (path === undefined || path === "") throw failure("EINVAL", absolute);
+    if (this.#paths.has(path)) {
+      await this.#overlay.unlink(absolute);
+      this.#paths.delete(path);
+    }
+    this.#revive(path, await this.base());
+    this.#persist();
+  }
+
   /** Every file and link under `dir`, relative to the repo root, the git directory left out. */
   async files(dir: string): Promise<string[]> {
-    const path = this.#relative(dir);
+    const path = this.#relative(await this.#resolve(dir, true));
     if (path === undefined) return [];
     const base = await this.base();
     // A file names itself.
@@ -584,6 +663,9 @@ const byPathLine = (
   a: { path: string; line: number },
   b: { path: string; line: number },
 ): number => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line);
+
+// As Linux's limit on links followed in one lookup.
+const MAX_LINKS = 40;
 
 const isGit = (path: string): boolean => path === ".git" || path.startsWith(".git/");
 

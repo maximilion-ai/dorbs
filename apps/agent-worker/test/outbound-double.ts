@@ -8,7 +8,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { checkerDouble } from "../../../scripts/checkerDouble.ts";
-import { makeRepo, serveGit } from "../../../scripts/gitFixture.ts";
+import { makeRepo, serveGit, type FixtureFile } from "../../../scripts/gitFixture.ts";
 import { githubDouble, makeAppKey } from "../../../scripts/githubFixture.ts";
 
 const TOKEN = "check-token";
@@ -52,17 +52,36 @@ export const makeOutboundDouble = () => {
   const fixtureCommit = makeRepo(NodePath.join(gitRoot, "fixture.git"), FIXTURE);
   NodeFS.mkdirSync(NodePath.join(gitRoot, "test"));
   makeRepo(NodePath.join(gitRoot, "test/github.git"), FIXTURE);
-  // 2,000 distinct files in 20 directories, for the workspace cost bounds in cost.test.ts.
-  makeRepo(
-    NodePath.join(gitRoot, "large.git"),
-    Object.fromEntries(
-      Array.from({ length: 2000 }, (_, at) => [
-        `pkg${at % 20}/src/f${at}.ts`,
-        `export const value${at} = ${at};\n${"// filler\n".repeat(200)}`,
-      ]),
-    ),
-  );
   const git = serveGit(gitRoot);
+  // Large repos are made on their first fetch, so projects that never clone them do not pay for them.
+  const lazy: Record<string, () => Record<string, FixtureFile>> = {
+    // Nested directories, dotfiles and links, for the layered workspace's file and git semantics.
+    "tree.git": () => ({
+      "d/a.ts": "a\n",
+      "d/sub/b.ts": "b\n",
+      "d/sub/c.ts": "c\n",
+      "d/sub/deep/e.ts": "e\n",
+      ".github/workflows/ci.yml": "on: push\n",
+      ".env.example": "X=1\n",
+      "file.txt": "file\n",
+      "docs/readme.md": "readme\n",
+      skills: { symlink: "docs" },
+      loop: { symlink: "loop" },
+    }),
+    // 2,000 distinct files in 20 directories, for the workspace cost bounds in cost.test.ts.
+    "large.git": () =>
+      Object.fromEntries(
+        Array.from({ length: 2000 }, (_, at) => [
+          `pkg${at % 20}/src/f${at}.ts`,
+          `export const value${at} = ${at};\n${"// filler\n".repeat(200)}`,
+        ]),
+      ),
+  };
+  const ensureLazy = (pathname: string) => {
+    const name = Object.keys(lazy).find((repo) => pathname.startsWith(`/${repo}/`));
+    if (name === undefined || NodeFS.existsSync(NodePath.join(gitRoot, name))) return;
+    makeRepo(NodePath.join(gitRoot, name), lazy[name]?.() ?? {});
+  };
 
   const github = githubDouble({
     publicKey: APP_KEY.publicKey,
@@ -182,6 +201,7 @@ export const makeOutboundDouble = () => {
       if (url.pathname === "/__ref") {
         return json(readRef(url.searchParams.get("repo") ?? "", url.searchParams.get("ref") ?? ""));
       }
+      ensureLazy(url.pathname);
       return git(request);
     }
     // test/github is private: fetches need a token as well as pushes.
