@@ -61,6 +61,8 @@ const CheckerConfig = Config.all({
 });
 
 const decodeCheck = Schema.decodeUnknownEffect(CheckResponse);
+const POLL = "2 seconds";
+const JOB_DEADLINE_MS = 30 * 60 * 1000;
 const decodeTest = Schema.decodeUnknownEffect(TestResponse);
 
 const make = Effect.gen(function* () {
@@ -68,35 +70,70 @@ const make = Effect.gen(function* () {
   const base = url.href.replace(/\/$/, "");
   const authorization = `Bearer ${Redacted.value(token)}`;
 
+  const request = (method: "GET" | "POST", path: string, body?: CheckRequest | TestRequest) =>
+    Effect.tryPromise({
+      try: () =>
+        fetch(`${base}${path}`, {
+          method,
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          headers: { authorization, "content-type": "application/json" },
+        }),
+      catch: (cause) => new CheckFailed({ reason: `${method} ${path} did not answer`, cause }),
+    }).pipe(
+      Effect.flatMap((response) =>
+        Effect.tryPromise({
+          try: async () => ({ status: response.status, text: await response.text() }),
+          catch: (cause) => new CheckFailed({ reason: `${method} ${path} broke off`, cause }),
+        }),
+      ),
+    );
+
+  /**
+   * Runs a check or test as a checker job and polls for its answer: a proxy in front of the checker, such as a
+   * Cloudflare tunnel, cuts off a request after 100 s, and a busy checker queues runs for longer. A checker without
+   * jobs answers 404, and the run goes to the plain endpoint.
+   */
+  const run = (path: string, body: CheckRequest | TestRequest) =>
+    request("POST", `/jobs${path}`, body).pipe(
+      Effect.flatMap(({ status, text }) => {
+        if (status === 404) return request("POST", path, body);
+        if (status !== 202) return Effect.succeed({ status, text });
+        const id = Effect.try({
+          try: (): string => JSON.parse(text).id,
+          catch: (cause) => new CheckFailed({ reason: `POST /jobs${path} sent no job id`, cause }),
+        });
+        const poll = (
+          jobId: string,
+          deadline: number,
+        ): Effect.Effect<{ status: number; text: string }, CheckFailed> =>
+          Effect.sleep(POLL).pipe(
+            Effect.andThen(request("GET", `/jobs/${jobId}`)),
+            Effect.flatMap((answer) => {
+              if (answer.status !== 202) return Effect.succeed(answer);
+              if (Date.now() > deadline) {
+                return Effect.fail(
+                  new CheckFailed({ reason: `${path} did not finish within 30 minutes` }),
+                );
+              }
+              return poll(jobId, deadline);
+            }),
+          );
+        return id.pipe(Effect.flatMap((jobId) => poll(jobId, Date.now() + JOB_DEADLINE_MS)));
+      }),
+    );
+
   const post = <A>(
     path: string,
     body: CheckRequest | TestRequest,
     decode: (json: unknown) => Effect.Effect<A, Schema.SchemaError>,
   ) =>
-    Effect.tryPromise({
-      try: () =>
-        fetch(`${base}${path}`, {
-          method: "POST",
-          body: JSON.stringify(body),
-          headers: { authorization, "content-type": "application/json" },
-        }),
-      catch: (cause) => new CheckFailed({ reason: `POST ${path} did not answer`, cause }),
-    }).pipe(
-      Effect.flatMap((response) =>
-        Effect.tryPromise({
-          try: () => response.text(),
-          catch: (cause) => new CheckFailed({ reason: `POST ${path} broke off`, cause }),
-        }).pipe(
-          Effect.filterOrFail(
-            () => response.ok,
-            (text) =>
-              new CheckFailed({
-                reason: `POST ${path} answered ${response.status}: ${text.slice(0, 2000)}`,
-              }),
-          ),
-        ),
+    run(path, body).pipe(
+      Effect.filterOrFail(
+        ({ status }) => status >= 200 && status < 300,
+        ({ status, text }) =>
+          new CheckFailed({ reason: `POST ${path} answered ${status}: ${text.slice(0, 2000)}` }),
       ),
-      Effect.flatMap((text) =>
+      Effect.flatMap(({ text }) =>
         Effect.try({
           try: (): unknown => JSON.parse(text),
           catch: (cause) => new CheckFailed({ reason: `POST ${path} sent invalid JSON`, cause }),

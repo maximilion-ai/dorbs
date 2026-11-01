@@ -220,8 +220,11 @@ it("sends the change to the checker and reports its diagnostics", async () => {
     status: "completed",
     content: [{ type: "content", content: { type: "text", text: CHECK_OUTPUT } }],
   });
-  const log = (await record.log()).filter((line) => !line.startsWith("git "));
-  assert.deepStrictEqual(log, ["POST /check"]);
+  // The check runs as a job: submitted once, then polled until it answers.
+  const [submitted, ...polls] = (await record.log()).filter((line) => !line.startsWith("git "));
+  assert.strictEqual(submitted, "POST /jobs/check");
+  assert.isAbove(polls.length, 0);
+  assert.isTrue(polls.every((line) => line === "GET /jobs/:id"));
 });
 
 it("runs only the checks the model names, and names the known ones for an unknown id", async () => {

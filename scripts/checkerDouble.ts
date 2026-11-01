@@ -99,6 +99,7 @@ export const checkerDouble = (token: string, log: Array<string> = []) => {
     };
   };
 
+  const jobs = new Map<string, Promise<Response>>();
   const handle = async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
     if (url.pathname === "/__log") return json(log);
@@ -115,14 +116,31 @@ export const checkerDouble = (token: string, log: Array<string> = []) => {
     if (request.headers.get("authorization") !== `Bearer ${token}`) {
       return new Response("Unauthorized", { status: 401 });
     }
-    log.push(`${request.method} ${url.pathname}`);
-    if (request.method !== "POST" || (url.pathname !== "/check" && url.pathname !== "/test")) {
+    const job = /^\/jobs\/(?!check$|test$)(.+)$/u.exec(url.pathname)?.[1];
+    log.push(`${request.method} ${job === undefined ? url.pathname : "/jobs/:id"}`);
+    // Jobs as the service runs them: POST /jobs/check answers an id at once, GET /jobs/{id} 202 until the run ends.
+    if (request.method === "GET" && job !== undefined) {
+      const answer = jobs.get(job);
+      if (answer === undefined) return new Response("no such job", { status: 404 });
+      const done = await Promise.race([answer, Promise.resolve(undefined)]);
+      if (done === undefined) return json({ status: "running" }, 202);
+      jobs.delete(job);
+      return done;
+    }
+    const path = url.pathname.replace(/^\/jobs/u, "");
+    if (request.method !== "POST" || (path !== "/check" && path !== "/test")) {
       return new Response("Not found", { status: 404 });
     }
-    await held?.promise;
     const body: Body = JSON.parse(await request.text());
-    requests.push(body);
-    return json(url.pathname === "/check" ? check(body) : test(body));
+    const answer = (async () => {
+      await held?.promise;
+      requests.push(body);
+      return json(path === "/check" ? check(body) : test(body));
+    })();
+    if (path === url.pathname) return answer;
+    const id = crypto.randomUUID();
+    jobs.set(id, answer);
+    return json({ id }, 202);
   };
 
   return { handle, log, requests };
