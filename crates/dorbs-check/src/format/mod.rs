@@ -115,7 +115,13 @@ pub fn parse(
         None => vec![stdout, stderr],
     };
     match format {
-        Format::Raw => streams.iter().for_each(|text| into.raw(text)),
+        Format::Raw => {
+            streams.iter().for_each(|text| into.raw(text));
+            counts = streams
+                .iter()
+                .filter_map(|text| summary(text))
+                .reduce(|a, b| a + b);
+        }
         Format::Errorformat(patterns) => {
             let errorformat = Errorformat::new(patterns)?;
             for text in streams {
@@ -163,6 +169,36 @@ pub fn parse(
         counts,
     })
 }
+
+/// The counts of the summary lines vitest (`Tests  1 failed | 3 passed (4)`) and jest (`Tests: 1 failed, 3 passed,
+/// 4 total`) print, summed over every run the output holds; None when it holds none.
+fn summary(text: &str) -> Option<Counts> {
+    static LINE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"(?m)(?:^|: )\s*Tests:?\s+(\d+ (?:passed|failed|skipped|todo)\b.*)$")
+            .expect("a regex")
+    });
+    static COUNT: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"(\d+) (passed|failed|skipped|todo)\b").expect("a regex")
+    });
+    let plain = ANSI.replace_all(text, "");
+    let mut found = None;
+    for line in LINE.captures_iter(&plain) {
+        let mut counts = Counts::default();
+        for count in COUNT.captures_iter(&line[1]) {
+            let n: u64 = count[1].parse().unwrap_or(0);
+            match &count[2] {
+                "passed" => counts.passed += n,
+                "failed" => counts.failed += n,
+                _ => counts.skipped += n,
+            }
+        }
+        found = Some(found.unwrap_or_default() + counts);
+    }
+    found
+}
+
+static ANSI: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*m").expect("a regex"));
 
 /// The output split into one stream per package directory, by the prefix before each line, so a
 /// multi-line message stays whole when packages' lines interleave.

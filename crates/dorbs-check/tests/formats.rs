@@ -473,6 +473,59 @@ fn keeps_every_line_as_output_in_raw() {
 }
 
 #[test]
+fn counts_vitest_and_jest_summaries_in_raw_output() {
+    let vitest =
+        " ✓ src/a.test.ts (4 tests) 3ms\n\n Test Files  1 passed (1)\n      Tests  4 passed (4)\n";
+    let failing = " Test Files  1 failed (1)\n      Tests  1 failed | 2 passed | 1 skipped (4)\n";
+    let jest = "Test Suites: 1 failed, 1 total\nTests:       1 failed, 2 todo, 3 passed, 6 total\n";
+    let counts = |stdout: &str| Run::with(Format::Raw, stdout).parse().2;
+    assert_eq!(
+        counts(vitest),
+        Some(Counts {
+            passed: 4,
+            failed: 0,
+            skipped: 0
+        })
+    );
+    assert_eq!(
+        counts(&format!("{vitest}{failing}")),
+        Some(Counts {
+            passed: 6,
+            failed: 1,
+            skipped: 1
+        })
+    );
+    assert_eq!(
+        counts(jest),
+        Some(Counts {
+            passed: 3,
+            failed: 1,
+            skipped: 2
+        })
+    );
+}
+
+#[test]
+fn reads_oxlint_github_annotations_with_the_rule_last() {
+    let stdout = fixture("oxlint-github.stdout");
+    let (diagnostics, output, _) = Run::errorformat("node", &stdout).parse();
+    assert_eq!(
+        diagnostics,
+        strings(&[
+            "packages/shared/src/__probe.ts:1:4-1:5 1 eslint(no-unused-vars) packages/shared/src/__probe.ts:2:5: Variable 'b' is declared but never used. Unused variables should start with a '_'.",
+            "packages/shared/src/__probe.ts:1:11-1:20 2 eslint(no-debugger) packages/shared/src/__probe.ts:2:12: `debugger` statement is not allowed",
+        ])
+    );
+    assert_eq!(
+        output,
+        strings(&[
+            "Found 1 warning and 1 error.",
+            "Finished in 297ms on 1 file with 200 rules using 4 threads."
+        ])
+    );
+}
+
+#[test]
 fn refuses_a_pattern_it_cannot_read() {
     let adapters = Adapters::load(None).unwrap();
     for adapter in &adapters.list {
