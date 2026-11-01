@@ -202,7 +202,8 @@ pub async fn files(
     Ok((paths.clone(), read_batch(&output.stdout, &wanted)))
 }
 
-/// Reads `git cat-file --batch` output: a header line, the object's bytes and a newline, per input.
+/// Reads `git cat-file --batch` output: a header line, the object's bytes and a newline, per input. Text blobs are
+/// kept as text; a blob that is not UTF-8 is kept as `\0binary <oid>`.
 fn read_batch(output: &[u8], names: &[&RelativePath]) -> HashMap<String, String> {
     let mut files = HashMap::new();
     let mut at = 0;
@@ -221,10 +222,12 @@ fn read_batch(output: &[u8], names: &[&RelativePath]) -> HashMap<String, String>
             continue;
         };
         let end = (at + size).min(output.len());
-        files.insert(
-            name.to_string(),
-            String::from_utf8_lossy(&output[at..end]).into_owned(),
-        );
+        // A binary blob, such as a tarball dependency, stands in as its object id, so setup keys tell any two apart.
+        let text = match std::str::from_utf8(&output[at..end]) {
+            Ok(text) => text.to_owned(),
+            Err(_) => format!("\0binary {}", fields[0]),
+        };
+        files.insert(name.to_string(), text);
         at = end + 1;
     }
     files
@@ -500,5 +503,26 @@ impl Tree {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_text_and_tells_binary_blobs_apart_by_object_id() {
+        let mut output =
+            b"aaa blob 2\nhi\nbbb blob 3\n\xff\x00\x01\nccc blob 3\n\xff\x00\x02\n".to_vec();
+        output.extend_from_slice(b"");
+        let names: Vec<RelativePath> = ["a.txt", "x.tgz", "y.tgz"]
+            .iter()
+            .map(|p| RelativePath::try_from(p.to_string()).expect("a relative path"))
+            .collect();
+        let refs: Vec<&RelativePath> = names.iter().collect();
+        let files = read_batch(&output, &refs);
+        assert_eq!(files["a.txt"], "hi");
+        assert_eq!(files["x.tgz"], "\0binary bbb");
+        assert_eq!(files["y.tgz"], "\0binary ccc");
     }
 }

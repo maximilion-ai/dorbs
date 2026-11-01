@@ -2,7 +2,7 @@
 priority = 40
 detect = ["package.json"]
 ignore = ["**/node_modules/**"]
-commit_only = [".npmrc", ".yarnrc", ".yarnrc.yml", ".yarn/**", ".pnpmfile.cjs", "bunfig.toml"]
+commit_only = [".npmrc", ".yarnrc", ".yarnrc.yml", ".yarn/**", ".pnpmfile.cjs", "pnpm-workspace.yaml", "bunfig.toml"]
 
 # Node with corepack's pnpm and yarn shims, and bun.
 image = '''
@@ -189,7 +189,7 @@ when = { vars = { "pm.name" = "pnpm" }, exists = [".pnpmfile.cjs"], contains = [
   { file = "pnpm-lock.yaml", regex = '(?m)^pnpmfileChecksum:' },
 ] }
 # A lockfile that records its pnpmfile's checksum installs only with it, so both steps read the commit's .pnpmfile.cjs
-# (commit_only). The path is pinned on the command line, so a change cannot point pnpm at a hooks file of its own.
+# (commit_only). The path is pinned, and pnpm-workspace.yaml is commit_only, so a change cannot load hooks of its own.
 download = "pnpm fetch --pnpmfile .pnpmfile.cjs"
 offline = "pnpm install --offline --frozen-lockfile --ignore-scripts --pnpmfile .pnpmfile.cjs"
 
