@@ -79,7 +79,7 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
     });
 
     /** The repo as the session sees it: what it wrote over the shared base of its clone. */
-    #base: { readonly prefix: string; readonly base: Promise<Base> } | undefined;
+    #base: { readonly prefix: string; readonly ref: WeakRef<Base> } | undefined;
 
     readonly fs: LayeredFs = new LayeredFs({
       overlay: overlayFs(this.workspace.provider()),
@@ -89,17 +89,13 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
       base: async () => {
         const prefix = this.ctx.storage.kv.get<Checker.Clone>(CLONE_KEY)?.base;
         if (prefix === undefined) return undefined;
-        // The session holds its own base, so another repo's in the isolate's cache never pushes it out.
-        if (this.#base?.prefix !== prefix) {
-          const base = openBase(this.env.Bases, prefix).then((opened) => {
-            if (opened === undefined)
-              throw new Error("The repo's base is gone. Clone the repo again.");
-            return opened;
-          });
-          base.catch(() => (this.#base = undefined));
-          this.#base = { prefix, base };
-        }
-        return this.#base.base;
+        // Held weakly: the isolate's cache keeps the bases in use, and an idle session's costs nothing.
+        const held = this.#base?.prefix === prefix ? this.#base.ref.deref() : undefined;
+        if (held !== undefined) return held;
+        const base = await openBase(this.env.Bases, prefix);
+        if (base === undefined) throw new Error("The repo's base is gone. Clone the repo again.");
+        this.#base = { prefix, ref: new WeakRef(base) };
+        return base;
       },
     });
 

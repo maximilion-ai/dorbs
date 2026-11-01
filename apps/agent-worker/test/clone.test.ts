@@ -335,3 +335,27 @@ it("refuses mkdir -p over a file, and climbs from a link's target on ..", async 
     assert.strictEqual(await fs.readText(`${ROOT}/sublink/../a.ts`), "a\n");
   });
 });
+
+it("commits a file turned into a directory as the file deleted and the directory's files added", async () => {
+  await withClone("file-to-dir", async ({ fs, git }) => {
+    await fs.promises.unlink(`${ROOT}/file.txt`);
+    await fs.writeFile(`${ROOT}/file.txt/child`, "child\n");
+    assert.include((await fs.changes()).deleted, "file.txt");
+    assert.strictEqual(await git("add -A"), "(no output)");
+    assert.strictEqual(await git("status --short"), "D  file.txt\nA  file.txt/child");
+  });
+});
+
+it("checks out a file only an older commit holds", async () => {
+  await withClone("checkout-old", async ({ fs, git }) => {
+    await fs.writeFile(`${ROOT}/new.txt`, "new\n");
+    await git("add new.txt");
+    await git('commit -m "add new"');
+    const added = (await git("rev-parse HEAD")).trim();
+    await git("rm new.txt");
+    await git('commit -m "drop new"');
+    assert.strictEqual(await git(`checkout ${added} -- new.txt`), "Updated 1 paths from the index");
+    assert.strictEqual(await fs.readText(`${ROOT}/new.txt`), "new\n");
+    assert.strictEqual(await git("status --short"), "A  new.txt");
+  });
+});
