@@ -134,6 +134,7 @@ export class LayeredFs {
 
   /** Forgets the overlay's paths and deletions, as a new clone starts over. */
   reset(): void {
+    this.#links.clear();
     this.#paths = new Set();
     this.#dirs = new Set();
     this.#tombstones = new Set();
@@ -218,27 +219,30 @@ export class LayeredFs {
    * leaves the repo comes back as it is.
    */
   async #resolve(absolute: string, follow: boolean): Promise<string> {
-    let path = normalize(absolute);
-    for (let hops = 0; hops <= MAX_LINKS; hops += 1) {
-      const relative = this.#relative(path);
-      if (relative === undefined || relative === "" || isGit(relative)) return path;
-      const names = relative.split("/");
-      const last = follow ? names.length : names.length - 1;
-      let next: string | undefined;
-      for (let at = 1; at <= last && next === undefined; at += 1) {
-        const prefix = names.slice(0, at).join("/");
-        const target = await this.#linkTarget(prefix);
-        if (target === undefined) continue;
-        const rest = names.slice(at).join("/");
-        const from = target.startsWith("/")
-          ? target
-          : `${this.#root}/${parentOf(prefix)}/${target}`;
-        next = normalize(`${from}/${rest}`);
+    // Component by component, as a kernel does: a `..` after a link climbs from the link's target.
+    let pending = (absolute.startsWith("/") ? absolute : `${this.#root}/${absolute}`).split("/");
+    let resolved: string[] = [];
+    let hops = 0;
+    while (pending.length > 0) {
+      const name = pending.shift() ?? "";
+      if (name === "" || name === ".") continue;
+      if (name === "..") {
+        resolved.pop();
+        continue;
       }
-      if (next === undefined) return path;
-      path = next;
+      resolved.push(name);
+      if (!follow && pending.every((rest) => rest === "" || rest === ".")) break;
+      const relative = this.#relative(`/${resolved.join("/")}`);
+      if (relative === undefined || relative === "" || isGit(relative)) continue;
+      const target = await this.#linkTarget(relative);
+      if (target === undefined) continue;
+      hops += 1;
+      if (hops > MAX_LINKS) throw failure("ELOOP", absolute);
+      resolved.pop();
+      if (target.startsWith("/")) resolved = [];
+      pending = [...target.split("/"), ...pending];
     }
-    throw failure("ELOOP", absolute);
+    return `/${resolved.join("/")}`;
   }
 
   /** Throws ENOTDIR when a file or link stands where a directory above `path` would go. */
@@ -480,7 +484,10 @@ export class LayeredFs {
   }
 
   /** The fs isomorphic-git takes, through Computer's git client's adapter seam. */
-  readonly promises: FsPromises & { readonly rm: NonNullable<FsPromises["rm"]> } = {
+  readonly promises: FsPromises & {
+    readonly rm: NonNullable<FsPromises["rm"]>;
+    readonly chmod: NonNullable<FsPromises["chmod"]>;
+  } = {
     readFile: async (path: string, options?: unknown) => {
       if (path === undefined) throw failure("EINVAL", "readFile");
       const bytes = await this.#read(path, true);
@@ -497,7 +504,11 @@ export class LayeredFs {
       await this.#directoriesAbove(path, relative);
       const place = await this.#place(path);
       const recursive = option(options, "recursive") === true;
-      if (place.at !== "none" && !recursive) throw failure("EEXIST", path);
+      if (place.at !== "none") {
+        const stats = await this.#stat(path, true).catch(() => undefined);
+        if (!recursive || stats?.isDirectory() !== true) throw failure("EEXIST", path);
+        return undefined;
+      }
       if (place.at === "none" && !recursive && this.#deleted(parentOf(relative)))
         throw failure("ENOENT", path);
       await this.#overlay.mkdir(path, { recursive: true });

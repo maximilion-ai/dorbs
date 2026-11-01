@@ -88,6 +88,15 @@ it("deletes a base once no session has used it for 14 days, and keeps it while o
     const alarm = () => runInDurableObject(repoBase, (instance: RepoBase) => instance.alarm());
     await alarm();
     assert.isAbove(await stored(), 0);
+    // While a deletion runs, no session may count on the base and no build may start.
+    await runInDurableObject(repoBase, (_, state) => {
+      state.storage.kv.put("deleting", true);
+    });
+    assert.isFalse(await repoBase.used(prefix));
+    assert.isFalse(await repoBase.lease("another"));
+    await runInDurableObject(repoBase, (_, state) => {
+      state.storage.kv.delete("deleting");
+    });
     vi.setSystemTime(start + 15 * 24 * 60 * 60 * 1000);
     await alarm();
     assert.strictEqual(await stored(), 0);
@@ -261,5 +270,68 @@ it("starts a clone over from an empty overlay", async () => {
     assert.isUndefined(await fs.lstat(`${ROOT}/stale.txt`));
     assert.notInclude(await fs.promises.readdir(`${ROOT}/.git/refs/heads`), "stale");
     assert.strictEqual(await git("status"), "(no output)");
+  });
+});
+
+it("keeps work rm would lose unless forced", async () => {
+  await withClone("rm-dirty", async ({ fs, git }) => {
+    await fs.writeFile(`${ROOT}/file.txt`, "edited\n");
+    assert.include(await git("rm file.txt"), "has local modifications");
+    assert.strictEqual(await fs.readText(`${ROOT}/file.txt`), "edited\n");
+    await git("add file.txt");
+    assert.include(await git("rm file.txt"), "has changes staged in the index");
+    assert.strictEqual(await git("rm -f file.txt"), "rm 'file.txt'");
+    assert.isUndefined(await fs.lstat(`${ROOT}/file.txt`));
+  });
+});
+
+it("shows a staged change against HEAD after a commit, and a mode-only change", async () => {
+  await withClone("head-status", async ({ fs, git }) => {
+    await fs.writeFile(`${ROOT}/file.txt`, "edited\n");
+    await git("commit -am edit");
+    await fs.writeFile(`${ROOT}/file.txt`, "file\n");
+    await git("add file.txt");
+    await git("restore file.txt");
+    assert.strictEqual(await git("status --short"), "M  file.txt");
+    assert.include(await git("diff HEAD"), "-edited");
+
+    await fs.promises.chmod(`${ROOT}/d/a.ts`, 0o755);
+    await git("add d/a.ts");
+    assert.strictEqual(await git("status --short"), "M  d/a.ts\nM  file.txt");
+  });
+});
+
+it("restores from the source asked for, and removes what it lacks", async () => {
+  await withClone("restore-source", async ({ fs, git }) => {
+    await fs.writeFile(`${ROOT}/file.txt`, "staged\n");
+    await git("add file.txt");
+    await fs.writeFile(`${ROOT}/file.txt`, "work\n");
+    assert.strictEqual(await git("restore --source=HEAD file.txt"), "(no output)");
+    assert.strictEqual(await fs.readText(`${ROOT}/file.txt`), "file\n");
+    assert.strictEqual(await git("status --short"), "MM file.txt");
+
+    await fs.writeFile(`${ROOT}/new.txt`, "new\n");
+    await git("add new.txt");
+    assert.strictEqual(await git("restore --staged --worktree new.txt"), "(no output)");
+    assert.isUndefined(await fs.lstat(`${ROOT}/new.txt`));
+  });
+});
+
+it("moves a file's index entry as it is, unstaged edits staying unstaged", async () => {
+  await withClone("mv-unstaged", async ({ fs, git }) => {
+    await fs.writeFile(`${ROOT}/file.txt`, "edited\n");
+    assert.strictEqual(await git("mv file.txt moved.txt"), "(no output)");
+    assert.strictEqual(await git("status --short"), "D  file.txt\nAM moved.txt");
+  });
+});
+
+it("refuses mkdir -p over a file, and climbs from a link's target on ..", async () => {
+  await withClone("mkdir-links", async ({ fs }) => {
+    assert.strictEqual(
+      await codeOf(fs.promises.mkdir(`${ROOT}/file.txt`, { recursive: true })),
+      "EEXIST",
+    );
+    await fs.promises.symlink("d/sub", `${ROOT}/sublink`);
+    assert.strictEqual(await fs.readText(`${ROOT}/sublink/../a.ts`), "a\n");
   });
 });

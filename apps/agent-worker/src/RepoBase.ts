@@ -28,15 +28,20 @@ export class RepoBase extends DurableObject {
       this.ctx.storage.kv.delete("lease");
   }
 
-  /** Records a use of the base at `prefix`; its deletion waits UNUSED_MS from the last one. */
-  async used(prefix: string): Promise<void> {
+  /**
+   * Records a use of the base at `prefix`, whose deletion waits UNUSED_MS from the last one. False while a deletion
+   * runs: the caller drops its copy, and a clone waits to build the base again.
+   */
+  async used(prefix: string): Promise<boolean> {
+    if (this.ctx.storage.kv.get<boolean>("deleting") === true) return false;
     const now = Date.now();
     const last = this.ctx.storage.kv.get<number>("used");
     // Renewing more often than hourly only costs writes.
-    if (last !== undefined && now - last < 60 * 60 * 1000) return;
+    if (last !== undefined && now - last < 60 * 60 * 1000) return true;
     this.ctx.storage.kv.put("used", now);
     this.ctx.storage.kv.put("prefix", prefix);
     await this.ctx.storage.setAlarm(now + UNUSED_MS);
+    return true;
   }
 
   override async alarm(): Promise<void> {
@@ -61,11 +66,6 @@ export class RepoBase extends DurableObject {
           await this.env.Bases.delete(listed.objects.map((object) => object.key));
         cursor = listed.truncated ? listed.cursor : undefined;
       } while (cursor !== undefined);
-    }
-    // A session that used the base while it went rebuilds it, and its use stays on record.
-    if ((this.ctx.storage.kv.get<number>("used") ?? 0) !== last) {
-      this.ctx.storage.kv.delete("deleting");
-      return;
     }
     await this.ctx.storage.deleteAll();
   }

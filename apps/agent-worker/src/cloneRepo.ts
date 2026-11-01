@@ -1,4 +1,4 @@
-import { basePrefix, buildBase, openBase } from "./base.ts";
+import { basePrefix, buildBase, forgetBase, openBase } from "./base.ts";
 import { head, type Origin } from "./clone.ts";
 import type { LayeredFs } from "./layered.ts";
 
@@ -13,7 +13,7 @@ export type BaseStore = {
   readonly lease: (prefix: string) => {
     lease(holder: string): Promise<boolean>;
     release(holder: string): Promise<void>;
-    used(prefix: string): Promise<void>;
+    used(prefix: string): Promise<boolean>;
   };
 };
 
@@ -32,8 +32,12 @@ const ensureBase = async (
 ): Promise<string> => {
   const prefix = basePrefix(repo, commit);
   const lease = store.lease(prefix);
-  while ((await openBase(store.bucket, prefix)) === undefined) {
-    if (await lease.lease(holder)) {
+  for (;;) {
+    if ((await openBase(store.bucket, prefix)) !== undefined) {
+      if (await lease.used(prefix)) return prefix;
+      // RepoBase is deleting it; once it is gone, a builder makes it again.
+      forgetBase(prefix);
+    } else if (await lease.lease(holder)) {
       // The deletion clock starts with the build, so the parts of one that never finishes go too.
       await lease.used(prefix);
       const renew = setInterval(() => void lease.lease(holder).catch(() => undefined), RENEW_MS);
@@ -47,8 +51,6 @@ const ensureBase = async (
     }
     await scheduler.wait(WAIT_MS);
   }
-  await lease.used(prefix);
-  return prefix;
 };
 
 /**

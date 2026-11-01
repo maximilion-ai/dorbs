@@ -5,6 +5,8 @@ import {
   listFiles,
   type Origin,
   packIndex,
+  type PackObject,
+  PackTooLarge,
   readPack,
 } from "./clone.ts";
 import * as Schema from "effect/Schema";
@@ -20,7 +22,7 @@ import { isGitPath } from "./git.ts";
 
 // A build holds about a part, a fetch's pack and its blobs at once, and a Worker has 128 MB.
 const PART_BYTES = 8 * 1024 * 1024;
-// Each fetch asks for as many blobs as the last ones' sizes say fit in this, up to MAX_BLOBS.
+// A fetch of more than one blob holds at most this, packed and again inflated; it doubles while well under.
 const FETCH_BYTES = 8 * 1024 * 1024;
 const MAX_BLOBS = 200;
 // Grep reads the content in ranges of about this size rather than file by file.
@@ -125,17 +127,23 @@ export const buildBase = async (
   let count = 16;
   for (let start = 0; start < blobs.length;) {
     const wanted = blobs.slice(start, start + count);
+    // One blob comes whatever its size; more stop at FETCH_BYTES, packed or inflated, and go again in halves.
+    const limit = wanted.length === 1 ? undefined : FETCH_BYTES;
+    let objects: ReadonlyArray<PackObject>;
+    try {
+      const { pack } = await fetchPack(
+        origin,
+        wanted.map((oid) => `want ${oid}`),
+        limit,
+      );
+      objects = readPack(pack, limit);
+    } catch (error) {
+      if (!(error instanceof PackTooLarge)) throw error;
+      count = Math.ceil(wanted.length / 2);
+      continue;
+    }
     start += wanted.length;
-    const fetched = new Map(
-      readPack(
-        (
-          await fetchPack(
-            origin,
-            wanted.map((oid) => `want ${oid}`),
-          )
-        ).pack,
-      ).map((o) => [o.oid, o.data]),
-    );
+    const fetched = new Map(objects.map((o) => [o.oid, o.data]));
     for (const oid of wanted) {
       const data = fetched.get(oid);
       if (data === undefined) throw new Error(`origin left blob ${oid} out of a fetch`);
@@ -148,7 +156,7 @@ export const buildBase = async (
       filled += data.length;
     }
     const got = [...fetched.values()].reduce((sum, data) => sum + data.length, 0);
-    count = Math.max(1, Math.min(MAX_BLOBS, Math.floor((count * FETCH_BYTES) / Math.max(got, 1))));
+    if (got < FETCH_BYTES / 2) count = Math.min(MAX_BLOBS, count * 2);
   }
   await flush();
 
@@ -374,18 +382,28 @@ const idxOids = (idx: Uint8Array): ReadonlySet<string> => {
 };
 
 // One copy of each base per isolate, shared by the sessions it runs.
-const loaded = new Map<string, Promise<Base | undefined>>();
+const loaded = new Map<
+  string,
+  { readonly opening: Promise<Base | undefined>; readonly at: number }
+>();
 // Each holds a repo's entries and generated index, about 20 MB at T3 Code's size, in a 128 MB isolate.
 const LOADED_MAX = 2;
+// A base is deleted only after two weeks unused, and every user renews it hourly; one loaded within the hour stands.
+const LOADED_MS = 60 * 60 * 1000;
+
+/** Drops the isolate's copy of the base at `prefix`, which RepoBase is deleting. */
+export const forgetBase = (prefix: string): void => {
+  loaded.delete(prefix);
+};
 
 /** The base at `prefix`, or undefined while its manifest is missing. */
 export const openBase = (bucket: R2Bucket, prefix: string): Promise<Base | undefined> => {
   const cached = loaded.get(prefix);
-  if (cached !== undefined) {
+  loaded.delete(prefix);
+  if (cached !== undefined && Date.now() - cached.at < LOADED_MS) {
     // Least recently used goes first.
-    loaded.delete(prefix);
     loaded.set(prefix, cached);
-    return cached;
+    return cached.opening;
   }
   const opening = (async () => {
     const manifest = await bucket.get(`${prefix}/manifest.json`);
@@ -395,7 +413,7 @@ export const openBase = (bucket: R2Bucket, prefix: string): Promise<Base | undef
     const entries = decodeEntries(new TextDecoder().decode(await gunzip(files.body)));
     return new Base(bucket, prefix, decodeManifest(await manifest.text()), entries);
   })();
-  loaded.set(prefix, opening);
+  loaded.set(prefix, { opening, at: Date.now() });
   // A missing base is looked up again next time; a loaded one stays, up to LOADED_MAX.
   void opening.then(
     (base) => {
