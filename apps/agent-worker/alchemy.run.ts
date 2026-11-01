@@ -10,6 +10,8 @@ import type { AcpConnection, AcpSession, ChatGptAccount, GitHubTokens } from "./
 export const Worker = Cloudflare.Worker("AgentWorker", {
   main: "./src/worker.ts",
   compatibility: { date: "2026-10-01", flags: ["nodejs_compat"] },
+  // A large repo's clone inflates and hashes hundreds of MB; the 30 s default stops it partway.
+  limits: { cpuMs: 300_000 },
   env: {
     AcpConnection: Cloudflare.DurableObject<AcpConnection>("AcpConnection"),
     AcpSession: Cloudflare.DurableObject<AcpSession>("AcpSession"),

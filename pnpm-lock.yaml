@@ -221,6 +221,9 @@ catalogs:
     knip:
       specifier: 6.43.0
       version: 6.43.0
+    pako:
+      specifier: 1.0.11
+      version: 1.0.11
     tsrs:
       specifier: 0.20.0-ts7.1.0-beta
       version: 0.20.0-ts7.1.0-beta
@@ -319,6 +322,9 @@ importers:
       effect:
         specifier: 4.0.6
         version: 4.0.6
+      pako:
+        specifier: 'catalog:'
+        version: 1.0.11
       zod:
         specifier: 'catalog:'
         version: 4.6.6

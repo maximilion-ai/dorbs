@@ -60,9 +60,14 @@ export const serveGit =
           GIT_PROJECT_ROOT: root,
           GIT_HTTP_EXPORT_ALL: "1",
           // http-backend refuses pushes from an unauthenticated client unless receive-pack is on.
-          GIT_CONFIG_COUNT: "1",
+          // As GitHub does, it serves partial clones and blobs by id, which the agent's clone fetches.
+          GIT_CONFIG_COUNT: "3",
           GIT_CONFIG_KEY_0: "http.receivepack",
           GIT_CONFIG_VALUE_0: "true",
+          GIT_CONFIG_KEY_1: "uploadpack.allowFilter",
+          GIT_CONFIG_VALUE_1: "true",
+          GIT_CONFIG_KEY_2: "uploadpack.allowAnySHA1InWant",
+          GIT_CONFIG_VALUE_2: "true",
           REQUEST_METHOD: request.method,
           PATH_INFO: url.pathname,
           QUERY_STRING: url.search.slice(1),

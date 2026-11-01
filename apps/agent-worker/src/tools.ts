@@ -19,6 +19,7 @@ import { gh } from "./gh.ts";
 import { git, isGitPath } from "./git.ts";
 import type { GitHub } from "./GitHub.ts";
 import type { Change, Clone, TestSelection } from "./Checker.ts";
+import { shallowClone } from "./clone.ts";
 
 export const WORKSPACE_ROOT = "/workspace";
 
@@ -451,24 +452,15 @@ const TOOLS = [
           `${repo} is not a registered repo. Registered: ${[...repos.keys()].join(", ")}`,
         );
       }
-      const cloned = host.clone();
-      if (cloned !== undefined) {
-        if (cloned.repo !== id) throw new Error(`The workspace already holds ${cloned.repo}.`);
-        return text(`${id} is already cloned at ${cloned.commit} into the workspace root.`);
+      const existing = host.clone();
+      if (existing !== undefined) {
+        if (existing.repo !== id) throw new Error(`The workspace already holds ${existing.repo}.`);
+        return text(`${id} is already cloned at ${existing.commit} into the workspace root.`);
       }
       const headers = await (await host.github()).headers(url);
-      await host.workspace.git.clone({
-        url,
-        dir: WORKSPACE_ROOT,
-        depth: 1,
-        ...(headers === undefined ? {} : { headers: { ...headers } }),
-      });
-      const commit = decodeCommit(
-        await host.workspace.git.revParse({ dir: WORKSPACE_ROOT, ref: "HEAD" }),
-      );
-      const branch = await host.workspace.git.currentBranch({ dir: WORKSPACE_ROOT });
-      if (branch === undefined) throw new Error(`${id} cloned without a branch checked out.`);
-      host.saveClone({ repo: id, commit, branch });
+      const cloned = await shallowClone(host.workspace, { url, headers }, WORKSPACE_ROOT);
+      const commit = decodeCommit(cloned.commit);
+      host.saveClone({ repo: id, commit, branch: cloned.branch });
       return text(
         `Cloned ${id} at ${commit} into the workspace root. Paths are relative to the repo root.`,
       );

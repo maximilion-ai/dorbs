@@ -31,6 +31,8 @@ catalog:
   # The agent-worker tests prebundle OpenCode with it; wrangler and alchemy already pin it.
   esbuild: 0.28.2
   knip: 6.43.0
+  # pako 1, as isomorphic-git pins: pako 2 reads on past a stream's end, into the next packfile object.
+  pako: 1.0.11
   tsrs: 0.20.0-ts7.1.0-beta
   vite: npm:@voidzero-dev/vite-plus-core@1.4.0
   vite-plus: 1.4.0

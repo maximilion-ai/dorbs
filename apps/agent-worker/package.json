@@ -19,6 +19,7 @@
     "@platformatic/vfs": "catalog:",
     "agents": "catalog:",
     "effect": "catalog:",
+    "pako": "catalog:",
     "zod": "catalog:"
   },
   "devDependencies": {
