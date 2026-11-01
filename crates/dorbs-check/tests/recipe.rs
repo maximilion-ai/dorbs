@@ -69,15 +69,10 @@ fn installs_with_the_commits_pnpmfile_when_the_lockfile_records_its_checksum() {
     assert_eq!(
         setup(&recipe),
         vec![
-            (
-                "download".into(),
-                "pnpm fetch --pnpmfile .pnpmfile.cjs".into(),
-                Phase::Online
-            ),
+            ("download".into(), "pnpm fetch".into(), Phase::Online),
             (
                 "install".into(),
-                "pnpm install --offline --frozen-lockfile --ignore-scripts --pnpmfile .pnpmfile.cjs"
-                    .into(),
+                "pnpm install --offline --frozen-lockfile --ignore-scripts".into(),
                 Phase::Offline
             ),
         ]

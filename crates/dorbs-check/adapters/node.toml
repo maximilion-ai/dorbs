@@ -198,10 +198,11 @@ when = { vars = { "pm.name" = "pnpm" }, exists = [
 ], contains = [
   { file = "pnpm-lock.yaml", regex = '(?m)^pnpmfileChecksum:' },
 ] }
-# A lockfile that records its pnpmfile's checksum installs only with it, so both steps read the commit's .pnpmfile.cjs
-# (commit_only). The path is pinned, and pnpm-workspace.yaml is commit_only, so a change cannot load hooks of its own.
-download = "pnpm fetch --pnpmfile .pnpmfile.cjs"
-offline = "pnpm install --offline --frozen-lockfile --ignore-scripts --pnpmfile .pnpmfile.cjs"
+# A lockfile that records its pnpmfile's checksum installs only with it, so both steps read the commit's .pnpmfile.cjs.
+# It, .npmrc and pnpm-workspace.yaml, which could point pnpm at other hooks, are all commit_only, so a change cannot
+# load hooks of its own.
+download = "pnpm fetch"
+offline = "pnpm install --offline --frozen-lockfile --ignore-scripts"
 
 [[let.install]]
 when = { vars = { "pm.name" = "pnpm" }, exists = ["pnpm-lock.yaml"] }
