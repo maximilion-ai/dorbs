@@ -470,6 +470,7 @@ it("shows commits with their changes, files at a revision, remote branches and t
     assert.include(log, "change a");
     assert.include(log, "d/a.ts");
     assert.include(await git("log --all --oneline"), "change a");
+    assert.include(await git("--no-pager log -1 --stat"), "d/a.ts");
     const branches = await git("branch -a");
     assert.include(branches, "* dorbs/show");
     assert.include(branches, "remotes/origin/main");

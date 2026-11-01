@@ -1014,7 +1014,9 @@ const branchesWithRemotes = async (
 export const git = async (line: string, context: GitContext): Promise<string> => {
   let argv: ReadonlyArray<string>;
   try {
-    argv = parseArgv(line);
+    const parsed = parseArgv(line);
+    // Output never pages here, so --no-pager asks for nothing.
+    argv = parsed[0] === "--no-pager" || parsed[0] === "-P" ? parsed.slice(1) : parsed;
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
