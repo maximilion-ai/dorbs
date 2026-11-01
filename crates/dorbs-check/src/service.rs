@@ -28,6 +28,8 @@ pub enum Failure {
     Fetch(String),
     ImageMissing(String),
     Internal(String),
+    /// Nobody wanted the answer any more before the run began.
+    Abandoned,
 }
 
 pub struct Service {
@@ -209,7 +211,11 @@ impl Service {
         }))
     }
 
-    pub async fn check(&self, request: CheckRequest) -> Result<CheckResponse, Failure> {
+    pub async fn check(
+        &self,
+        request: CheckRequest,
+        wanted: impl Fn() -> bool,
+    ) -> Result<CheckResponse, Failure> {
         let started = Instant::now();
         let prepared = match self
             .prepare(&request.repo, &request.commit, &request.change)
@@ -239,6 +245,7 @@ impl Service {
                 request.commit.clone(),
                 request.change.clone(),
                 commands,
+                wanted,
             )
             .await
         {
@@ -250,6 +257,15 @@ impl Service {
                 });
             }
             Err(UseError::Internal(error)) => return Err(Failure::Internal(error)),
+            Err(UseError::Abandoned) => {
+                crate::log(&format!(
+                    "dropped a check on {}@{} nobody waits for after {} ms",
+                    request.repo,
+                    &request.commit[..12],
+                    started.elapsed().as_millis()
+                ));
+                return Err(Failure::Abandoned);
+            }
         };
         let mut ran = used.value.into_iter();
         let runs = (checks.iter().zip(&planned))
@@ -288,7 +304,11 @@ impl Service {
         Ok(CheckResponse::CheckResult(result))
     }
 
-    pub async fn test(&self, request: TestRequest) -> Result<TestResponse, Failure> {
+    pub async fn test(
+        &self,
+        request: TestRequest,
+        wanted: impl Fn() -> bool,
+    ) -> Result<TestResponse, Failure> {
         let started = Instant::now();
         let prepared = match self
             .prepare(&request.repo, &request.commit, &request.change)
@@ -327,6 +347,7 @@ impl Service {
                 request.commit.clone(),
                 request.change.clone(),
                 commands,
+                wanted,
             )
             .await
         {
@@ -338,6 +359,15 @@ impl Service {
                 });
             }
             Err(UseError::Internal(error)) => return Err(Failure::Internal(error)),
+            Err(UseError::Abandoned) => {
+                crate::log(&format!(
+                    "dropped a test on {}@{} nobody waits for after {} ms",
+                    request.repo,
+                    &request.commit[..12],
+                    started.elapsed().as_millis()
+                ));
+                return Err(Failure::Abandoned);
+            }
         };
         let timings = Timings {
             env_key: spec.key.clone(),

@@ -193,7 +193,7 @@ async fn gives_setup_code_no_source_while_it_has_the_network_and_no_network_once
         online_change: Change::default(),
     };
     let used = envs
-        .run(Arc::new(spec), commit, Change::default(), vec![])
+        .run(Arc::new(spec), commit, Change::default(), vec![], || true)
         .await;
     assert!(
         used.is_ok(),
@@ -202,6 +202,7 @@ async fn gives_setup_code_no_source_while_it_has_the_network_and_no_network_once
             UseError::SetupFailed(failed) => format!("{}: {}", failed.step, failed.output),
             UseError::UnsafePath(paths) => format!("{paths:?}"),
             UseError::Internal(error) => error,
+            UseError::Abandoned => "abandoned".to_owned(),
         })
     );
     let seen = |phase: &str| -> serde_json::Value {
@@ -273,6 +274,7 @@ async fn writes_nothing_of_the_host_when_a_run_swaps_the_trees_root_for_a_link()
                 },
                 Duration::from_secs(60),
             )],
+            || true,
         )
         .await;
     assert!(
@@ -290,7 +292,9 @@ async fn writes_nothing_of_the_host_when_a_run_swaps_the_trees_root_for_a_link()
             .any(|env| env.key == "swap" && format!("{:?}", env.state) == "Evicted")
     );
     // The next request sets the environment up anew.
-    let again = envs.run(spec, commit, Change::default(), vec![]).await;
+    let again = envs
+        .run(spec, commit, Change::default(), vec![], || true)
+        .await;
     assert!(again.is_ok());
 }
 
@@ -329,16 +333,22 @@ async fn runs_requests_for_one_change_at_once_and_queues_other_changes() {
             Duration::from_secs(60),
         )]
     };
-    envs.run(spec.clone(), commit.clone(), Change::default(), vec![])
-        .await
-        .ok()
-        .expect("the environment sets up");
+    envs.run(
+        spec.clone(),
+        commit.clone(),
+        Change::default(),
+        vec![],
+        || true,
+    )
+    .await
+    .ok()
+    .expect("the environment sets up");
     let timed = |content: &'static str| {
         let (envs, spec, commit) = (envs.clone(), spec.clone(), commit.clone());
         async move {
             let started = std::time::Instant::now();
             let used = envs
-                .run(spec, commit, change(content), sleep_and_read())
+                .run(spec, commit, change(content), sleep_and_read(), || true)
                 .await
                 .ok()
                 .expect("the run");
@@ -357,6 +367,93 @@ async fn runs_requests_for_one_change_at_once_and_queues_other_changes() {
         other_a.max(other_b) >= Duration::from_secs(4),
         "another change queues: {other_a:?} {other_b:?}"
     );
+}
+
+#[tokio::test]
+#[ignore = "needs rootless Docker"]
+async fn gives_up_a_queued_request_nobody_waits_for_and_runs_the_next() {
+    let host = host("abandon");
+    let git_dir = host.root.join("repo.git");
+    let commit = repo(
+        &git_dir,
+        &[
+            ("package.json", "{}"),
+            ("src/a.ts", "export const a = 1;\n"),
+        ],
+    );
+    let (_, envs, image) = environments(&host, 1).await;
+    let spec = Arc::new(EnvSpec {
+        key: "abandon".into(),
+        repo: RepoId::try_from("test/abandon").unwrap(),
+        git_dir,
+        recipe: recipe(vec![]),
+        image,
+        key_change: Change::default(),
+        online_paths: vec![],
+        online_change: Change::default(),
+    });
+    let change = |content: &str| -> Change {
+        serde_json::from_value(serde_json::json!({ "files": [{ "path": "src/a.ts", "content": content }], "deleted": [] })).unwrap()
+    };
+    let sleep_and_read = || {
+        vec![(
+            run::Command {
+                cwd: ".".into(),
+                run: "sleep 2 && cat src/a.ts".into(),
+            },
+            Duration::from_secs(60),
+        )]
+    };
+    envs.run(
+        spec.clone(),
+        commit.clone(),
+        Change::default(),
+        vec![],
+        || true,
+    )
+    .await
+    .ok()
+    .expect("the environment sets up");
+    let waits = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let ahead = envs.run(
+        spec.clone(),
+        commit.clone(),
+        change("one"),
+        sleep_and_read(),
+        || true,
+    );
+    let behind = {
+        let waits = waits.clone();
+        envs.run(
+            spec.clone(),
+            commit.clone(),
+            change("two"),
+            sleep_and_read(),
+            move || waits.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    };
+    let hang_up = async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        waits.store(false, std::sync::atomic::Ordering::Relaxed);
+    };
+    let started = std::time::Instant::now();
+    let (ahead, behind, ()) = tokio::join!(ahead, behind, hang_up);
+    assert_eq!(
+        ahead.ok().expect("the run ahead").value[0].result.stdout,
+        "one"
+    );
+    assert!(matches!(behind, Err(UseError::Abandoned)));
+    assert!(
+        started.elapsed() < Duration::from_millis(3500),
+        "the request nobody waits for does not run: {:?}",
+        started.elapsed()
+    );
+    let next = envs
+        .run(spec, commit, change("three"), sleep_and_read(), || true)
+        .await
+        .ok()
+        .expect("the next run");
+    assert_eq!(next.value[0].result.stdout, "three");
 }
 
 #[tokio::test]
@@ -397,6 +494,7 @@ async fn runs_other_changes_at_once_on_replicas_of_the_environment() {
                     commit,
                     change,
                     vec![(command, Duration::from_secs(60))],
+                    || true,
                 )
                 .await
                 .ok()
