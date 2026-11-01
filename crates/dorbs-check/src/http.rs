@@ -1,7 +1,8 @@
 //! The HTTP API: POST /check, POST /test and GET /environments, each behind the bearer token. POST /jobs/check and
 //! POST /jobs/test run the same in the background and answer at once with an id; GET /jobs/{id} answers 202 until
 //! the run ends, then as the plain endpoint would. A proxy in front, such as a Cloudflare tunnel, cuts off a request
-//! after 100 s, and a busy checker queues runs for longer than that.
+//! after 100 s, and a busy checker queues runs for longer than that. A job nobody polls for ABANDON_AFTER gives up
+//! before its run begins, so it holds up no run behind it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -26,9 +27,13 @@ const MAX_BODY: usize = 16 * 1024 * 1024;
 /// How long a finished job's answer waits to be collected.
 const JOB_TTL: Duration = Duration::from_secs(30 * 60);
 
+/// How long a job waits for its run without a poll before it gives up; the Worker polls every 2 s.
+const ABANDON_AFTER: Duration = Duration::from_secs(60);
+
 /// A background run's answer once it ends: its status, content type and body.
 type Answer = (StatusCode, Option<header::HeaderValue>, Bytes);
 
+/// Each job by id: when it was started, last polled or finished, and its answer once it ends.
 #[derive(Default)]
 struct Jobs(Mutex<HashMap<String, (Instant, Option<Answer>)>>);
 
@@ -61,9 +66,13 @@ pub fn router(service: Arc<Service>) -> Router {
         .with_state(state)
 }
 
-/// Starts `run` in the background and answers 202 with the id GET /jobs/{id} collects it by.
-fn start<F>(jobs: Arc<Jobs>, run: F) -> Response
+/// Wanted while its job's waiter polls it.
+type Wanted = Box<dyn Fn() -> bool + Send + Sync>;
+
+/// Starts the run `run` makes in the background and answers 202 with the id GET /jobs/{id} collects it by.
+fn start<R, F>(jobs: Arc<Jobs>, run: R) -> Response
 where
+    R: FnOnce(Wanted) -> F,
     F: std::future::Future<Output = Response> + Send + 'static,
 {
     let mut bytes = [0u8; 16];
@@ -75,6 +84,16 @@ where
         table.insert(id.clone(), (Instant::now(), None));
     }
     let key = id.clone();
+    let wanted: Wanted = {
+        let (jobs, id) = (jobs.clone(), id.clone());
+        Box::new(move || {
+            let table = jobs.0.lock().expect("the job table");
+            table
+                .get(&id)
+                .is_some_and(|(at, _)| at.elapsed() < ABANDON_AFTER)
+        })
+    };
+    let run = run(wanted);
     tokio::spawn(async move {
         let response = run.await;
         let status = response.status();
@@ -90,23 +109,26 @@ where
 }
 
 async fn job_check(State(state): State<AppState>, body: Bytes) -> Response {
-    start(state.jobs.clone(), check(State(state.service), body))
+    start(state.jobs, |wanted| run_check(state.service, body, wanted))
 }
 
 async fn job_test(State(state): State<AppState>, body: Bytes) -> Response {
-    start(state.jobs.clone(), test(State(state.service), body))
+    start(state.jobs, |wanted| run_test(state.service, body, wanted))
 }
 
 /// 202 while the job runs; its answer once, after which the id is gone; 404 for an id the table does not hold.
 async fn job(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     let mut table = state.jobs.0.lock().expect("the job table");
-    match table.get(&id) {
+    match table.get_mut(&id) {
         None => (StatusCode::NOT_FOUND, "no such job").into_response(),
-        Some((_, None)) => (
-            StatusCode::ACCEPTED,
-            json(&serde_json::json!({ "status": "running" })),
-        )
-            .into_response(),
+        Some((at, None)) => {
+            *at = Instant::now();
+            (
+                StatusCode::ACCEPTED,
+                json(&serde_json::json!({ "status": "running" })),
+            )
+                .into_response()
+        }
         Some((_, Some(_))) => {
             let Some((_, Some((status, content_type, body)))) = table.remove(&id) else {
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -164,6 +186,7 @@ fn failed(failure: Failure) -> Response {
             crate::log(&format!("internal error: {message}"));
             (StatusCode::INTERNAL_SERVER_ERROR, message).into_response()
         }
+        Failure::Abandoned => (StatusCode::GONE, "nobody waits for this run").into_response(),
     }
 }
 
@@ -174,11 +197,19 @@ fn parse<T: DeserializeOwned>(body: &Bytes) -> Result<T, Box<Response>> {
 
 // Each request runs in a task of its own, so a client hanging up leaves no tree half restored.
 async fn check(State(service): State<Arc<Service>>, body: Bytes) -> Response {
+    run_check(service, body, || true).await
+}
+
+async fn run_check(
+    service: Arc<Service>,
+    body: Bytes,
+    wanted: impl Fn() -> bool + Send + Sync + 'static,
+) -> Response {
     let request: CheckRequest = match parse(&body) {
         Ok(request) => request,
         Err(response) => return *response,
     };
-    let answer = tokio::spawn(async move { service.check(request).await }).await;
+    let answer = tokio::spawn(async move { service.check(request, wanted).await }).await;
     match answer {
         Ok(Ok(answer)) => json(&answer),
         Ok(Err(failure)) => failed(failure),
@@ -187,11 +218,19 @@ async fn check(State(service): State<Arc<Service>>, body: Bytes) -> Response {
 }
 
 async fn test(State(service): State<Arc<Service>>, body: Bytes) -> Response {
+    run_test(service, body, || true).await
+}
+
+async fn run_test(
+    service: Arc<Service>,
+    body: Bytes,
+    wanted: impl Fn() -> bool + Send + Sync + 'static,
+) -> Response {
     let request: TestRequest = match parse(&body) {
         Ok(request) => request,
         Err(response) => return *response,
     };
-    let answer = tokio::spawn(async move { service.test(request).await }).await;
+    let answer = tokio::spawn(async move { service.test(request, wanted).await }).await;
     match answer {
         Ok(Ok(answer)) => json(&answer),
         Ok(Err(failure)) => failed(failure),
