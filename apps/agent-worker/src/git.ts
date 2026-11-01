@@ -229,6 +229,9 @@ const blobBytes = async (context: GitContext, oid: string): Promise<Uint8Array> 
 const writeWork = async (context: GitContext, path: string, entry: Entry | undefined) => {
   const { fs, dir } = context;
   const original = (await fs.base())?.entry(path);
+  // A directory the session made where the file was goes first, whatever comes back in its place.
+  if ((await fs.lstat(`${dir}/${path}`))?.isDirectory() === true && entry?.mode !== 0o160000)
+    await fs.promises.rm(`${dir}/${path}`, { recursive: true, force: true });
   if (
     entry !== undefined &&
     original !== undefined &&
@@ -613,13 +616,29 @@ const restored = async (
       undefined
   )
     return failed(`fatal: could not resolve '${source}'`);
-  // A file the source holds counts even when nothing else does, such as one deleted since that commit.
+  // A file the source holds counts even when nothing else does, such as one deleted since that commit; a directory
+  // counts as the files under it.
   const fromSource = new Set<string>();
-  for (const spec of wanted)
-    if (spec !== "" && tree !== undefined && (await tree(spec)) !== undefined) fromSource.add(spec);
+  const collect = async (path: string): Promise<void> => {
+    const entries = await context.workspace.git
+      .lsTree({ dir, ref: source ?? "HEAD", path })
+      .catch(() => []);
+    for (const entry of entries) {
+      if (fromSource.size > MAX_PATHS) return;
+      const child = `${path}/${entry.path}`;
+      if (entry.type === "tree") await collect(child);
+      else fromSource.add(child);
+    }
+  };
+  for (const spec of wanted) {
+    const entry = spec === "" || tree === undefined ? undefined : await tree(spec);
+    if (entry === undefined) continue;
+    if (entry.mode === 0o40000) await collect(spec);
+    else fromSource.add(spec);
+  }
   for (const spec of wanted)
     if (
-      !fromSource.has(spec) &&
+      ![...fromSource].some((path) => under(path, spec)) &&
       !changes.changed.some((path) => under(path, spec)) &&
       ![...changes.stage.keys()].some((path) => under(path, spec)) &&
       (await fs.lstat(`${dir}/${spec}`)) === undefined
@@ -641,8 +660,9 @@ const restored = async (
   if (staged) await updateIndex(context, from);
   if (worktree)
     for (const [path, entry] of from)
-      // From the index, a path it lacks is untracked, and restore leaves it be.
-      if (entry !== undefined || source !== undefined) await writeWork(context, path, entry);
+      // A path the source lacks leaves the work tree only when git tracks it; untracked files stay.
+      if (entry !== undefined || (source !== undefined && changes.stage.has(path)))
+        await writeWork(context, path, entry);
   return subcommand === "checkout"
     ? `Updated ${picked.length} paths from the index`
     : "(no output)";
@@ -885,6 +905,16 @@ export const git = async (line: string, context: GitContext): Promise<string> =>
   ) {
     return failed(`git ${subcommand} needs the paths it acts on.`);
   }
+  if (subcommand === "diff" && args.some((arg) => arg === "--cached" || arg === "--staged"))
+    return failed(
+      "git diff --cached is not available here. git status shows the staged paths, and git diff HEAD -- <path> shows a path's changes since the last commit.",
+    );
+  // Only commands that compare the work tree, the index and HEAD read the index and the change set.
+  if (
+    subcommand === undefined ||
+    !["status", "diff", "add", "rm", "mv", "restore", "checkout", "commit"].includes(subcommand)
+  )
+    return run(argv);
   const changes = await changesOf(context);
   switch (subcommand) {
     case "status":

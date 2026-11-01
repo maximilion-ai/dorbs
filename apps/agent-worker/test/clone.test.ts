@@ -359,3 +359,22 @@ it("checks out a file only an older commit holds", async () => {
     assert.strictEqual(await git("status --short"), "A  new.txt");
   });
 });
+
+it("restores a directory from a commit, leaving untracked files and putting a file back over its directory", async () => {
+  await withClone("restore-dir", async ({ fs, git }) => {
+    await fs.writeFile(`${ROOT}/notes`, "mine\n");
+    await fs.writeFile(`${ROOT}/d/sub/b.ts`, "changed\n");
+    assert.strictEqual(await git("restore --source=HEAD ."), "(no output)");
+    assert.strictEqual(await fs.readText(`${ROOT}/notes`), "mine\n");
+    assert.strictEqual(await fs.readText(`${ROOT}/d/sub/b.ts`), "b\n");
+
+    await fs.promises.rm(`${ROOT}/d/sub`, { recursive: true });
+    assert.strictEqual(await git("restore --source=HEAD d/sub"), "(no output)");
+    assert.strictEqual(await fs.readText(`${ROOT}/d/sub/c.ts`), "c\n");
+
+    await fs.promises.unlink(`${ROOT}/file.txt`);
+    await fs.writeFile(`${ROOT}/file.txt/child`, "child\n");
+    assert.strictEqual(await git("restore file.txt"), "(no output)");
+    assert.strictEqual(await fs.readText(`${ROOT}/file.txt`), "file\n");
+  });
+});
