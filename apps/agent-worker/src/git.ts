@@ -3,6 +3,14 @@ import type { GitCliResult } from "@cloudflare/computer/git";
 
 import { parseArgv } from "./argv.ts";
 import type { Clone } from "./Checker.ts";
+import {
+  looseObject,
+  pushRefs,
+  receivePack,
+  treeEntries,
+  writePack,
+  type ObjectType,
+} from "./clone.ts";
 import type { LayeredFs } from "./layered.ts";
 
 /** The cloned repo git runs in, and how pushes reach origin. */
@@ -222,19 +230,41 @@ const failed = (message: string): string => `${message}\nexit 1`;
 // The agent's pushes go to branches of their own, so none moves a branch whose CI runs with secrets.
 const BRANCH_PREFIX = "dorbs/";
 
-/** The branches origin advertises to a push, from its smart HTTP ref advertisement. */
-const remoteBranches = async (
-  url: string,
-  headers: Readonly<Record<string, string>> | undefined,
-): Promise<ReadonlySet<string>> => {
-  const response = await fetch(`${url}/info/refs?service=git-receive-pack`, {
-    headers: { "user-agent": "git/dorbs", ...headers },
-  });
-  if (!response.ok) throw new Error(`origin answered HTTP ${response.status} to a ref listing`);
-  // The advertisement is binary pkt-lines; its ref names are UTF-8.
-  const body = new TextDecoder().decode(await response.arrayBuffer());
-  const advertised = body.matchAll(/[0-9a-f]{40} refs\/heads\/([^\0\n]+)/gu);
-  return new Set([...advertised].flatMap(([, branch]) => branch ?? []));
+const ZERO = "0".repeat(40);
+
+/**
+ * The objects origin lacks to take `tip`: the ones the session wrote since the clone, walked from `tip` down to the
+ * base, which origin has. `seen` holds every object the walk reached, base ones included.
+ */
+const newObjects = async (
+  context: GitContext,
+  tip: string,
+): Promise<{
+  readonly objects: ReadonlyArray<{ readonly type: ObjectType; readonly data: Uint8Array }>;
+  readonly seen: ReadonlySet<string>;
+}> => {
+  const base = await context.fs.base();
+  const objects: { type: ObjectType; data: Uint8Array }[] = [];
+  const seen = new Set<string>();
+  const pending = [tip];
+  for (let oid = pending.pop(); oid !== undefined; oid = pending.pop()) {
+    if (seen.has(oid)) continue;
+    seen.add(oid);
+    if (base !== undefined && (await base.hasObject(oid))) continue;
+    const path = `${context.dir}/.git/objects/${oid.slice(0, 2)}/${oid.slice(2)}`;
+    const file = await context.fs.promises.readFile(path).catch(() => undefined);
+    if (file === undefined || typeof file === "string")
+      throw new Error(`the repo has no object ${oid}, which ${tip} needs`);
+    const object = looseObject(file);
+    objects.push(object);
+    if (object.type === "tree")
+      for (const entry of treeEntries(object.data))
+        if (entry.mode !== "160000") pending.push(entry.oid);
+    if (object.type === "commit")
+      for (const line of new TextDecoder().decode(object.data).split("\n\n")[0]?.split("\n") ?? [])
+        if (line.startsWith("tree ") || line.startsWith("parent ")) pending.push(line.split(" ")[1] ?? "");
+  }
+  return { objects, seen };
 };
 
 /** Whether a path names the git directory or something in it, in any case. */
@@ -280,30 +310,27 @@ const push = async (args: ReadonlyArray<string>, context: GitContext): Promise<s
   if (context.url === undefined) return failed(`${clone.repo} is no longer a registered repo.`);
   const commit = await workspace.git.revParse({ dir, ref: source }).catch(() => undefined);
   if (commit === undefined) return failed(`error: src refspec ${source} does not match any`);
-  // Computer's push takes no proxy of its own, so isomorphic-git would send the credentials to the config's.
-  const proxy = await workspace.git.configGet({ dir, path: "http.corsProxy" });
-  if (proxy !== undefined) {
-    return failed(
-      "Push refused: the repo's git config sets http.corsProxy, which would send origin's credentials to another host.",
-    );
-  }
   const created = clone.created ?? [];
   try {
-    const headers = await context.headers(context.url);
-    if (!created.includes(target) && (await remoteBranches(context.url, headers)).has(target)) {
+    const origin = { url: context.url, headers: await context.headers(context.url) };
+    const old = (await pushRefs(origin)).get(target);
+    if (!created.includes(target) && old !== undefined) {
       return `${target} already exists on origin, and this session did not create it. Push to a new branch, such as git push origin HEAD:${BRANCH_PREFIX}my-change.`;
     }
-    const result = await workspace.git.push({
-      dir,
-      url: context.url,
-      ref: source,
-      remoteRef: `refs/heads/${target}`,
-      ...(headers === undefined ? {} : { headers: { ...headers } }),
-    });
-    if (!result.ok) {
-      const refErrors = Object.values(result.refs).flatMap((ref) => ref.error ?? []);
-      return failed(`Push rejected: ${result.error ?? refErrors.join("; ")}`);
+    if (old === commit) return "Everything up-to-date";
+    // Only what the session wrote goes: origin has the base, and a push that walked it would read the whole repo.
+    const { objects, seen } = await newObjects(context, commit);
+    if (old !== undefined && !seen.has(old)) {
+      return failed(
+        `Push rejected: origin's ${target} has commits ${source} does not. Push to a new branch, such as git push origin HEAD:${BRANCH_PREFIX}my-change.`,
+      );
     }
+    const refused = await receivePack(
+      origin,
+      { branch: target, old: old ?? ZERO, commit },
+      writePack(objects),
+    );
+    if (refused !== undefined) return failed(`Push rejected: ${refused}`);
   } catch (error) {
     return failed(error instanceof Error ? error.message : String(error));
   }

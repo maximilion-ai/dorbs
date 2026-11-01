@@ -916,15 +916,13 @@ it("sends no credentials through a proxy the repo's git config names", async () 
   });
   await client.request(3, "session/prompt", prompt(sessionId, "push proxied"));
   const frames = updates(client.frames);
-  assert.strictEqual(
-    toolText(frames, "call-push"),
-    "Push refused: the repo's git config sets http.corsProxy, which would send origin's credentials to another host.\nexit 1",
-  );
+  const pushed = await refOf("test/github.git", "refs/heads/dorbs/proxied");
+  assert.isNotNull(pushed);
+  assert.strictEqual(toolText(frames, "call-push"), `Pushed dorbs/proxied to origin at ${pushed?.commit}`);
   assert.deepStrictEqual(
     (await record.log()).filter((line) => line.startsWith("stray")),
     [],
   );
-  assert.isNull(await refOf("test/github.git", "refs/heads/dorbs/proxied"));
 });
 
 it("clones, pushes and opens a pull request with a token the GitHub App mints for the repo alone", async () => {

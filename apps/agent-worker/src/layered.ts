@@ -107,7 +107,8 @@ export class LayeredFs {
   readonly #overlay: FsPromises;
   readonly #root: string;
   readonly #save: (state: OverlayState) => void;
-  readonly #base: () => Promise<Base | undefined>;
+  /** The repo's base, or undefined before a clone. */
+  readonly base: () => Promise<Base | undefined>;
   #paths: Set<string>;
   #dirs: Set<string>;
   #tombstones: Set<string>;
@@ -122,7 +123,7 @@ export class LayeredFs {
     this.#overlay = options.overlay;
     this.#root = options.root;
     this.#save = options.save;
-    this.#base = options.base;
+    this.base = options.base;
     this.#paths = new Set();
     this.#dirs = new Set();
     this.#tombstones = new Set(options.state?.tombstones ?? []);
@@ -142,7 +143,7 @@ export class LayeredFs {
     readonly written: ReadonlyArray<string>;
     readonly deleted: ReadonlyArray<string>;
   }> {
-    const base = await this.#base();
+    const base = await this.base();
     const deleted = new Set<string>();
     for (const path of this.#tombstones) {
       if (isGit(path)) continue;
@@ -197,7 +198,7 @@ export class LayeredFs {
     if (path === undefined) return { at: "overlay" };
     if (this.#deleted(path)) return { at: "none" };
     if (this.#paths.has(path)) return { at: "overlay" };
-    const base = await this.#base();
+    const base = await this.base();
     if (base !== undefined && isGit(path)) {
       const loose = /^\.git\/objects\/([0-9a-f]{2})\/([0-9a-f]{38})$/u.exec(path);
       if (loose !== null && (await base.hasObject(`${loose[1]}${loose[2]}`)))
@@ -318,7 +319,7 @@ export class LayeredFs {
     if (path === undefined) return this.#overlay.readdir(absolute);
     if (this.#deleted(path)) throw failure("ENOENT", absolute);
     const names = new Set<string>();
-    const base = await this.#base();
+    const base = await this.base();
     const fromBase = base?.children(path);
     let found = fromBase !== undefined;
     for (const name of fromBase ?? []) names.add(name);
@@ -369,7 +370,7 @@ export class LayeredFs {
     const path = this.#relative(absolute);
     if (path === undefined) return this.#overlay.writeFile(absolute, data, options);
     await this.#ensureParent(absolute, path);
-    const base = await this.#base();
+    const base = await this.base();
     const executable = !this.#paths.has(path) && base?.entry(path)?.mode === "100755";
     const mode =
       typeof options === "object" && options !== null && "mode" in options ? options : undefined;
@@ -388,7 +389,7 @@ export class LayeredFs {
       await this.#overlay.unlink(absolute);
       this.#paths.delete(path);
     }
-    const base = await this.#base();
+    const base = await this.base();
     if (base?.entry(path) !== undefined) this.#tombstones.add(path);
     this.#persist();
   }
@@ -409,7 +410,7 @@ export class LayeredFs {
       if (known === path || known.startsWith(prefix)) this.#paths.delete(known);
     for (const known of this.#dirs)
       if (known === path || known.startsWith(prefix)) this.#dirs.delete(known);
-    const base = await this.#base();
+    const base = await this.base();
     if (base !== undefined && (base.entry(path) !== undefined || base.isDirectory(path)))
       this.#tombstones.add(path);
     this.#persist();
@@ -435,7 +436,7 @@ export class LayeredFs {
       if (place.at === "none" && !recursive && this.#deleted(parentOf(relative)))
         throw failure("ENOENT", path);
       await this.#overlay.mkdir(path, { recursive: true });
-      this.#revive(relative, await this.#base());
+      this.#revive(relative, await this.base());
       this.#remember(`${relative}/`);
       this.#persist();
       return undefined;
@@ -476,7 +477,7 @@ export class LayeredFs {
       if (relative === undefined) return this.#overlay.symlink(target, path);
       await this.#ensureParent(path, relative);
       await this.#overlay.symlink(target, path);
-      this.#revive(relative, await this.#base());
+      this.#revive(relative, await this.base());
       this.#remember(relative);
       this.#persist();
     },
@@ -509,7 +510,7 @@ export class LayeredFs {
   async files(dir: string): Promise<string[]> {
     const path = this.#relative(dir);
     if (path === undefined) return [];
-    const base = await this.#base();
+    const base = await this.base();
     // A file names itself.
     if (
       path !== "" &&
@@ -557,7 +558,7 @@ export class LayeredFs {
       return true;
     };
     const files = await this.files(dir);
-    const base = await this.#base();
+    const base = await this.base();
     const fromBase = files.flatMap((path) => {
       if (this.#paths.has(path)) return [];
       const entry = base?.entry(path);
