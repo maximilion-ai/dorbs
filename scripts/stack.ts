@@ -382,6 +382,13 @@ export const startStack = async (options: StackOptions) => {
     OPENROUTER_API_KEY: options.model.openrouterKey ?? "",
     OPENCODE_API_KEY: options.model.opencodeKey ?? "",
     MODELS: options.model.listed ?? "",
+    // celld reads only .dev.vars, so the GitHub App reaches it here; alchemy dev inherits it from the environment.
+    ...(process.env.GITHUB_APP_ID === undefined
+      ? {}
+      : { GITHUB_APP_ID: process.env.GITHUB_APP_ID }),
+    ...(process.env.GITHUB_APP_PRIVATE_KEY === undefined
+      ? {}
+      : { GITHUB_APP_PRIVATE_KEY: process.env.GITHUB_APP_PRIVATE_KEY }),
   };
   const workerRuntime = runtime();
   const bootAt = performance.now();
