@@ -47,6 +47,8 @@ pub struct Settings {
     pub setup_timeout: Duration,
     pub check_timeout: Duration,
     pub test_timeout: Duration,
+    /// How long a complete check's answer serves the same request again; zero never.
+    pub remember_checks: Duration,
     /// How many checks and tests run at once across environments; each environment runs one at a time.
     pub run_slots: usize,
     pub replicas: usize,
@@ -183,6 +185,7 @@ pub fn load() -> Result<Settings, String> {
         setup_timeout: timeout("SETUP_TIMEOUT", Duration::from_secs(1200))?,
         check_timeout: timeout("CHECK_TIMEOUT", Duration::from_secs(300))?,
         test_timeout: timeout("TEST_TIMEOUT", Duration::from_secs(600))?,
+        remember_checks: timeout("REMEMBER_CHECKS", Duration::from_secs(600))?,
         run_slots: parsed("RUN_SLOTS", 4)?,
         replicas: parsed("REPLICAS", 1)?,
         limits: Limits {
