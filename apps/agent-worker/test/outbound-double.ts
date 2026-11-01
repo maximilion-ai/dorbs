@@ -52,6 +52,16 @@ export const makeOutboundDouble = () => {
   const fixtureCommit = makeRepo(NodePath.join(gitRoot, "fixture.git"), FIXTURE);
   NodeFS.mkdirSync(NodePath.join(gitRoot, "test"));
   makeRepo(NodePath.join(gitRoot, "test/github.git"), FIXTURE);
+  // 2,000 distinct files in 20 directories, for the workspace cost bounds in cost.test.ts.
+  makeRepo(
+    NodePath.join(gitRoot, "large.git"),
+    Object.fromEntries(
+      Array.from({ length: 2000 }, (_, at) => [
+        `pkg${at % 20}/src/f${at}.ts`,
+        `export const value${at} = ${at};\n${"// filler\n".repeat(200)}`,
+      ]),
+    ),
+  );
   const git = serveGit(gitRoot);
 
   const github = githubDouble({

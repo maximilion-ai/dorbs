@@ -5,7 +5,13 @@ import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 
-import type { AcpConnection, AcpSession, ChatGptAccount, GitHubTokens } from "./src/worker.ts";
+import type {
+  AcpConnection,
+  AcpSession,
+  ChatGptAccount,
+  GitHubTokens,
+  RepoBase,
+} from "./src/worker.ts";
 
 export const Worker = Cloudflare.Worker("AgentWorker", {
   main: "./src/worker.ts",
@@ -16,6 +22,9 @@ export const Worker = Cloudflare.Worker("AgentWorker", {
     AcpConnection: Cloudflare.DurableObject<AcpConnection>("AcpConnection"),
     AcpSession: Cloudflare.DurableObject<AcpSession>("AcpSession"),
     GitHubTokens: Cloudflare.DurableObject<GitHubTokens>("GitHubTokens"),
+    // Repos at a commit, stored once and shared by the sessions that clone them; RepoBase leases their builds.
+    Bases: Cloudflare.R2.Bucket("Bases", {}),
+    RepoBase: Cloudflare.DurableObject<RepoBase>("RepoBase"),
     // The ChatGPT subscription MODEL_PROVIDER=chatgpt signs in with; `pnpm chatgpt-login` connects it.
     ChatGptAccount: Cloudflare.DurableObject<ChatGptAccount>("ChatGptAccount"),
     AGENT_TOKEN: Config.Redacted("AGENT_TOKEN"),
@@ -45,7 +54,7 @@ export const Worker = Cloudflare.Worker("AgentWorker", {
       Config.withDefault("https://api.github.com"),
     ),
     // Days a session may sit idle before its history, workspace and Pi session are deleted.
-    SESSION_RETENTION_DAYS: Config.String("SESSION_RETENTION_DAYS").pipe(Config.withDefault("30")),
+    SESSION_RETENTION_DAYS: Config.String("SESSION_RETENTION_DAYS").pipe(Config.withDefault("7")),
     ALCHEMY_DEV: Alchemy.ALCHEMY_DEV,
   },
   dev: { port: 8787 },

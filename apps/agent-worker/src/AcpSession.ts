@@ -12,7 +12,8 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 
 import * as GitHub from "./GitHub.ts";
 import { tokenCache } from "./GitHubTokens.ts";
-import type { Touched } from "./git.ts";
+import { openBase } from "./base.ts";
+import { LayeredFs, type OverlayState } from "./layered.ts";
 import type { Loop, LoopHost } from "./Loop.ts";
 import { ModelChoices, ModelProvider, type ModelUnavailable } from "./ModelProvider.ts";
 import { makeOpenCodeLoop } from "./OpenCodeLoop.ts";
@@ -28,7 +29,8 @@ import {
   type SessionRecord,
   type StreamedRun,
 } from "./session.ts";
-import type { ToolHost } from "./tools.ts";
+import { overlayFs } from "./overlay.ts";
+import { type ToolHost, WORKSPACE_ROOT } from "./tools.ts";
 import * as Checker from "./Checker.ts";
 
 export type ModelLayer = (
@@ -39,11 +41,11 @@ const RECORD_KEY = "acp/session";
 const ATTACHED_KEY = "acp/attached";
 const PROMPTS_KEY = "acp/prompts";
 const CLONE_KEY = "workspace/clone";
-const TOUCHED_KEY = "workspace/touched";
+const OVERLAY_KEY = "workspace/overlay";
 /** The Lifecycle job that deletes this session once it has been idle for the retention period. */
 const RETIRE = "retire";
 const DAY_MS = 24 * 60 * 60 * 1000;
-const RetentionDays = Config.Int("SESSION_RETENTION_DAYS").pipe(Config.withDefault(30));
+const RetentionDays = Config.Int("SESSION_RETENTION_DAYS").pipe(Config.withDefault(7));
 /** The agent loop new sessions run on. */
 const HarnessConfig = Config.Literals(["pi", "opencode"], "HARNESS").pipe(Config.withDefault("pi"));
 /** Whether the runtime ends an event's storage transactions and RPCs with the event: celld does, workerd does not. */
@@ -68,10 +70,23 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
       ).pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(this.env)))),
     );
 
-    readonly workspace = new Workspace({
+    readonly workspace: Workspace = new Workspace({
       storage: this.ctx.storage,
-      git: createGitClient(),
+      // isomorphic-git works on the layered view, so a commit or a status reads through to the base.
+      git: createGitClient({ adapter: async () => ({ promises: this.fs.promises }) }),
       defaultGitIdentity: { name: "dorbs agent", email: "agent@dorbs.invalid" },
+    });
+
+    /** The repo as the session sees it: what it wrote over the shared base of its clone. */
+    readonly fs: LayeredFs = new LayeredFs({
+      overlay: overlayFs(this.workspace.provider()),
+      root: WORKSPACE_ROOT,
+      state: this.ctx.storage.kv.get<OverlayState>(OVERLAY_KEY),
+      save: (state) => this.ctx.storage.kv.put(OVERLAY_KEY, state),
+      base: async () => {
+        const base = this.ctx.storage.kv.get<Checker.Clone>(CLONE_KEY)?.base;
+        return base === undefined ? undefined : openBase(this.env.Bases, base);
+      },
     });
 
     readonly toolHost: ToolHost = {
@@ -79,13 +94,12 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
       repos: () => this.runtime.runPromise(Effect.service(Repos.Repos)),
       clone: () => this.ctx.storage.kv.get<Checker.Clone>(CLONE_KEY),
       saveClone: (clone) => this.ctx.storage.kv.put(CLONE_KEY, clone),
-      touched: () => this.ctx.storage.kv.get<Touched>(TOUCHED_KEY) ?? [],
-      touch: (paths) => {
-        const current = this.ctx.storage.kv.get<Touched>(TOUCHED_KEY) ?? [];
-        const next =
-          paths === "all" || current === "all" ? "all" : [...new Set([...current, ...paths])];
-        this.ctx.storage.kv.put(TOUCHED_KEY, next);
+      fs: this.fs,
+      bases: {
+        bucket: this.env.Bases,
+        lease: (prefix) => this.env.RepoBase.getByName(prefix),
       },
+      holder: () => nameOf(this.ctx),
       check: (clone, change, only) =>
         this.runtime.runPromise(
           Effect.flatMap(Effect.service(Checker.Checker), (checker) =>
@@ -154,11 +168,9 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
       this.ctx.abort("Retired after its retention period", { retryAlarm: false });
     }
 
-    /** Deletes this session now, as retirement would after the retention period. */
+    /** Retires this session now rather than after the retention period: its alarm deletes it. */
     async purge(): Promise<void> {
-      await this.ctx.storage.deleteAlarm();
-      await this.ctx.storage.deleteAll();
-      this.ctx.abort("Purged", { retryAlarm: false });
+      await this.lifecycle.jobs.push({ id: RETIRE, fn: RETIRE, time: Date.now() });
     }
 
     readonly history = (() => {

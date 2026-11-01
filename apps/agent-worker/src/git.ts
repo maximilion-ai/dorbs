@@ -3,13 +3,13 @@ import type { GitCliResult } from "@cloudflare/computer/git";
 
 import { parseArgv } from "./argv.ts";
 import type { Clone } from "./Checker.ts";
-
-/** Repo paths the agent's tools wrote since the clone, or "all" once a git command may have changed any file. */
-export type Touched = ReadonlyArray<string> | "all";
+import type { LayeredFs } from "./layered.ts";
 
 /** The cloned repo git runs in, and how pushes reach origin. */
 export type GitContext = {
   readonly workspace: Workspace;
+  /** The repo as the session sees it; its changes since the clone bound what status, diff and add look at. */
+  readonly fs: LayeredFs;
   readonly dir: string;
   readonly clone: Clone;
   /** Records a branch this session's push created on origin. */
@@ -18,20 +18,15 @@ export type GitContext = {
   readonly url: string | undefined;
   /** Credentials for origin's url; see GitHub's headers. */
   readonly headers: (url: string) => Promise<Readonly<Record<string, string>> | undefined>;
-  readonly touched: () => Touched;
-  readonly touch: (paths: Touched) => void;
 };
 
-// Subcommands that change no file in the work tree; any other may, so it widens what later commands look at to all.
-const LEAVES_FILES = new Set([
+// What the git tool runs. Each reads a bounded set of files: the changed ones, or objects. A command that would
+// rewrite or walk the whole work tree, such as checkout of another commit, reset --hard or stash, is refused.
+const READS = new Set([
   "status",
   "diff",
   "log",
   "show",
-  "add",
-  "commit",
-  "push",
-  "branch",
   "rev-parse",
   "ls-files",
   "ls-tree",
@@ -40,7 +35,6 @@ const LEAVES_FILES = new Set([
   "describe",
   "shortlog",
   "blame",
-  "grep",
   "reflog",
   "show-ref",
   "merge-base",
@@ -48,12 +42,42 @@ const LEAVES_FILES = new Set([
   "--help",
   "-h",
 ]);
+const WRITES = new Set([
+  "add",
+  "commit",
+  "push",
+  "branch",
+  "rm",
+  "mv",
+  "restore",
+  "checkout",
+  "switch",
+]);
+const REFUSED: Readonly<Record<string, string>> = {
+  reset: "Unstage with git restore --staged <path>, and undo a change with git restore <path>.",
+  stash: "Commit your work on a branch instead.",
+  merge: "Work on one branch from the clone.",
+  rebase: "Work on one branch from the clone.",
+  "cherry-pick": "Work on one branch from the clone.",
+  revert: "Edit the files back, then commit.",
+  clean: "Delete files one by one with git rm or by writing them.",
+  grep: "Use the grep tool, which searches the repo.",
+  worktree: "The workspace has one work tree.",
+};
 
-/** Whether `checkout -b x` or `switch -c x` only makes a branch at HEAD, which leaves every file as it is. */
-const onlyBranches = (subcommand: string, args: ReadonlyArray<string>): boolean => {
-  if (subcommand !== "checkout" && subcommand !== "switch") return false;
-  const creates = args.some((arg) => ["-b", "-B", "-c", "-C"].includes(arg));
-  return creates && args.filter((arg) => !arg.startsWith("-")).length === 1;
+/** The branch `checkout -b x`, `switch -c x` and their -B and -C forms make at HEAD, when that is all they do. */
+const newBranch = (subcommand: string, args: ReadonlyArray<string>): string | undefined => {
+  if (subcommand !== "checkout" && subcommand !== "switch") return undefined;
+  const flag = args.findIndex((arg) => ["-b", "-B", "-c", "-C"].includes(arg));
+  if (flag === -1) return undefined;
+  const rest = args.filter((_, at) => at !== flag);
+  return rest.length === 1 && !rest[0]?.startsWith("-") ? rest[0] : undefined;
+};
+
+/** The paths after `--` in a command line, or every argument that is not a flag when it has no `--`. */
+const pathArgs = (args: ReadonlyArray<string>): ReadonlyArray<string> => {
+  const dashes = args.indexOf("--");
+  return dashes === -1 ? args.filter((arg) => !arg.startsWith("-")) : args.slice(dashes + 1);
 };
 
 /** The blob ids a git index records, by path; dorbs's clone and isomorphic-git write version 2. */
@@ -72,9 +96,6 @@ const indexOids = (index: Uint8Array): ReadonlyMap<string, string> => {
   return oids;
 };
 
-const bytesOf = async (stream: ReadableStream<Uint8Array>): Promise<Uint8Array> =>
-  new Uint8Array(await new Response(stream).arrayBuffer());
-
 /**
  * git status over the paths the agent changed, printed as Computer's git prints it. A whole-repo status walks every
  * file and holds every index and tree entry at once, which a large repo's cannot afford in 128 MB.
@@ -84,8 +105,8 @@ const scopedStatus = async (
   paths: ReadonlyArray<string>,
   args: ReadonlyArray<string>,
 ): Promise<string> => {
-  const { workspace, dir } = context;
-  const stage = indexOids(await bytesOf(await workspace.fs.readFile(`${dir}/.git/index`)));
+  const { workspace, fs, dir } = context;
+  const stage = indexOids(await fs.readBytes(`${dir}/.git/index`));
   const trees = new Map<string, ReadonlyMap<string, string>>();
   const headOid = async (path: string): Promise<string | undefined> => {
     const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
@@ -99,13 +120,13 @@ const scopedStatus = async (
   };
   const lines: string[] = [];
   for (const path of [...paths].toSorted()) {
-    const stat = await workspace.fs.lstat(`${dir}/${path}`).catch(() => undefined);
+    const stat = await fs.lstat(`${dir}/${path}`);
     const content =
       stat === undefined
         ? undefined
-        : stat.isSymbolicLink
-          ? await workspace.fs.readlink(`${dir}/${path}`)
-          : await bytesOf(await workspace.fs.readFile(`${dir}/${path}`));
+        : stat.isSymbolicLink()
+          ? String(await fs.promises.readlink(`${dir}/${path}`))
+          : await fs.readBytes(`${dir}/${path}`);
     const work =
       content === undefined ? undefined : await workspace.git.hashObject({ dir, content });
     const head = await headOid(path);
@@ -127,19 +148,30 @@ const scopedStatus = async (
 };
 
 /**
- * The command line to run with whole-repo forms narrowed to the paths the agent changed: `diff` without paths,
- * `add -A` or `add .`, and `commit -a`, which stages them first.
+ * The command line to run with whole-repo forms narrowed to the paths the agent changed: `diff` without paths, and
+ * `add -A`, `add .` or `add <directory>`, which become the changed paths in them.
  */
-const narrowed = (
+const narrowed = async (
   argv: ReadonlyArray<string>,
   paths: ReadonlyArray<string>,
-): ReadonlyArray<string> => {
+  context: GitContext,
+): Promise<ReadonlyArray<string>> => {
   const [subcommand, ...args] = argv;
   if (subcommand === "diff" && !args.includes("--")) return [...argv, "--", ...paths];
-  if (subcommand === "add" && args.some((arg) => ["-A", "--all", "."].includes(arg))) {
-    return ["add", ...args.filter((arg) => !["-A", "--all", "."].includes(arg)), "--", ...paths];
+  if (subcommand !== "add") return argv;
+  const flags = args.filter((arg) => arg.startsWith("-") && !["-A", "--all", "--"].includes(arg));
+  const all = args.some((arg) => ["-A", "--all"].includes(arg));
+  const wanted = all ? [] : pathArgs(args);
+  const picked = new Set<string>();
+  for (const arg of all ? ["."] : wanted) {
+    const dir = arg.replace(/^\.\/?/u, "").replace(/\/+$/u, "");
+    const stat = await context.fs.lstat(dir === "" ? context.dir : `${context.dir}/${dir}`);
+    if (stat?.isDirectory() !== false || dir === "") {
+      for (const path of paths)
+        if (dir === "" || path === dir || path.startsWith(`${dir}/`)) picked.add(path);
+    } else picked.add(dir);
   }
-  return argv;
+  return ["add", ...flags, "--", ...picked];
 };
 
 /** `commit -a`, `-am` and `--all` without the stage-all flag, or undefined when the commit has none. */
@@ -299,23 +331,44 @@ export const git = async (line: string, context: GitContext): Promise<string> =>
     return failed(`git does not take paths in the repo's git directory, such as ${gitPath}.`);
   }
   if (subcommand === "push") return push(args, context);
+  if (subcommand !== undefined && subcommand in REFUSED) {
+    return failed(`git ${subcommand} is not available here. ${REFUSED[subcommand]}`);
+  }
+  if (subcommand !== undefined && !READS.has(subcommand) && !WRITES.has(subcommand)) {
+    return failed(`git ${subcommand} is not available here.`);
+  }
   const run = async (line: ReadonlyArray<string>) =>
     cliText(await context.workspace.git.cli({ argv: [...line], cwd: context.dir }));
-  if (
-    subcommand !== undefined &&
-    !LEAVES_FILES.has(subcommand) &&
-    !onlyBranches(subcommand, args)
-  ) {
-    context.touch("all");
+  const branch = subcommand === undefined ? undefined : newBranch(subcommand, args);
+  if (branch !== undefined) {
+    // A new branch at HEAD changes no file, so it only writes refs; checkout would walk the whole work tree.
+    const made = await context.workspace.git.cli({ argv: ["branch", branch], cwd: context.dir });
+    if (made.exitCode !== 0) return cliText(made);
+    await context.fs.promises.writeFile(`${context.dir}/.git/HEAD`, `ref: refs/heads/${branch}\n`);
+    return `Switched to a new branch '${branch}'`;
   }
-  const touched = context.touched();
-  if (touched === "all") return run(argv);
-  if (subcommand === "status") return scopedStatus(context, touched, args);
+  if (
+    (subcommand === "checkout" || subcommand === "switch") &&
+    !(subcommand === "checkout" && args.includes("--"))
+  ) {
+    return failed(
+      "Only new branches at HEAD (git checkout -b <name>) and restoring paths (git checkout -- <path>) are available; switching to another commit would rewrite the whole work tree.",
+    );
+  }
+  if (
+    (subcommand === "rm" || subcommand === "mv" || subcommand === "restore") &&
+    pathArgs(args).length === 0
+  ) {
+    return failed(`git ${subcommand} needs the paths it acts on.`);
+  }
+  const { written, deleted } = await context.fs.changes();
+  const changed = [...written, ...deleted].toSorted();
+  if (subcommand === "status") return scopedStatus(context, changed, args);
   if (subcommand === "commit") {
     const rest = withoutCommitAll(args);
-    if (rest !== undefined && touched.length > 0) {
+    if (rest !== undefined && changed.length > 0) {
       const staged = await context.workspace.git.cli({
-        argv: ["add", "--", ...touched],
+        argv: ["add", "--", ...changed],
         cwd: context.dir,
       });
       if (staged.exitCode !== 0) return cliText(staged);
@@ -323,10 +376,10 @@ export const git = async (line: string, context: GitContext): Promise<string> =>
     }
     if (rest !== undefined) return run(["commit", ...rest]);
   }
-  if ((subcommand === "diff" || subcommand === "add") && touched.length === 0) {
-    return subcommand === "diff"
-      ? "(no output)"
-      : run(argv.filter((arg) => !["-A", "--all", "."].includes(arg)));
+  if (subcommand === "diff" && changed.length === 0) return "(no output)";
+  if (subcommand === "add") {
+    const line = await narrowed(argv, changed, context);
+    return line.length <= 2 && line[line.length - 1] === "--" ? "(no output)" : run(line);
   }
-  return run(narrowed(argv, touched));
+  return run(await narrowed(argv, changed, context));
 };

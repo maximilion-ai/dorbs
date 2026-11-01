@@ -71,7 +71,9 @@ const harness = (name: string, loop: "pi" | "opencode", include: ReadonlyArray<s
           AcpSession: { className: "AcpSession", useSQLite: true },
           GitHubTokens: { className: "GitHubTokens", useSQLite: true },
           ChatGptAccount: { className: "ChatGptAccount", useSQLite: true },
+          RepoBase: { className: "RepoBase", useSQLite: true },
         },
+        r2Buckets: ["Bases"],
         bindings: {
           AGENT_TOKEN: "agent-token",
           CHECK_URL: "http://checker.test",
@@ -109,7 +111,12 @@ export default defineConfig({
   test: {
     // Each project has its own doubles, whose request log and held check its tests assert on.
     projects: [
-      harness("pi", "pi", ["src/**/*.test.ts", "test/acp.test.ts", "test/clone.test.ts"]),
+      harness("pi", "pi", [
+        "src/**/*.test.ts",
+        "test/acp.test.ts",
+        "test/clone.test.ts",
+        "test/cost.test.ts",
+      ]),
       // The ACP behaviours again with OpenCode as the agent loop, then what only OpenCode has to show.
       harness("opencode", "opencode", ["test/acp.test.ts"]),
       // Minting under both loops, apart from the suites above, whose tokens sessions share.
