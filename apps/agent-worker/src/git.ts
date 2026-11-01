@@ -154,9 +154,14 @@ const updateIndex = async (
     return [{ path, bytes }];
   });
   // Git sorts entries by the bytes of their paths.
-  const sorted = [...records, ...added].toSorted((a, b) =>
-    NodeBuffer.Buffer.compare(NodeBuffer.Buffer.from(a.path), NodeBuffer.Buffer.from(b.path)),
-  );
+  // Git sorts entries by the bytes of their paths; each is encoded once.
+  const keyed = [...records, ...added].map((record) => ({
+    record,
+    key: encoder.encode(record.path),
+  }));
+  const sorted = keyed
+    .toSorted((a, b) => NodeBuffer.Buffer.compare(a.key, b.key))
+    .map(({ record }) => record);
   const header = new Uint8Array(12);
   header.set(encoder.encode("DIRC"));
   new DataView(header.buffer).setUint32(4, 2);
@@ -609,19 +614,21 @@ const restored = async (
   source ??= staged ? "HEAD" : undefined;
   if (specs.length === 0) return failed(`git ${subcommand} needs the paths it acts on.`);
   const wanted = specs.map((spec) => specPath(spec, dir));
-  const tree = source === undefined ? undefined : treeReader(context, source);
-  if (
-    source !== undefined &&
-    (await context.workspace.git.revParse({ dir, ref: source }).catch(() => undefined)) ===
-      undefined
-  )
+  // The commit itself: isomorphic-git's tree listing takes no HEAD~1 and the like, and a listing that fails reads
+  // as an empty tree, which would remove every path.
+  const commit =
+    source === undefined
+      ? undefined
+      : await context.workspace.git.revParse({ dir, ref: source }).catch(() => undefined);
+  if (source !== undefined && commit === undefined)
     return failed(`fatal: could not resolve '${source}'`);
+  const tree = commit === undefined ? undefined : treeReader(context, commit);
   // A file the source holds counts even when nothing else does, such as one deleted since that commit; a directory
   // counts as the files under it.
   const fromSource = new Set<string>();
   const collect = async (path: string): Promise<void> => {
     const entries = await context.workspace.git
-      .lsTree({ dir, ref: source ?? "HEAD", path })
+      .lsTree({ dir, ref: commit ?? "HEAD", path })
       .catch(() => []);
     for (const entry of entries) {
       if (fromSource.size > MAX_PATHS) return;
@@ -660,8 +667,11 @@ const restored = async (
       `git ${subcommand} would restore ${picked.length} paths; restore at most ${MAX_PATHS} at once.`,
     );
   const from = new Map<string, Entry | undefined>();
-  for (const path of picked)
-    from.set(path, tree === undefined ? changes.stage.get(path) : await tree(path));
+  for (const path of picked) {
+    const entry = tree === undefined ? changes.stage.get(path) : await tree(path);
+    // checkout <rev> leaves a path the revision lacks; only restore removes it.
+    if (entry !== undefined || subcommand === "restore") from.set(path, entry);
+  }
   if (staged) await updateIndex(context, from);
   if (worktree)
     for (const [path, entry] of from)
