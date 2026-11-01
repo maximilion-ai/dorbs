@@ -295,7 +295,9 @@ id = "vite-plus package manager"
 run = "{install.offline} --filter . && node_modules/.bin/vp exec true"
 phase = "online"
 key = ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"]
-when = { vars = { "pm.name" = "pnpm" }, contains = [{ file = "package.json", regex = '"vite-plus"\s*:' }] }
+when = { vars = { "pm.name" = "pnpm" }, contains = [
+  { file = "package.json", regex = '"vite-plus"\s*:' },
+] }
 
 [[setup]]
 id = "install"
