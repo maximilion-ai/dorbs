@@ -2,7 +2,15 @@
 priority = 40
 detect = ["package.json"]
 ignore = ["**/node_modules/**"]
-commit_only = [".npmrc", ".yarnrc", ".yarnrc.yml", ".yarn/**", ".pnpmfile.cjs", "pnpm-workspace.yaml", "bunfig.toml"]
+commit_only = [
+  ".npmrc",
+  ".yarnrc",
+  ".yarnrc.yml",
+  ".yarn/**",
+  ".pnpmfile.cjs",
+  "pnpm-workspace.yaml",
+  "bunfig.toml",
+]
 
 # Node with corepack's pnpm and yarn shims, and bun.
 image = '''
@@ -185,7 +193,9 @@ workspace_test = "npm test -w {dir} --"
 
 # The install: online into the manager's cache, then offline from it, frozen when there is a lockfile.
 [[let.install]]
-when = { vars = { "pm.name" = "pnpm" }, exists = [".pnpmfile.cjs"], contains = [
+when = { vars = { "pm.name" = "pnpm" }, exists = [
+  ".pnpmfile.cjs",
+], contains = [
   { file = "pnpm-lock.yaml", regex = '(?m)^pnpmfileChecksum:' },
 ] }
 # A lockfile that records its pnpmfile's checksum installs only with it, so both steps read the commit's .pnpmfile.cjs
