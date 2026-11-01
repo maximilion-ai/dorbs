@@ -158,6 +158,8 @@ const up = async () => {
     DOCKER_HOST: process.env.DOCKER_HOST ?? `unix:///run/user/${UID}/docker.sock`,
     ...(appId === undefined ? {} : { GITHUB_APP_ID: appId }),
     CHECK_TIMEOUT: "10 minutes",
+    // Every run sends the same requests; remembered answers would make the second one free.
+    REMEMBER_CHECKS: "0",
     DISK_BUDGET: String(24 * 1024 ** 3),
     CONTAINER_PREFIX: PREFIX,
     CHECK_TOKEN_FILE: TOKEN_FILE,

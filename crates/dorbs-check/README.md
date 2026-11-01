@@ -23,6 +23,8 @@ Every route requires `Authorization: Bearer $CHECK_TOKEN` and answers 401 otherw
 - Either may answer `SetupFailed` with the failed step's output, or `Rejected`: `UnknownRepo`, `UnknownCommit`, `NoRecipe`, `UnknownChecks`, `NoTestCommand` or `UnsafePath`. A failed fetch answers 502; an image that does not build, 503.
 - `GET /environments` lists the environments, their state and bytes on disk.
 
+A complete check answers the same environment, commit, change and checks again from memory for `REMEMBER_CHECKS` (10 minutes; 0 never). Tests always run.
+
 ## Recipes
 
 A recipe says how to set a repo up, check it and test it. Four layers make it; for setup, checks and test, the first that says something wins:
