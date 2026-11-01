@@ -309,6 +309,8 @@ export const readPack = (
     const base = byOid.get(entry.base);
     if (base === undefined) continue;
     const resolved = applyDelta(base.data, entry.delta);
+    inflated += resolved.length;
+    if (inflated > limit) throw new PackTooLarge(`the pack inflates past ${limit} bytes`);
     add({
       oid: objectId(base.type, resolved),
       type: base.type,
