@@ -1,7 +1,11 @@
 import type { Workspace } from "@cloudflare/computer";
 import type { GitCliResult } from "@cloudflare/computer/git";
 
+import * as NodeBuffer from "node:buffer";
+import * as NodeCrypto from "node:crypto";
+
 import { parseArgv } from "./argv.ts";
+import type { Base } from "./base.ts";
 import type { Clone } from "./Checker.ts";
 import {
   isBranchName,
@@ -89,44 +93,220 @@ const pathArgs = (args: ReadonlyArray<string>): ReadonlyArray<string> => {
   return dashes === -1 ? args.filter((arg) => !arg.startsWith("-")) : args.slice(dashes + 1);
 };
 
-/** A path's index entry: its blob id and mode. */
-type Staged = { readonly oid: string; readonly mode: number };
+/** A path's entry in the index, a tree or the work tree: its object id and mode. */
+type Entry = { readonly oid: string; readonly mode: number };
 
-/** The entries a git index records, by path; dorbs's clone and isomorphic-git write version 2. */
-const indexEntries = (index: Uint8Array): ReadonlyMap<string, Staged> => {
+const same = (a: Entry | undefined, b: Entry | undefined): boolean =>
+  a?.oid === b?.oid && a?.mode === b?.mode;
+
+const hexOf = (bytes: Uint8Array): string =>
+  Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+
+const indexPath = (context: GitContext) => `${context.dir}/.git/index`;
+
+/** Each entry of a version 2 git index, as dorbs's clone and isomorphic-git write it, with its bytes. */
+const indexRecords = (
+  index: Uint8Array,
+): ReadonlyArray<{ readonly path: string; readonly entry: Entry; readonly bytes: Uint8Array }> => {
   const view = new DataView(index.buffer, index.byteOffset, index.byteLength);
-  const entries = new Map<string, Staged>();
+  if (view.getUint32(4) !== 2)
+    throw new Error(`git index version ${view.getUint32(4)} is not supported`);
+  const records = [];
   let at = 12;
   for (let n = view.getUint32(8); n > 0; n -= 1) {
-    const oid = Array.from(index.subarray(at + 40, at + 60), (byte) =>
-      byte.toString(16).padStart(2, "0"),
-    ).join("");
     const length = view.getUint16(at + 60) & 0xfff;
-    const path = new TextDecoder().decode(index.subarray(at + 62, at + 62 + length));
-    entries.set(path, { oid, mode: view.getUint32(at + 24) });
-    at += Math.ceil((62 + length + 1) / 8) * 8;
+    const size = Math.ceil((62 + length + 1) / 8) * 8;
+    records.push({
+      path: new TextDecoder().decode(index.subarray(at + 62, at + 62 + length)),
+      entry: { oid: hexOf(index.subarray(at + 40, at + 60)), mode: view.getUint32(at + 24) },
+      bytes: index.subarray(at, at + size),
+    });
+    at += size;
   }
-  return entries;
+  return records;
+};
+
+const indexEntries = (index: Uint8Array): ReadonlyMap<string, Entry> =>
+  new Map(indexRecords(index).map(({ path, entry }) => [path, entry]));
+
+/**
+ * Applies `updates` to the index in one write: each path gets its new entry, or leaves the index where the update is
+ * undefined. Computer's git rewrites the whole index once per path, megabytes each in a large repo. New entries carry
+ * no stats, so git hashes their files once to compare them.
+ */
+const updateIndex = async (
+  context: GitContext,
+  updates: ReadonlyMap<string, Entry | undefined>,
+): Promise<void> => {
+  const encoder = new TextEncoder();
+  const records = indexRecords(await context.fs.readBytes(indexPath(context))).filter(
+    (record) => !updates.has(record.path),
+  );
+  const added = [...updates].flatMap(([path, entry]) => {
+    if (entry === undefined) return [];
+    const name = encoder.encode(path);
+    const bytes = new Uint8Array(Math.ceil((62 + name.length + 1) / 8) * 8);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(24, entry.mode);
+    bytes.set(NodeBuffer.Buffer.from(entry.oid, "hex"), 40);
+    view.setUint16(60, Math.min(name.length, 0xfff));
+    bytes.set(name, 62);
+    return [{ path, bytes }];
+  });
+  // Git sorts entries by the bytes of their paths.
+  const sorted = [...records, ...added].toSorted((a, b) =>
+    NodeBuffer.Buffer.compare(NodeBuffer.Buffer.from(a.path), NodeBuffer.Buffer.from(b.path)),
+  );
+  const header = new Uint8Array(12);
+  header.set(encoder.encode("DIRC"));
+  new DataView(header.buffer).setUint32(4, 2);
+  new DataView(header.buffer).setUint32(8, sorted.length);
+  const body = NodeBuffer.Buffer.concat([header, ...sorted.map((record) => record.bytes)]);
+  const digest = NodeCrypto.createHash("sha1").update(body).digest();
+  // A new file, not the old one rewritten: isomorphic-git keeps the index it read until the file's stats change,
+  // and a rewrite within the same millisecond and size would leave it the stale copy.
+  await context.fs.promises.rm(indexPath(context), { force: true });
+  await context.fs.promises.writeFile(indexPath(context), NodeBuffer.Buffer.concat([body, digest]));
+};
+
+/** Looks paths up in `ref`'s tree, listing each directory once. */
+const treeReader = (context: GitContext, ref: string) => {
+  const trees = new Map<string, Promise<ReadonlyMap<string, Entry>>>();
+  return async (path: string): Promise<Entry | undefined> => {
+    const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+    let tree = trees.get(parent);
+    if (tree === undefined) {
+      tree = context.workspace.git
+        .lsTree({ dir: context.dir, ref, ...(parent === "" ? {} : { path: parent }) })
+        .catch(() => [])
+        .then(
+          (entries) =>
+            new Map(
+              entries.map((entry) => [
+                entry.path,
+                { oid: entry.oid, mode: Number.parseInt(entry.mode, 8) },
+              ]),
+            ),
+        );
+      trees.set(parent, tree);
+    }
+    return (await tree).get(path.slice(path.lastIndexOf("/") + 1));
+  };
+};
+
+/** What the work tree holds at `path` as git would stage it, or undefined when nothing is there. */
+const workEntry = async (
+  context: GitContext,
+  path: string,
+  staged: Entry | undefined,
+): Promise<Entry | undefined> => {
+  const { fs, dir, workspace } = context;
+  const stats = await fs.lstat(`${dir}/${path}`);
+  if (stats === undefined) return undefined;
+  // A gitlink is an empty directory in the work tree.
+  if (stats.isDirectory()) return staged?.mode === 0o160000 ? staged : undefined;
+  const link = stats.isSymbolicLink();
+  const content = link
+    ? String(await fs.promises.readlink(`${dir}/${path}`))
+    : await fs.readBytes(`${dir}/${path}`);
+  return {
+    oid: await workspace.git.hashObject({ dir, content }),
+    mode: link ? 0o120000 : (stats.mode & 0o111) === 0 ? 0o100644 : 0o100755,
+  };
+};
+
+/** The bytes of blob `oid`, from the base when it holds it. */
+const blobBytes = async (context: GitContext, oid: string): Promise<Uint8Array> => {
+  const base = await context.fs.base();
+  const entry = base?.blobEntry(oid);
+  if (base !== undefined && entry !== undefined) return base.read(entry);
+  return looseObject(
+    await context.fs.readBytes(`${context.dir}/.git/objects/${oid.slice(0, 2)}/${oid.slice(2)}`),
+  ).data;
+};
+
+/** Puts `entry` in the work tree at `path`, or removes what is there when it is undefined. */
+const writeWork = async (context: GitContext, path: string, entry: Entry | undefined) => {
+  const { fs, dir } = context;
+  const original = (await fs.base())?.entry(path);
+  if (
+    entry !== undefined &&
+    original !== undefined &&
+    same(entry, { oid: original.oid, mode: Number.parseInt(original.mode, 8) })
+  ) {
+    // Back to the base's file: the overlay drops its copy, and nothing is copied.
+    await fs.revert(`${dir}/${path}`);
+    return;
+  }
+  await fs.promises.rm(`${dir}/${path}`, { recursive: true, force: true });
+  if (entry === undefined || entry.mode === 0o160000) return;
+  const data = await blobBytes(context, entry.oid);
+  if (entry.mode === 0o120000)
+    await fs.promises.symlink(new TextDecoder().decode(data), `${dir}/${path}`);
+  else
+    await fs.promises.writeFile(`${dir}/${path}`, data, {
+      mode: (entry.mode & 0o111) === 0 ? 0o644 : 0o755,
+    });
+};
+
+/**
+ * The paths whose HEAD entry is not the base's: what the session's commits changed. Only trees the base lacks are
+ * listed, so this reads as many trees as the commits made.
+ */
+const headChanges = async (context: GitContext, base: Base): Promise<ReadonlyArray<string>> => {
+  const head = await context.workspace.git
+    .revParse({ dir: context.dir, ref: "HEAD" })
+    .catch(() => undefined);
+  if (head === undefined || head === base.manifest.commit) return [];
+  const changed: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    const entries = await context.workspace.git
+      .lsTree({ dir: context.dir, ref: "HEAD", ...(dir === "" ? {} : { path: dir }) })
+      .catch(() => []);
+    const names = new Set(entries.map((entry) => entry.path));
+    for (const entry of entries) {
+      const path = dir === "" ? entry.path : `${dir}/${entry.path}`;
+      if (entry.type === "tree") {
+        if (!(await base.hasObject(entry.oid))) await walk(path);
+        continue;
+      }
+      const original = base.entry(path);
+      if (original?.oid !== entry.oid || original.mode !== entry.mode) changed.push(path);
+    }
+    for (const name of base.children(dir) ?? []) {
+      if (names.has(name)) continue;
+      const gone = dir === "" ? name : `${dir}/${name}`;
+      for (const original of base.entries)
+        if (under(original.path, gone)) changed.push(original.path);
+    }
+  };
+  await walk("");
+  return changed;
 };
 
 /** What the agent changed since the clone. */
 type Changes = {
   readonly written: ReadonlyArray<string>;
   readonly deleted: ReadonlyArray<string>;
-  readonly stage: ReadonlyMap<string, Staged>;
-  /** Every path whose work tree file or index entry is not the base's. */
+  readonly stage: ReadonlyMap<string, Entry>;
+  /** Every path whose work tree file, index entry or HEAD entry is not the base's. */
   readonly changed: ReadonlyArray<string>;
 };
 
 const changesOf = async (context: GitContext): Promise<Changes> => {
   const { written, deleted } = await context.fs.changes();
-  const stage = indexEntries(await context.fs.readBytes(`${context.dir}/.git/index`));
+  const stage = indexEntries(await context.fs.readBytes(indexPath(context)));
   const base = await context.fs.base();
   const changed = new Set([...written, ...deleted]);
   if (base !== undefined) {
     // Staged and unstaged paths, which no file write shows, such as after git rm --cached.
-    for (const [path, { oid }] of stage) if (base.entry(path)?.oid !== oid) changed.add(path);
+    for (const [path, entry] of stage) {
+      const original = base.entry(path);
+      if (!same(entry, original && { oid: original.oid, mode: Number.parseInt(original.mode, 8) }))
+        changed.add(path);
+    }
     for (const entry of base.entries) if (!stage.has(entry.path)) changed.add(entry.path);
+    for (const path of await headChanges(context, base)) changed.add(path);
   }
   return { written, deleted, stage, changed: [...changed].toSorted() };
 };
@@ -159,38 +339,23 @@ const scopedStatus = async (
   { changed: paths, stage }: Changes,
   args: ReadonlyArray<string>,
 ): Promise<string> => {
-  const { workspace, fs, dir } = context;
-  const trees = new Map<string, ReadonlyMap<string, string>>();
-  const headOid = async (path: string): Promise<string | undefined> => {
-    const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-    if (!trees.has(parent)) {
-      const entries = await workspace.git
-        .lsTree({ dir, ref: "HEAD", ...(parent === "" ? {} : { path: parent }) })
-        .catch(() => []);
-      trees.set(parent, new Map(entries.map((entry) => [entry.path, entry.oid])));
-    }
-    return trees.get(parent)?.get(path.slice(path.lastIndexOf("/") + 1));
-  };
+  const head = treeReader(context, "HEAD");
+  const short = args.includes("-s") || args.includes("--short");
+  const v1 = args.some((arg) => arg === "--porcelain=v1" || arg === "--porcelain=1");
   const lines: string[] = [];
-  for (const path of [...paths].toSorted()) {
-    const stat = await fs.lstat(`${dir}/${path}`);
-    const content =
-      stat === undefined
-        ? undefined
-        : stat.isSymbolicLink()
-          ? String(await fs.promises.readlink(`${dir}/${path}`))
-          : await fs.readBytes(`${dir}/${path}`);
-    const work =
-      content === undefined ? undefined : await workspace.git.hashObject({ dir, content });
-    const head = await headOid(path);
-    const staged = stage.get(path)?.oid;
+  for (const path of paths) {
+    const staged = stage.get(path);
+    const [work, committed] = await Promise.all([workEntry(context, path, staged), head(path)]);
     // git's two columns: the index against HEAD, then the work tree against the index.
-    const index =
-      staged === head ? " " : head === undefined ? "A" : staged === undefined ? "D" : "M";
+    const index = same(staged, committed)
+      ? " "
+      : committed === undefined
+        ? "A"
+        : staged === undefined
+          ? "D"
+          : "M";
     const tree =
-      staged === undefined ? " " : work === undefined ? "D" : work === staged ? " " : "M";
-    const short = args.includes("-s") || args.includes("--short");
-    const v1 = args.some((arg) => arg === "--porcelain=v1" || arg === "--porcelain=1");
+      staged === undefined ? " " : work === undefined ? "D" : same(work, staged) ? " " : "M";
     if (index !== " " || tree !== " ")
       lines.push(short || v1 ? `${index}${tree} ${path}` : `1 ${index}${tree} ${path}`);
     // A file the index does not hold is untracked, beside the deletion git stages for it after rm --cached.
@@ -247,17 +412,14 @@ const stagePaths = async (
     if ((await context.fs.lstat(`${context.dir}/${path}`)) !== undefined) present.push(path);
     else if (changes.stage.has(path)) gone.push(path);
   }
-  for (const [argv, list] of [
-    [["add", ...flags], present],
-    [["rm", "--cached"], gone],
-  ] as const) {
-    if (list.length === 0) continue;
+  if (present.length > 0) {
     const result = await context.workspace.git.cli({
-      argv: [...argv, "--", ...list],
+      argv: ["add", ...flags, "--", ...present],
       cwd: context.dir,
     });
     if (result.exitCode !== 0) return result;
   }
+  if (gone.length > 0) await updateIndex(context, new Map(gone.map((path) => [path, undefined])));
   return undefined;
 };
 
@@ -288,7 +450,10 @@ const added = async (
   return result === undefined ? "(no output)" : cliText(result);
 };
 
-/** `rm`: drops tracked paths from the index and, without --cached, from the work tree. */
+/**
+ * `rm`: drops tracked paths from the index and, without --cached, from the work tree. As git does, it refuses to lose
+ * work that only the index or the work tree holds, unless forced.
+ */
 const removed = async (
   args: ReadonlyArray<string>,
   changes: Changes,
@@ -300,6 +465,8 @@ const removed = async (
   );
   if (unknown !== undefined) return failed(`git rm does not take ${unknown} here.`);
   const recursive = flags.some((flag) => /^-[fq]*r/u.test(flag));
+  const force = flags.some((flag) => flag === "--force" || /^-[rq]*f/u.test(flag));
+  const cached = flags.includes("--cached");
   const paths: string[] = [];
   for (const spec of pathArgs(args).map((arg) => specPath(arg, context.dir))) {
     const tracked = [...changes.stage.keys()].filter((path) => under(path, spec));
@@ -312,18 +479,35 @@ const removed = async (
     return failed(
       `git rm would remove ${paths.length} paths; remove at most ${MAX_PATHS} at once.`,
     );
-  const result = await context.workspace.git.cli({
-    argv: ["rm", "--cached", "--", ...paths],
-    cwd: context.dir,
-  });
-  if (result.exitCode !== 0) return cliText(result);
-  if (!flags.includes("--cached"))
+  if (!force) {
+    const head = treeReader(context, "HEAD");
+    for (const path of paths) {
+      const staged = changes.stage.get(path);
+      const work = await workEntry(context, path, staged);
+      const stagedChanged = !same(staged, await head(path));
+      const workChanged = work !== undefined && !same(work, staged);
+      if (cached && stagedChanged && workChanged)
+        return failed(
+          `error: the following file has staged content different from both the\nfile and the HEAD:\n    ${path}\n(use -f to force removal)`,
+        );
+      if (!cached && stagedChanged)
+        return failed(
+          `error: the following file has changes staged in the index:\n    ${path}\n(use --cached to keep the file, or -f to force removal)`,
+        );
+      if (!cached && workChanged)
+        return failed(
+          `error: the following file has local modifications:\n    ${path}\n(use --cached to keep the file, or -f to force removal)`,
+        );
+    }
+  }
+  await updateIndex(context, new Map(paths.map((path) => [path, undefined])));
+  if (!cached)
     for (const path of paths)
       await context.fs.promises.rm(`${context.dir}/${path}`, { force: true });
   return paths.map((path) => `rm '${path}'`).join("\n");
 };
 
-/** `mv` of a tracked file or directory: copies it in the work tree, then moves its index entries along. */
+/** `mv` of a tracked file or directory: moves its work tree files, and its index entries as they are. */
 const moved = async (
   args: ReadonlyArray<string>,
   changes: Changes,
@@ -372,15 +556,22 @@ const moved = async (
       );
   }
   await fs.promises.rm(`${dir}/${source}`, { recursive: true, force: true });
-  const after = await changesOf(context);
-  const result = await stagePaths([...tracked, ...tracked.map(targetOf)], after, context);
-  return result === undefined ? "(no output)" : cliText(result);
+  await updateIndex(
+    context,
+    new Map(
+      tracked.flatMap((file) => [
+        [file, undefined],
+        [targetOf(file), changes.stage.get(file)],
+      ]),
+    ),
+  );
+  return "(no output)";
 };
 
 /**
- * `restore` and `checkout -- <paths>`: puts changed paths back as the index has them, the index back as HEAD has
- * it with --staged, or both from HEAD for `checkout HEAD -- <paths>`. Paths the base holds unchanged come back from
- * the base, so restoring copies nothing.
+ * `restore` and `checkout [<rev>] -- <paths>`, cut to the changed paths they name. The source is the index, or HEAD
+ * with --staged, or the revision given; the destinations are the work tree, the index with --staged, or both. A path
+ * the source lacks leaves the destinations. Paths the base holds unchanged come back from the base, copying nothing.
  */
 const restored = async (
   subcommand: "restore" | "checkout",
@@ -388,7 +579,7 @@ const restored = async (
   changes: Changes,
   context: GitContext,
 ): Promise<string> => {
-  const { fs, dir, workspace } = context;
+  const { fs, dir } = context;
   let staged = false;
   let worktree = false;
   let source: string | undefined;
@@ -408,6 +599,7 @@ const restored = async (
   }
   if (subcommand === "checkout" && source !== undefined) staged = worktree = true;
   if (!staged) worktree = true;
+  source ??= staged ? "HEAD" : undefined;
   if (specs.length === 0) return failed(`git ${subcommand} needs the paths it acts on.`);
   const wanted = specs.map((spec) => specPath(spec, dir));
   for (const spec of wanted)
@@ -422,43 +614,21 @@ const restored = async (
     return failed(
       `git ${subcommand} would restore ${picked.length} paths; restore at most ${MAX_PATHS} at once.`,
     );
-  if (picked.length === 0)
-    return subcommand === "checkout" ? "Updated 0 paths from the index" : "(no output)";
-  if (source !== undefined && source !== "HEAD") {
-    // From another commit Computer's checkout puts both back; with the paths cut to changed ones it reads no more.
-    const result = await workspace.git.cli({
-      argv: ["checkout", source, "--", ...picked],
-      cwd: dir,
-    });
-    return cliText(result);
-  }
-  let stage = changes.stage;
-  if (staged) {
-    const result = await workspace.git.cli({ argv: ["reset", "--", ...picked], cwd: dir });
-    if (result.exitCode !== 0) return cliText(result);
-    stage = (await changesOf(context)).stage;
-  }
-  if (worktree) {
-    const base = await fs.base();
-    for (const path of picked) {
-      const entry = stage.get(path);
-      if (entry === undefined) continue;
-      const original = base?.entry(path);
-      if (original?.oid === entry.oid && Number.parseInt(original.mode, 8) === entry.mode) {
-        await fs.revert(`${dir}/${path}`);
-        continue;
-      }
-      const object = `${dir}/.git/objects/${entry.oid.slice(0, 2)}/${entry.oid.slice(2)}`;
-      const { data } = looseObject(await fs.readBytes(object));
-      await fs.promises.rm(`${dir}/${path}`, { recursive: true, force: true });
-      if (entry.mode === 0o120000)
-        await fs.promises.symlink(new TextDecoder().decode(data), `${dir}/${path}`);
-      else
-        await fs.promises.writeFile(`${dir}/${path}`, data, {
-          mode: (entry.mode & 0o111) === 0 ? 0o644 : 0o755,
-        });
-    }
-  }
+  const tree = source === undefined ? undefined : treeReader(context, source);
+  if (
+    source !== undefined &&
+    (await context.workspace.git.revParse({ dir, ref: source }).catch(() => undefined)) ===
+      undefined
+  )
+    return failed(`fatal: could not resolve '${source}'`);
+  const from = new Map<string, Entry | undefined>();
+  for (const path of picked)
+    from.set(path, tree === undefined ? changes.stage.get(path) : await tree(path));
+  if (staged) await updateIndex(context, from);
+  if (worktree)
+    for (const [path, entry] of from)
+      // From the index, a path it lacks is untracked, and restore leaves it be.
+      if (entry !== undefined || source !== undefined) await writeWork(context, path, entry);
   return subcommand === "checkout"
     ? `Updated ${picked.length} paths from the index`
     : "(no output)";
@@ -514,41 +684,63 @@ const BRANCH_PREFIX = "dorbs/";
 
 const ZERO = "0".repeat(40);
 
+const loosePath = (context: GitContext, oid: string) =>
+  `${context.dir}/.git/objects/${oid.slice(0, 2)}/${oid.slice(2)}`;
+
 /**
- * The objects origin lacks to take `tip`: the ones the session wrote since the clone, walked from `tip` down to the
- * base, which origin has. `seen` holds every object the walk reached, base ones included.
+ * The objects reachable from `tip` that origin lacks: walked from `tip` down to the base, which origin has, and to
+ * `stop`, which it has from an earlier push. Commits and trees come with their data; blobs only by id, so a long
+ * history of large files is never held at once. `seen` holds every object the walk reached, stops included.
  */
 const newObjects = async (
   context: GitContext,
   tip: string,
+  stop: ReadonlySet<string>,
 ): Promise<{
-  readonly objects: ReadonlyArray<{ readonly type: ObjectType; readonly data: Uint8Array }>;
+  readonly objects: ReadonlyArray<{ readonly oid: string; readonly type: ObjectType }>;
   readonly seen: ReadonlySet<string>;
 }> => {
   const base = await context.fs.base();
-  const objects: { type: ObjectType; data: Uint8Array }[] = [];
+  const objects: { oid: string; type: ObjectType }[] = [];
   const seen = new Set<string>();
-  const pending = [tip];
-  for (let oid = pending.pop(); oid !== undefined; oid = pending.pop()) {
+  const pending: Array<{ oid: string; type: ObjectType }> = [{ oid: tip, type: "commit" }];
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    const { oid, type } = next;
     if (seen.has(oid)) continue;
     seen.add(oid);
-    if (base !== undefined && (await base.hasObject(oid))) continue;
-    const path = `${context.dir}/.git/objects/${oid.slice(0, 2)}/${oid.slice(2)}`;
-    const file = await context.fs.promises.readFile(path).catch(() => undefined);
+    if (stop.has(oid) || (base !== undefined && (await base.hasObject(oid)))) continue;
+    objects.push({ oid, type });
+    if (type === "blob") continue;
+    const file = await context.fs.promises.readFile(loosePath(context, oid)).catch(() => undefined);
     if (file === undefined || typeof file === "string")
       throw new Error(`the repo has no object ${oid}, which ${tip} needs`);
     const object = looseObject(file);
-    objects.push(object);
     if (object.type === "tree")
-      for (const entry of treeEntries(object.data))
-        if (entry.mode !== "160000") pending.push(entry.oid);
+      for (const entry of treeEntries(object.data)) {
+        if (entry.mode === "160000") continue;
+        pending.push({ oid: entry.oid, type: entry.mode === "40000" ? "tree" : "blob" });
+      }
     if (object.type === "commit")
-      for (const line of new TextDecoder().decode(object.data).split("\n\n")[0]?.split("\n") ?? [])
-        if (line.startsWith("tree ") || line.startsWith("parent "))
-          pending.push(line.split(" ")[1] ?? "");
+      for (const line of new TextDecoder().decode(object.data).split("\n\n")[0]?.split("\n") ??
+        []) {
+        const [key, value = ""] = line.split(" ");
+        if (key === "tree") pending.push({ oid: value, type: "tree" });
+        if (key === "parent") pending.push({ oid: value, type: "commit" });
+      }
   }
   return { objects, seen };
 };
+
+/** The objects, read and inflated one at a time as the pack streams. */
+async function* objectData(
+  context: GitContext,
+  objects: ReadonlyArray<{ readonly oid: string }>,
+): AsyncGenerator<{ readonly type: ObjectType; readonly data: Uint8Array }> {
+  for (const { oid } of objects) {
+    const file = await context.fs.readBytes(loosePath(context, oid));
+    yield looseObject(file);
+  }
+}
 
 /** Whether a path names the git directory or something in it, in any case. */
 export const isGitPath = (path: string): boolean =>
@@ -603,7 +795,14 @@ const push = async (args: ReadonlyArray<string>, context: GitContext): Promise<s
     }
     if (old === commit) return "Everything up-to-date";
     // Only what the session wrote goes: origin has the base, and a push that walked it would read the whole repo.
-    const { objects, seen } = await newObjects(context, commit);
+    const pushed =
+      old === undefined
+        ? new Set<string>()
+        : await newObjects(context, old, new Set()).then(
+            ({ seen }) => seen,
+            () => new Set<string>(),
+          );
+    const { objects, seen } = await newObjects(context, commit, pushed);
     if (old !== undefined && !seen.has(old)) {
       return failed(
         `Push rejected: origin's ${target} has commits ${source} does not. Push to a new branch, such as git push origin HEAD:${BRANCH_PREFIX}my-change.`,
@@ -612,7 +811,7 @@ const push = async (args: ReadonlyArray<string>, context: GitContext): Promise<s
     const refused = await receivePack(
       origin,
       { branch: target, old: old ?? ZERO, commit },
-      writePack(objects),
+      writePack(objects.length, objectData(context, objects)),
     );
     if (refused !== undefined) return failed(`Push rejected: ${refused}`);
   } catch (error) {

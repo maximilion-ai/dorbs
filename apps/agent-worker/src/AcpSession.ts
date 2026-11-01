@@ -12,7 +12,7 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 
 import * as GitHub from "./GitHub.ts";
 import { tokenCache } from "./GitHubTokens.ts";
-import { openBase, type Base } from "./base.ts";
+import { forgetBase, openBase, type Base } from "./base.ts";
 import { LayeredFs, type OverlayState } from "./layered.ts";
 import type { Loop, LoopHost } from "./Loop.ts";
 import { ModelChoices, ModelProvider, type ModelUnavailable } from "./ModelProvider.ts";
@@ -180,7 +180,12 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
       });
       const base = this.ctx.storage.kv.get<Checker.Clone>(CLONE_KEY)?.base;
       if (base === undefined || Date.now() - this.#baseUsedAt < HOUR_MS) return;
-      await this.env.RepoBase.getByName(base).used(base);
+      if (!(await this.env.RepoBase.getByName(base).used(base))) {
+        // Its deletion is under way: reads now fail with the reason rather than find parts missing.
+        this.#base = undefined;
+        forgetBase(base);
+        return;
+      }
       this.#baseUsedAt = Date.now();
     }
 

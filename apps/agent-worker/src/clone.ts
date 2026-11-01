@@ -56,10 +56,14 @@ export type Origin = {
   readonly headers: Readonly<Record<string, string>> | undefined;
 };
 
+/** A fetch whose pack, packed or inflated, outgrew the bytes its caller allowed; ask for fewer objects. */
+export class PackTooLarge extends Error {}
+
 const command = async (
   origin: Origin,
   name: string,
   args: ReadonlyArray<string>,
+  limit = Number.POSITIVE_INFINITY,
 ): Promise<Uint8Array> => {
   const body =
     pktLine(`command=${name}\n`) +
@@ -80,7 +84,19 @@ const command = async (
     body,
   });
   if (!response.ok) throw new Error(`origin answered HTTP ${response.status} to ${name}`);
-  return new Uint8Array(await response.arrayBuffer());
+  if (response.body === null) return new Uint8Array();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (let read = await reader.read(); !read.done; read = await reader.read()) {
+    received += read.value.length;
+    if (received > limit) {
+      await reader.cancel();
+      throw new PackTooLarge(`origin's answer to ${name} passed ${limit} bytes`);
+    }
+    chunks.push(read.value);
+  }
+  return concat(chunks);
 };
 
 /** The commit origin's HEAD points at and the branch it names. */
@@ -102,8 +118,14 @@ export const head = async (
 export const fetchPack = async (
   origin: Origin,
   args: ReadonlyArray<string>,
+  limit?: number,
 ): Promise<{ readonly pack: Uint8Array; readonly shallow: ReadonlyArray<string> }> => {
-  const response = await command(origin, "fetch", ["no-progress", "ofs-delta", ...args, "done"]);
+  const response = await command(
+    origin,
+    "fetch",
+    ["no-progress", "ofs-delta", ...args, "done"],
+    limit,
+  );
   const shallow: string[] = [];
   const chunks: Uint8Array[] = [];
   let section = "";
@@ -213,7 +235,10 @@ const objectId = (type: ObjectType, data: Uint8Array): string =>
   hex(sha1(encoder.encode(`${type} ${data.length}\0`), data));
 
 /** Every object in a pack, deltas resolved; refuses a pack whose trailing checksum does not match. */
-export const readPack = (pack: Uint8Array): ReadonlyArray<PackObject> => {
+export const readPack = (
+  pack: Uint8Array,
+  limit = Number.POSITIVE_INFINITY,
+): ReadonlyArray<PackObject> => {
   if (decoder.decode(pack.subarray(0, 4)) !== "PACK") throw new Error("not a packfile");
   const view = new DataView(pack.buffer, pack.byteOffset, pack.byteLength);
   const count = view.getUint32(8);
@@ -228,6 +253,7 @@ export const readPack = (pack: Uint8Array): ReadonlyArray<PackObject> => {
     byOid.set(object.oid, object);
   };
   let at = 12;
+  let inflated = 0;
   for (let n = 0; n < count; n += 1) {
     const offset = at;
     let next = pack[at++] ?? 0;
@@ -255,12 +281,16 @@ export const readPack = (pack: Uint8Array): ReadonlyArray<PackObject> => {
     }
     const { data, used } = inflateAt(pack, at);
     at += used;
+    inflated += data.length;
+    if (inflated > limit) throw new PackTooLarge(`the pack inflates past ${limit} bytes`);
     if (data.length !== size) throw new Error(`packfile object at ${offset} has the wrong size`);
     const crc = crc32(pack.subarray(offset, at));
     if (kind === 6) {
       const base = baseOffset === undefined ? undefined : byOffset.get(baseOffset);
       if (base === undefined) throw new Error(`packfile delta at ${offset} has no base`);
       const resolved = applyDelta(base.data, data);
+      inflated += resolved.length;
+      if (inflated > limit) throw new PackTooLarge(`the pack inflates past ${limit} bytes`);
       add({ oid: objectId(base.type, resolved), type: base.type, data: resolved, offset, crc });
     } else if (kind === 7) {
       waiting.push({ offset, end: at, base: baseOid ?? "", delta: data });
@@ -432,25 +462,45 @@ export const looseObject = (
   return { type, data: raw.subarray(nul + 1) };
 };
 
-/** A packfile of whole objects, as receive-pack takes them. */
+/** A packfile of `count` whole objects, as receive-pack takes them, streamed as `objects` yields them. */
 export const writePack = (
-  objects: ReadonlyArray<{ readonly type: ObjectType; readonly data: Uint8Array }>,
-): Uint8Array => {
-  const header = new Uint8Array(12);
-  header.set(encoder.encode("PACK"));
-  new DataView(header.buffer).setUint32(4, 2);
-  new DataView(header.buffer).setUint32(8, objects.length);
-  const parts: Uint8Array[] = [header];
-  for (const { type, data } of objects) {
-    const head = [(TYPE_CODES[type] << 4) | (data.length & 15)];
-    for (let size = data.length >>> 4; size > 0; size >>>= 7) {
-      head[head.length - 1] = (head.at(-1) ?? 0) | 0x80;
-      head.push(size & 0x7f);
-    }
-    parts.push(Uint8Array.from(head), pako.deflate(data));
-  }
-  const body = concat(parts);
-  return concat([body, sha1(body)]);
+  count: number,
+  objects: AsyncIterable<{ readonly type: ObjectType; readonly data: Uint8Array }>,
+): ReadableStream<Uint8Array> => {
+  const hash = NodeCrypto.createHash("sha1");
+  const iterator = objects[Symbol.asyncIterator]();
+  let started = false;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const emit = (bytes: Uint8Array) => {
+        hash.update(bytes);
+        controller.enqueue(bytes);
+      };
+      if (!started) {
+        started = true;
+        const header = new Uint8Array(12);
+        header.set(encoder.encode("PACK"));
+        new DataView(header.buffer).setUint32(4, 2);
+        new DataView(header.buffer).setUint32(8, count);
+        emit(header);
+        return;
+      }
+      const next = await iterator.next();
+      if (next.done === true) {
+        controller.enqueue(new Uint8Array(hash.digest()));
+        controller.close();
+        return;
+      }
+      const { type, data } = next.value;
+      const head = [(TYPE_CODES[type] << 4) | (data.length & 15)];
+      for (let size = data.length >>> 4; size > 0; size >>>= 7) {
+        head[head.length - 1] = (head.at(-1) ?? 0) | 0x80;
+        head.push(size & 0x7f);
+      }
+      emit(Uint8Array.from(head));
+      emit(pako.deflate(data));
+    },
+  });
 };
 
 /** The branches origin advertises to a push, by name, with the commits they point at. */
@@ -482,7 +532,7 @@ export const isBranchName = (name: string): boolean =>
 export const receivePack = async (
   origin: Origin,
   update: { readonly branch: string; readonly old: string; readonly commit: string },
-  pack: Uint8Array,
+  pack: ReadableStream<Uint8Array>,
 ): Promise<string | undefined> => {
   if (!isBranchName(update.branch)) throw new Error(`${update.branch} is not a branch name`);
   const command = pktLine(
@@ -496,7 +546,11 @@ export const receivePack = async (
       "user-agent": "git/dorbs",
       ...origin.headers,
     },
-    body: concat([encoder.encode(`${command}0000`), pack]),
+    body: pack.pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({
+        start: (controller) => controller.enqueue(encoder.encode(`${command}0000`)),
+      }),
+    ),
   });
   if (!response.ok) return `origin answered HTTP ${response.status}`;
   const lines = [...pktLines(new Uint8Array(await response.arrayBuffer()))].flatMap((pkt) =>
