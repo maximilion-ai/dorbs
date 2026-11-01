@@ -83,7 +83,7 @@ export const makeOutboundDouble = () => {
         ]),
       ),
   };
-  // A real repo for test/bench.test.ts, from a bare clone the bench is run with.
+  // A real repo for test/bench.ts, from a bare clone the bench is run with.
   const bench = process.env["DORBS_BENCH_REPO"];
   if (bench !== undefined) NodeFS.symlinkSync(bench, NodePath.join(gitRoot, "bench.git"));
   const ensureLazy = (pathname: string) => {

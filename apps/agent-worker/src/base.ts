@@ -15,11 +15,9 @@ import { isGitPath } from "./git.ts";
 import { filesWith, indexPart, type Plan } from "./words.ts";
 
 /**
- * A repo at one commit, stored once in R2 and shared by the sessions that clone it, so no session's SQLite holds
- * the repo. Under `base2/<repo>/<commit>/`: `files.json.gz` (entries by path), the commit's trees as `<pack>.pack`
- * and `.idx`, and `manifest.json`, written last. File contents sit in parts of about 8 MB, each with a word index
- * beside it for grep. A base reuses the parts of the repo's latest base for the files it shares with it, so a clone
- * after main moved fetches only the changed files.
+ * A repo at one commit in R2, shared by its sessions: under `base2/<repo>/<commit>/`, `files.json.gz`, the trees pack
+ * and `manifest.json`, written last. Contents sit in ~8 MB parts, each with a word index for grep; a base reads the
+ * parts of the repo's latest base for the files they share, so a clone after main moved fetches only what changed.
  */
 
 // A build holds about a part, a fetch's pack and its blobs at once, and a Worker has 128 MB.
@@ -108,7 +106,7 @@ export const latestBase = async (bucket: R2Bucket, repo: string): Promise<string
   (await bucket.get(latestKey(repo)))?.text();
 
 /** The base a part was written by, which keeps it. */
-export const ownerOf = (key: string): string => key.slice(0, key.lastIndexOf("/content-"));
+const ownerOf = (key: string): string => key.slice(0, key.lastIndexOf("/content-"));
 
 const gzip = async (bytes: Uint8Array): Promise<Uint8Array> =>
   new Uint8Array(
@@ -169,6 +167,17 @@ export const buildBase = async (
   for (const oid of blobs) {
     const entry = parent?.blobEntry(oid);
     if (entry !== undefined) held.set(oid, entry);
+  }
+  // A link into the git directory would let a read of the work tree reach the git config; the parent checked its own
+  // links, not files of its that are links here.
+  for (const oid of links) {
+    const entry = held.get(oid);
+    if (
+      entry !== undefined &&
+      parent !== undefined &&
+      isGitPath(new TextDecoder().decode(await parent.read(entry)))
+    )
+      throw new Error(`a symbolic link in ${repo} points into a git directory`);
   }
   const heldParts = new Set([...held.values()].map((entry) => entry.part ?? 0));
   const heldBytes = [...held.values()].reduce((sum, entry) => sum + entry.size, 0);

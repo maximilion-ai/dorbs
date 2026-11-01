@@ -94,10 +94,9 @@ const r2 = (bucket: R2Bucket) => {
     value: async (key: string, options?: R2GetOptions) => {
       gets += 1;
       const object = await get(key, options);
-      bytes +=
-        object === null
-          ? 0
-          : ((options?.range as { length?: number } | undefined)?.length ?? object.size);
+      const range = options?.range;
+      const length = range !== undefined && "length" in range ? range.length : undefined;
+      bytes += object === null ? 0 : (length ?? object.size);
       return object;
     },
   });

@@ -874,6 +874,142 @@ const push = async (args: ReadonlyArray<string>, context: GitContext): Promise<s
   return `Pushed ${target} to origin at ${commit}`;
 };
 
+const SUMMARIES = new Set(["--stat", "--name-only", "--name-status"]);
+const FORMATS = (arg: string): boolean =>
+  arg === "--oneline" || arg.startsWith("--format") || arg.startsWith("--pretty");
+
+/**
+ * What a commit changed against its parent: as a diff, or as `summary` (--stat, --name-only, --name-status) prints
+ * it. The clone's own commit has no parent in the clone, so it gets a note.
+ */
+const commitChanges = async (
+  context: GitContext,
+  commit: string,
+  summary: ReadonlyArray<string>,
+  paths: ReadonlyArray<string>,
+): Promise<string> => {
+  if (commit === context.clone.commit)
+    return "(This is the commit the repo was cloned at; its parent is not in the clone, so its changes are not shown.)";
+  const line = await narrowedDiff(
+    [...summary, `${commit}~1`, commit, ...(paths.length === 0 ? [] : ["--", ...paths])],
+    await changesOf(context),
+    context,
+  );
+  if (line === undefined) return "";
+  return cliText(await context.workspace.git.cli({ argv: [...line], cwd: context.dir }));
+};
+
+/** git show: a commit with its changes, or a file at a revision as `rev:path`. */
+const shown = async (args: ReadonlyArray<string>, context: GitContext): Promise<string> => {
+  const dashes = args.indexOf("--");
+  const before = dashes === -1 ? args : args.slice(0, dashes);
+  const paths = dashes === -1 ? [] : args.slice(dashes + 1);
+  const options = before.filter((arg) => arg.startsWith("-"));
+  const [rev = "HEAD", ...more] = before.filter((arg) => !arg.startsWith("-"));
+  const unknown = options.filter((arg) => !SUMMARIES.has(arg) && !FORMATS(arg));
+  if (more.length > 0 || unknown.length > 0)
+    return failed(
+      `git show takes one revision, --stat, --name-only, --name-status and --oneline; not ${[...more, ...unknown].join(" ")}.`,
+    );
+  const colon = rev.indexOf(":");
+  if (colon !== -1) {
+    const [ref, path] = [rev.slice(0, colon) || "HEAD", rev.slice(colon + 1).replace(/^\.\//u, "")];
+    // isomorphic-git's tree lookup takes no HEAD~1.
+    const commit = await context.workspace.git
+      .revParse({ dir: context.dir, ref })
+      .catch(() => undefined);
+    if (commit === undefined) return failed(`fatal: bad revision '${ref}'`);
+    const entry = await treeReader(context, commit)(path);
+    if (entry === undefined) return failed(`fatal: path '${path}' does not exist in '${ref}'`);
+    if (entry.mode === 0o40000)
+      return failed(`${path} is a directory in ${ref}; list it with git ls-tree ${ref} ${path}/`);
+    return new TextDecoder().decode(await blobBytes(context, entry.oid));
+  }
+  const commit = await context.workspace.git
+    .revParse({ dir: context.dir, ref: rev })
+    .catch(() => undefined);
+  if (commit === undefined) return failed(`fatal: bad revision '${rev}'`);
+  const header = cliText(
+    await context.workspace.git.cli({
+      argv: ["log", "-n", "1", ...options.filter(FORMATS), commit],
+      cwd: context.dir,
+    }),
+  );
+  const changes = await commitChanges(
+    context,
+    commit,
+    options.filter((arg) => SUMMARIES.has(arg)),
+    paths,
+  );
+  return changes === "" ? header : `${header}\n\n${changes}`;
+};
+
+/** git log with --stat, --name-only or --name-status: each commit, then what it changed. */
+const loggedWithChanges = async (
+  args: ReadonlyArray<string>,
+  context: GitContext,
+): Promise<string> => {
+  const summary = args.filter((arg) => SUMMARIES.has(arg));
+  const formats = args.filter(FORMATS);
+  const listed = await context.workspace.git.cli({
+    argv: ["log", ...args.filter((arg) => !SUMMARIES.has(arg) && !FORMATS(arg)), "--format=%H"],
+    cwd: context.dir,
+  });
+  if (listed.exitCode !== 0) return cliText(listed);
+  const out: string[] = [];
+  for (const commit of listed.stdout.split("\n").filter((line) => line !== "")) {
+    const header = cliText(
+      await context.workspace.git.cli({
+        argv: ["log", "-n", "1", ...formats, commit],
+        cwd: context.dir,
+      }),
+    );
+    const changes = await commitChanges(context, commit, summary, []);
+    out.push(changes === "" ? header : `${header}\n${changes}`);
+  }
+  return out.join("\n\n") || "(no output)";
+};
+
+/** The names of the branches under a refs directory, nested ones as `a/b`. */
+const refNames = async (context: GitContext, dir: string): Promise<string[]> => {
+  const names = await context.fs.promises.readdir(dir).catch(() => []);
+  const out: string[] = [];
+  for (const name of names) {
+    const stats = await context.fs.lstat(`${dir}/${name}`);
+    if (stats?.isDirectory() === true)
+      out.push(...(await refNames(context, `${dir}/${name}`)).map((nested) => `${name}/${nested}`));
+    else out.push(name);
+  }
+  return out.toSorted();
+};
+
+/** git branch -a or -r: the local branches, unless -r, then origin's as the clone last saw them. */
+const branchesWithRemotes = async (
+  args: ReadonlyArray<string>,
+  context: GitContext,
+): Promise<string> => {
+  const remotesOnly = args.includes("-r") || args.includes("--remotes");
+  const local = remotesOnly
+    ? []
+    : (await context.workspace.git.cli({ argv: ["branch"], cwd: context.dir })).stdout
+        .trimEnd()
+        .split("\n")
+        .filter((line) => line !== "");
+  const prefix = remotesOnly ? "  " : "  remotes/";
+  const remote = [];
+  for (const name of await refNames(context, `${context.dir}/.git/refs/remotes/origin`)) {
+    if (name !== "HEAD") {
+      remote.push(`${prefix}origin/${name}`);
+      continue;
+    }
+    const target = String(
+      await context.fs.promises.readFile(`${context.dir}/.git/refs/remotes/origin/HEAD`, "utf8"),
+    );
+    remote.push(`${prefix}origin/HEAD -> ${target.trim().replace(/^ref: refs\/remotes\//u, "")}`);
+  }
+  return [...local, ...remote].join("\n") || "(no output)";
+};
+
 /** Runs one git command line in the cloned repo and returns what the model reads. */
 export const git = async (line: string, context: GitContext): Promise<string> => {
   let argv: ReadonlyArray<string>;
@@ -928,6 +1064,19 @@ export const git = async (line: string, context: GitContext): Promise<string> =>
     return failed(
       "git diff --cached is not available here. git status shows the staged paths, and git diff HEAD -- <path> shows a path's changes since the last commit.",
     );
+  if (subcommand === "show") return shown(args, context);
+  if (subcommand === "log") {
+    // The clone's only other branches are the agent's own, which start at the clone's commit.
+    const rest = args.filter((arg) => arg !== "--all" && arg !== "--branches");
+    return rest.some((arg) => SUMMARIES.has(arg))
+      ? loggedWithChanges(rest, context)
+      : run(["log", ...rest]);
+  }
+  if (
+    subcommand === "branch" &&
+    args.some((arg) => ["-a", "--all", "-r", "--remotes"].includes(arg))
+  )
+    return branchesWithRemotes(args, context);
   // Only commands that compare the work tree, the index and HEAD read the index and the change set.
   if (
     subcommand === undefined ||
@@ -936,8 +1085,22 @@ export const git = async (line: string, context: GitContext): Promise<string> =>
     return run(argv);
   const changes = await changesOf(context);
   switch (subcommand) {
-    case "status":
-      return scopedStatus(context, changes, args);
+    case "status": {
+      // -sb is -s -b.
+      const flags = args.flatMap((arg) =>
+        /^-[a-z]{2,}$/u.test(arg)
+          ? arg
+              .slice(1)
+              .split("")
+              .map((letter) => `-${letter}`)
+          : [arg],
+      );
+      const status = await scopedStatus(context, changes, flags);
+      if (!flags.includes("-b") && !flags.includes("--branch")) return status;
+      const branch = await context.workspace.git.currentBranch({ dir: context.dir });
+      const line = `## ${branch ?? "HEAD (no branch)"}`;
+      return status === "(no output)" ? line : `${line}\n${status}`;
+    }
     case "diff": {
       const line = await narrowedDiff(args, changes, context);
       return line === undefined ? "(no output)" : run(line);
