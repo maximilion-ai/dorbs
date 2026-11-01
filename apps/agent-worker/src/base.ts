@@ -375,12 +375,18 @@ const idxOids = (idx: Uint8Array): ReadonlySet<string> => {
 
 // One copy of each base per isolate, shared by the sessions it runs.
 const loaded = new Map<string, Promise<Base | undefined>>();
-const LOADED_MAX = 4;
+// Each holds a repo's entries and generated index, about 20 MB at T3 Code's size, in a 128 MB isolate.
+const LOADED_MAX = 2;
 
 /** The base at `prefix`, or undefined while its manifest is missing. */
 export const openBase = (bucket: R2Bucket, prefix: string): Promise<Base | undefined> => {
   const cached = loaded.get(prefix);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) {
+    // Least recently used goes first.
+    loaded.delete(prefix);
+    loaded.set(prefix, cached);
+    return cached;
+  }
   const opening = (async () => {
     const manifest = await bucket.get(`${prefix}/manifest.json`);
     if (manifest === null) return undefined;

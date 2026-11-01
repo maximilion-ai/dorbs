@@ -443,6 +443,8 @@ export class LayeredFs {
     if (path === undefined) return this.#overlay.unlink(absolute);
     const place = await this.#place(absolute);
     if (place.at === "none") throw failure("ENOENT", absolute);
+    if (this.#dirs.has(path) || (place.at === "base" && place.base.isDirectory(path)))
+      throw failure("EISDIR", absolute);
     if (place.at === "overlay") {
       await this.#overlay.unlink(absolute);
       this.#paths.delete(path);
@@ -460,9 +462,11 @@ export class LayeredFs {
         this.#overlay.rmdir(absolute, { recursive: true }));
       return;
     }
-    if (this.#inOverlay(path) && path !== "") {
+    if (this.#inOverlay(path)) {
       await (this.#overlay.rm?.(absolute, { recursive: true, force: true }) ??
         this.#overlay.rmdir(absolute, { recursive: true }));
+      // The repo root stays, empty, as a clone that starts over expects.
+      if (path === "") await this.#overlay.mkdir(absolute, { recursive: true });
     }
     const prefix = `${path}/`;
     for (const known of this.#paths)
