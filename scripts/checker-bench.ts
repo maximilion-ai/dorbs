@@ -1,6 +1,6 @@
 // The checker's benchmark on its host: fixed checks and tests from the celld2 eval's PRs, sent at once as the Worker
-// sends them, to a bench instance under 4 CPUs and 12 GiB. BENCH_DIR (~/dorbs-checker-bench) holds its files.
-//   node scripts/checker-bench.ts up [--binary PATH] | run [--label NAME] | down [--purge]
+// sends them, to a bench instance under 4 CPUs and 16 GiB. BENCH_DIR (~/dorbs-checker-bench) holds its files.
+//   node scripts/checker-bench.ts up [--binary PATH] [--recipe FILE] | run [--label NAME] | down [--purge]
 // up starts the unit dorbs-checker-bench on port 8791, run writes results/<time>-<label>.json, down stops it.
 
 import * as NodeChildProcess from "node:child_process";
@@ -37,7 +37,7 @@ const JOBS: ReadonlyArray<readonly ["check" | "test", number, string]> = [
   ["test", 112, "8c36e9db70aa3d0311b5ea8ed6ee6c6785185467"],
 ];
 
-const BUDGET = { cpus: 4, mib: 12 * 1024 };
+const BUDGET = { cpus: 4, mib: 16 * 1024 };
 const UNIT = "dorbs-checker-bench";
 const PREFIX = "dorbsbench";
 const PORT = 8791;
@@ -50,11 +50,15 @@ const ENV_FILE = NodePath.join(DIR, "checker.env");
 const ROOT = NodePath.resolve(import.meta.dirname, "..");
 const UID = process.getuid?.() ?? 0;
 const CGROUP_USER = `/sys/fs/cgroup/user.slice/user-${UID}.slice/user@${UID}.service`;
+/** With SLICE=1, the service and its containers run in this slice, which holds the whole budget. */
+const SLICE = "dorbs-checker-bench.slice";
+const SLICE_FILE = NodePath.join(HOME, ".config/systemd/user", SLICE);
 
 const { positionals, values } = NodeUtil.parseArgs({
   allowPositionals: true,
   options: {
     binary: { type: "string" },
+    recipe: { type: "string" },
     label: { type: "string" },
     purge: { type: "boolean" },
   },
@@ -71,7 +75,9 @@ const quiet = (command: string, args: ReadonlyArray<string>) =>
   NodeChildProcess.spawnSync(command, args, { encoding: "utf8" });
 
 // up takes REPLICAS (1), RUN_SLOTS (1), CONTAINER_CPUS (3.5), CONTAINER_MEMORY and SETUP_MEMORY (10240m), and for
-// the service's own unit SERVICE_CPU (50%) and SERVICE_MEMORY (768M); it refuses limits past the budget.
+// the service's own unit SERVICE_CPU (50%) and SERVICE_MEMORY (768M); it refuses limits past the budget. With SLICE=1
+// the budget holds as one slice around the service and every container instead, so each may use what the others
+// leave. --recipe gives the repo's registration that recipe, as an operator would.
 
 /** A Docker or systemd size such as 5632m, 6g or 768M, in MiB. */
 const mib = (size: string) => {
@@ -96,13 +102,14 @@ const up = async () => {
     cpu: process.env.SERVICE_CPU ?? "50%",
     memory: process.env.SERVICE_MEMORY ?? "768M",
   };
+  const slice = process.env.SLICE === "1";
   // One repo: each replica holds one container at a time, a setup step's or its own, and the egress proxy 256m.
-  const replicas = Number(limits.REPLICAS);
-  const cpus = replicas * Number(limits.CONTAINER_CPUS) + Number.parseFloat(service.cpu) / 100;
+  const replicas = slice ? 1 : Number(limits.REPLICAS);
+  const cpus =
+    replicas * Number(limits.CONTAINER_CPUS) + (slice ? 0 : Number.parseFloat(service.cpu) / 100);
   const memory =
     replicas * Math.max(mib(limits.CONTAINER_MEMORY), mib(limits.SETUP_MEMORY)) +
-    256 +
-    mib(service.memory);
+    (slice ? 0 : 256 + mib(service.memory));
   if (cpus > BUDGET.cpus || memory > BUDGET.mib) {
     throw new Error(
       `the limits take ${cpus} CPUs and ${memory} MiB, past ${JSON.stringify(BUDGET)}`,
@@ -122,14 +129,20 @@ const up = async () => {
   if (!NodeFS.existsSync(TOKEN_FILE)) {
     NodeFS.writeFileSync(TOKEN_FILE, NodeCrypto.randomBytes(32).toString("hex"), { mode: 0o600 });
   }
-  const production: ReadonlyArray<{ id: string }> = JSON.parse(
+  const production: ReadonlyArray<{ id: string; recipe?: unknown }> = JSON.parse(
     NodeFS.readFileSync(NodePath.join(HOME, "dorbs-checker/repos.json"), "utf8"),
   );
   const repos = NodePath.join(DIR, "repos.json");
   NodeFS.writeFileSync(
     repos,
     JSON.stringify(
-      production.filter((repo) => repo.id === REPO),
+      production
+        .filter((repo) => repo.id === REPO)
+        .map((repo) =>
+          values.recipe === undefined
+            ? repo
+            : { ...repo, recipe: JSON.parse(NodeFS.readFileSync(values.recipe, "utf8")) },
+        ),
       null,
       2,
     ),
@@ -150,6 +163,7 @@ const up = async () => {
     CHECK_TOKEN_FILE: TOKEN_FILE,
     DORBS_CHECK: binary,
     ...limits,
+    ...(slice ? { CONTAINER_CGROUP_PARENT: SLICE } : {}),
   };
   NodeFS.writeFileSync(
     ENV_FILE,
@@ -157,13 +171,22 @@ const up = async () => {
       .map(([key, value]) => `${key}=${value}`)
       .join("\n") + "\n",
   );
+  if (slice) {
+    NodeFS.mkdirSync(NodePath.dirname(SLICE_FILE), { recursive: true });
+    NodeFS.writeFileSync(
+      SLICE_FILE,
+      `[Slice]\nCPUQuota=${BUDGET.cpus * 100}%\nMemoryMax=${BUDGET.mib}M\nMemorySwapMax=0\n`,
+    );
+    sh("systemctl", ["--user", "daemon-reload"]);
+  }
   sh("systemd-run", [
     "--user",
     `--unit=${UNIT}`,
     "--collect",
     `--property=EnvironmentFile=${ENV_FILE}`,
-    `--property=CPUQuota=${service.cpu}`,
-    `--property=MemoryMax=${service.memory}`,
+    ...(slice
+      ? [`--slice=${SLICE}`]
+      : [`--property=CPUQuota=${service.cpu}`, `--property=MemoryMax=${service.memory}`]),
     "--property=KillMode=mixed",
     NodePath.join(DIR, "bin/start.sh"),
   ]);
@@ -175,7 +198,10 @@ const up = async () => {
   }
   console.log(
     `${UNIT} on port ${PORT}: ${limits.REPLICAS} replicas, ${limits.RUN_SLOTS} slots, ` +
-      `${limits.CONTAINER_CPUS} CPUs and ${limits.CONTAINER_MEMORY} each; service ${service.cpu}, ${service.memory}`,
+      `${limits.CONTAINER_CPUS} CPUs and ${limits.CONTAINER_MEMORY} each; ` +
+      (slice
+        ? `all in ${SLICE} (${BUDGET.cpus} CPUs, ${BUDGET.mib} MiB)`
+        : `service ${service.cpu}, ${service.memory}`),
   );
 };
 
@@ -189,7 +215,13 @@ const down = () => {
     "\n",
   );
   if (networks.some(Boolean)) sh("docker", ["network", "rm", ...networks.filter(Boolean)]);
-  if (values.purge === true) NodeFS.rmSync(DATA_DIR, { recursive: true, force: true });
+  if (values.purge === true) {
+    NodeFS.rmSync(DATA_DIR, { recursive: true, force: true });
+    if (NodeFS.existsSync(SLICE_FILE)) {
+      NodeFS.rmSync(SLICE_FILE);
+      sh("systemctl", ["--user", "daemon-reload"]);
+    }
+  }
   console.log(`${UNIT} stopped${values.purge === true ? ", its data removed" : ""}`);
 };
 
@@ -279,6 +311,7 @@ type Answer = {
   durationMs?: number | undefined;
   setupMs?: number | undefined;
   overlayMs?: number | undefined;
+  queueMs?: number | undefined;
   checks?: ReadonlyArray<CheckRun>;
   status?: string | undefined;
   passed?: number | undefined;
@@ -321,6 +354,20 @@ type JobResult = {
   reason?: unknown;
 };
 
+const timing = (result: Answer): { runMs?: number; queueMs?: number } => {
+  if (result.durationMs === undefined) return {};
+  const fixed = (result.setupMs ?? 0) + (result.overlayMs ?? 0);
+  const checksMs = result.checks?.reduce((sum, run) => sum + run.durationMs, 0);
+  if (result.queueMs !== undefined) {
+    return {
+      queueMs: result.queueMs,
+      runMs: Math.round(checksMs ?? result.durationMs - fixed - result.queueMs),
+    };
+  }
+  if (checksMs === undefined) return {};
+  return { runMs: Math.round(checksMs), queueMs: Math.round(result.durationMs - fixed - checksMs) };
+};
+
 /** Posts a job and polls for its answer, as the Worker's Checker does. */
 const submit = async (job: Job, started: number): Promise<JobResult> => {
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -357,19 +404,9 @@ const submit = async (job: Job, started: number): Promise<JobResult> => {
     durationMs: result.durationMs,
     setupMs: result.setupMs,
     overlayMs: result.overlayMs,
-    // durationMs counts from the request's arrival, so for a check what its runs, setup and overlay leave is the
-    // wait for a replica and a slot. A test answers no time of its own run.
-    ...(result.checks === undefined || result.durationMs === undefined
-      ? {}
-      : {
-          runMs: Math.round(result.checks.reduce((sum, run) => sum + run.durationMs, 0)),
-          queueMs: Math.round(
-            result.durationMs -
-              (result.setupMs ?? 0) -
-              (result.overlayMs ?? 0) -
-              result.checks.reduce((sum, run) => sum + run.durationMs, 0),
-          ),
-        }),
+    // durationMs counts from the request's arrival. A checker that answers queueMs says what its runs took; for
+    // one that does not, a check's runs leave the queue, and a test's run stays unknown.
+    ...timing(result),
     ...(result.checks === undefined
       ? {}
       : {
@@ -441,6 +478,17 @@ const sampler = () => {
   const samples: Array<[number, number, number]> = [];
   const t0 = performance.now();
   let previous = { at: t0, usage: 0 };
+  // A container's cgroup, from its main process; found once, as it lives as long as the container.
+  const cgroups = new Map<string, string>();
+  const cgroupOf = (id: string) => {
+    if (!cgroups.has(id)) {
+      const pid = quiet("docker", ["inspect", "-f", "{{.State.Pid}}", id]).stdout.trim();
+      const path = /^0::(.*)$/m.exec(quiet("cat", [`/proc/${pid}/cgroup`]).stdout)?.[1];
+      if (path === undefined) return undefined;
+      cgroups.set(id, `/sys/fs/cgroup${path}`);
+    }
+    return cgroups.get(id);
+  };
   let known: ReadonlyArray<[string, string]> = [];
   const list = () => {
     known = sh("docker", [
@@ -461,13 +509,19 @@ const sampler = () => {
   list();
   const zero = { usage: 0, throttled: 0, oomKills: 0 };
   for (const [id, name] of known) {
-    const now = counters(`${CGROUP_USER}/user.slice/docker-${id}.scope`);
+    const cgroup = cgroupOf(id);
+    const now = cgroup === undefined ? undefined : counters(cgroup);
     if (now !== undefined) containers.set(id, { name, first: now, last: now, peak: 0 });
   }
+  const slice = `${CGROUP_USER}/${SLICE}`;
+  const sliced = { first: counters(slice), last: counters(slice), peak: 0 };
   const sample = () => {
     let memory = 0;
+    sliced.last = counters(slice) ?? sliced.last;
+    sliced.peak = Math.max(sliced.peak, memoryCurrent(slice));
     for (const [id, name] of known) {
-      const cgroup = `${CGROUP_USER}/user.slice/docker-${id}.scope`;
+      const cgroup = cgroupOf(id);
+      if (cgroup === undefined) continue;
       const now = counters(cgroup);
       if (now === undefined) continue;
       const entry = containers.get(id) ?? { name, first: zero, last: zero, peak: 0 };
@@ -526,6 +580,15 @@ const sampler = () => {
         oomKills: c.last.oomKills - c.first.oomKills,
       })),
       serviceMemoryPeakMiB: Math.round(service.peak / 2 ** 20),
+      // With SLICE=1, what the whole slice used: the service, its containers and anything they started.
+      ...(sliced.first === undefined || sliced.last === undefined
+        ? {}
+        : {
+            sliceCpuS: Math.round((sliced.last.usage - sliced.first.usage) / 1e4) / 100,
+            sliceThrottledS:
+              Math.round((sliced.last.throttled - sliced.first.throttled) / 1e4) / 100,
+            sliceMemoryPeakMiB: Math.round(sliced.peak / 2 ** 20),
+          }),
       samples,
     };
   };
@@ -562,8 +625,13 @@ const run = async () => {
     jobsPerMin: Math.round((results.length / (makespanMs / 60000)) * 100) / 100,
     latencyS: stats(results.map((r) => r.latencyMs / 1000)),
     serviceS: stats(ok.map((r) => (r.durationMs ?? 0) / 1000)),
-    checkRunS: stats(ok.flatMap((r) => (r.runMs === undefined ? [] : [r.runMs / 1000]))),
-    checkQueueS: stats(ok.flatMap((r) => (r.queueMs === undefined ? [] : [r.queueMs / 1000]))),
+    checkRunS: stats(
+      ok.flatMap((r) => (r.kind === "check" && r.runMs !== undefined ? [r.runMs / 1000] : [])),
+    ),
+    testRunS: stats(
+      ok.flatMap((r) => (r.kind === "test" && r.runMs !== undefined ? [r.runMs / 1000] : [])),
+    ),
+    queueS: stats(ok.flatMap((r) => (r.queueMs === undefined ? [] : [r.queueMs / 1000]))),
     setupS: Math.max(0, ...ok.map((r) => (r.setupMs ?? 0) / 1000)),
     ...usage,
   };

@@ -1,0 +1,9 @@
+{
+  "checks": [
+    { "id": "typecheck", "run": "pnpm run typecheck" },
+    {
+      "id": "lint",
+      "run": "node_modules/.bin/vp lint --report-unused-disable-directives --no-error-on-unmatched-pattern --format github {changed}"
+    }
+  ]
+}
