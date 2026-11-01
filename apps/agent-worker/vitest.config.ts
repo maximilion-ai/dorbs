@@ -96,7 +96,8 @@ const harness = (name: string, loop: "pi" | "opencode", include: ReadonlyArray<s
     }),
   ],
   // A first prompt loads the tools' modules over the runner's connection; beside `pnpm rust` that passes the 10 s default.
-  test: { name, include: [...include], hookTimeout: 30_000 },
+  // A whole session per test takes up to ~4.5 s, past the 5 s default when another project shares the CPUs.
+  test: { name, include: [...include], hookTimeout: 30_000, testTimeout: 30_000 },
 });
 
 export default defineConfig({
@@ -109,6 +110,9 @@ export default defineConfig({
     dedupe: ["@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable"],
   },
   test: {
+    // A worker's second test file gets the modules the first cached in one WebSocket message, which past
+    // workerd's limit closes the runner (1009, "Message is too large"): the file "exits unexpectedly".
+    fsModuleCache: false,
     // Each project has its own doubles, whose request log and held check its tests assert on.
     projects: [
       harness("pi", "pi", [
