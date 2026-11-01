@@ -185,11 +185,19 @@ workspace_test = "npm test -w {dir} --"
 
 # The install: online into the manager's cache, then offline from it, frozen when there is a lockfile.
 [[let.install]]
+when = { vars = { "pm.name" = "pnpm" }, exists = [".pnpmfile.cjs"], contains = [
+  { file = "pnpm-lock.yaml", regex = '(?m)^pnpmfileChecksum:' },
+] }
+# A lockfile that records its pnpmfile's checksum installs only with it, so both steps read the commit's .pnpmfile.cjs
+# (commit_only). The path is pinned on the command line, so a change cannot point pnpm at a hooks file of its own.
+download = "pnpm fetch --pnpmfile .pnpmfile.cjs"
+offline = "pnpm install --offline --frozen-lockfile --ignore-scripts --pnpmfile .pnpmfile.cjs"
+
+[[let.install]]
 when = { vars = { "pm.name" = "pnpm" }, exists = ["pnpm-lock.yaml"] }
-# pnpm fetches a lockfile's packages into its store without installing them. A lockfile records the checksum of
-# the repo's .pnpmfile.cjs, so both steps read it; it is commit_only, so a change never replaces it.
-download = "pnpm fetch"
-offline = "pnpm install --offline --frozen-lockfile --ignore-scripts"
+# pnpm fetches a lockfile's packages into its store without installing them.
+download = "pnpm fetch --ignore-pnpmfile"
+offline = "pnpm install --offline --frozen-lockfile --ignore-scripts --ignore-pnpmfile"
 
 [[let.install]]
 when.vars = { "pm.name" = "pnpm" }

@@ -58,6 +58,33 @@ const PNPM_LOCK: &str =
     "lockfileVersion: '9.0'\n\npackages:\n\n  typescript@5.9.3:\n    resolution: {}\n";
 
 #[test]
+fn installs_with_the_commits_pnpmfile_when_the_lockfile_records_its_checksum() {
+    let manifest = json!({ "packageManager": "pnpm@12.14.0" }).to_string();
+    let lock = format!("{PNPM_LOCK}\npnpmfileChecksum: sha256-x\n");
+    let recipe = recipe(&[
+        ("package.json", &manifest),
+        ("pnpm-lock.yaml", &lock),
+        (".pnpmfile.cjs", "module.exports = { hooks: {} };\n"),
+    ]);
+    assert_eq!(
+        setup(&recipe),
+        vec![
+            (
+                "download".into(),
+                "pnpm fetch --pnpmfile .pnpmfile.cjs".into(),
+                Phase::Online
+            ),
+            (
+                "install".into(),
+                "pnpm install --offline --frozen-lockfile --ignore-scripts --pnpmfile .pnpmfile.cjs"
+                    .into(),
+                Phase::Offline
+            ),
+        ]
+    );
+}
+
+#[test]
 fn runs_a_pnpm_repos_own_typecheck_and_lint_scripts_after_a_frozen_install() {
     let manifest = json!({
         "packageManager": "pnpm@11.28.6",
@@ -77,10 +104,15 @@ fn runs_a_pnpm_repos_own_typecheck_and_lint_scripts_after_a_frozen_install() {
     assert_eq!(
         setup(&recipe),
         vec![
-            ("download".into(), "pnpm fetch".into(), Phase::Online),
+            (
+                "download".into(),
+                "pnpm fetch --ignore-pnpmfile".into(),
+                Phase::Online
+            ),
             (
                 "install".into(),
-                "pnpm install --offline --frozen-lockfile --ignore-scripts".into(),
+                "pnpm install --offline --frozen-lockfile --ignore-scripts --ignore-pnpmfile"
+                    .into(),
                 Phase::Offline
             ),
         ]
