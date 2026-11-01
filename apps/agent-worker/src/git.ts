@@ -626,6 +626,9 @@ const restored = async (
     for (const entry of entries) {
       if (fromSource.size > MAX_PATHS) return;
       const child = `${path}/${entry.path}`;
+      // As git's verify_path: no empty, dot or slashed names, and nothing in a git directory.
+      if (["", ".", ".."].includes(entry.path) || entry.path.includes("/") || isGitPath(child))
+        continue;
       if (entry.type === "tree") await collect(child);
       else fromSource.add(child);
     }
@@ -644,6 +647,8 @@ const restored = async (
       (await fs.lstat(`${dir}/${spec}`)) === undefined
     )
       return failed(`error: pathspec '${spec}' did not match any file(s) known to git`);
+  if (wanted.some((spec) => isGitPath(spec)))
+    return failed("git does not restore paths in the repo's git directory.");
   const picked = [
     ...new Set([
       ...changes.changed.filter((path) => wanted.some((spec) => under(path, spec))),
