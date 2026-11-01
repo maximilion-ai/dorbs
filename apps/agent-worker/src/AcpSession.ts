@@ -44,7 +44,8 @@ const CLONE_KEY = "workspace/clone";
 const OVERLAY_KEY = "workspace/overlay";
 /** The Lifecycle job that deletes this session once it has been idle for the retention period. */
 const RETIRE = "retire";
-const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
 const RetentionDays = Config.Int("SESSION_RETENTION_DAYS").pipe(Config.withDefault(7));
 /** The agent loop new sessions run on. */
 const HarnessConfig = Config.Literals(["pi", "opencode"], "HARNESS").pipe(Config.withDefault("pi"));
@@ -84,8 +85,11 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
       state: this.ctx.storage.kv.get<OverlayState>(OVERLAY_KEY),
       save: (state) => this.ctx.storage.kv.put(OVERLAY_KEY, state),
       base: async () => {
-        const base = this.ctx.storage.kv.get<Checker.Clone>(CLONE_KEY)?.base;
-        return base === undefined ? undefined : openBase(this.env.Bases, base);
+        const prefix = this.ctx.storage.kv.get<Checker.Clone>(CLONE_KEY)?.base;
+        if (prefix === undefined) return undefined;
+        const base = await openBase(this.env.Bases, prefix);
+        if (base === undefined) throw new Error("The repo's base is gone. Clone the repo again.");
+        return base;
       },
     });
 
@@ -152,13 +156,22 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
     readonly retentionMs =
       Effect.runSync(RetentionDays.parse(ConfigProvider.fromUnknown(this.env))) * DAY_MS;
 
-    /** Puts off deleting this session until it has been idle for the retention period from now. */
+    #baseUsedAt = 0;
+
+    /**
+     * Puts off deleting this session until it has been idle for the retention period from now, and its repo's base
+     * for longer: a base outlives every session that used it.
+     */
     private async touch(): Promise<void> {
       await this.lifecycle.jobs.push({
         id: RETIRE,
         fn: RETIRE,
         time: Date.now() + this.retentionMs,
       });
+      const base = this.ctx.storage.kv.get<Checker.Clone>(CLONE_KEY)?.base;
+      if (base === undefined || Date.now() - this.#baseUsedAt < HOUR_MS) return;
+      await this.env.RepoBase.getByName(base).used(base);
+      this.#baseUsedAt = Date.now();
     }
 
     /** Deletes the history, the workspace and the agent loop's session, then resets this object so nothing stale lingers. */

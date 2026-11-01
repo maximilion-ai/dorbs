@@ -462,18 +462,29 @@ export const pushRefs = async (origin: Origin): Promise<ReadonlyMap<string, stri
   // The advertisement is binary pkt-lines; its ref names are UTF-8.
   const body = decoder.decode(await response.arrayBuffer());
   const advertised = body.matchAll(/([0-9a-f]{40}) refs\/heads\/([^\0\n]+)/gu);
-  return new Map([...advertised].flatMap(([, oid, branch]) => (branch === undefined || oid === undefined ? [] : [[branch, oid]])));
+  return new Map(
+    [...advertised].flatMap(([, oid, branch]) =>
+      branch === undefined || oid === undefined ? [] : [[branch, oid]],
+    ),
+  );
 };
 
 /**
  * Moves origin's `branch` from `old` (zeros when it is new) to `commit` and sends `pack`, which holds the objects
  * origin lacks. Returns the reason origin gave when it refused either.
  */
+/** Whether `name` is a branch name git's check-ref-format takes, and short; nothing else goes on a pkt-line. */
+export const isBranchName = (name: string): boolean =>
+  name.length > 0 &&
+  name.length <= 255 &&
+  !/[\x00-\x20\x7f~^:?*[\\]|\.\.|@\{|\/\/|\/\.|\.lock(?:\/|$)|^[./]|[./]$/u.test(name);
+
 export const receivePack = async (
   origin: Origin,
   update: { readonly branch: string; readonly old: string; readonly commit: string },
   pack: Uint8Array,
 ): Promise<string | undefined> => {
+  if (!isBranchName(update.branch)) throw new Error(`${update.branch} is not a branch name`);
   const command = pktLine(
     `${update.old} ${update.commit} refs/heads/${update.branch}\0report-status agent=git/dorbs\n`,
   );

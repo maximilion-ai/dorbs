@@ -12,9 +12,10 @@ const UNUSED_MS = 14 * 24 * 60 * 60 * 1000;
 type Lease = { readonly holder: string; readonly at: number };
 
 export class RepoBase extends DurableObject {
-  /** Grants or renews the build lease for `holder`; false while another holder's lease is live. */
+  /** Grants or renews the build lease for `holder`; false while another holder's lease is live or the base is being deleted. */
   lease(holder: string): boolean {
     const now = Date.now();
+    if (this.ctx.storage.kv.get<boolean>("deleting") === true) return false;
     const current = this.ctx.storage.kv.get<Lease>("lease");
     if (current !== undefined && current.holder !== holder && now - current.at < LEASE_MS)
       return false;
@@ -46,6 +47,8 @@ export class RepoBase extends DurableObject {
       return;
     }
     if (prefix !== undefined) {
+      // No build starts until the deletion ends, so none writes a part this deletes.
+      this.ctx.storage.kv.put("deleting", true);
       // The manifest first, so no session trusts a base that is half deleted.
       await this.env.Bases.delete(`${prefix}/manifest.json`);
       let cursor: string | undefined;
@@ -58,6 +61,11 @@ export class RepoBase extends DurableObject {
           await this.env.Bases.delete(listed.objects.map((object) => object.key));
         cursor = listed.truncated ? listed.cursor : undefined;
       } while (cursor !== undefined);
+    }
+    // A session that used the base while it went rebuilds it, and its use stays on record.
+    if ((this.ctx.storage.kv.get<number>("used") ?? 0) !== last) {
+      this.ctx.storage.kv.delete("deleting");
+      return;
     }
     await this.ctx.storage.deleteAll();
   }

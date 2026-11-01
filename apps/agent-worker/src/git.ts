@@ -4,6 +4,7 @@ import type { GitCliResult } from "@cloudflare/computer/git";
 import { parseArgv } from "./argv.ts";
 import type { Clone } from "./Checker.ts";
 import {
+  isBranchName,
   looseObject,
   pushRefs,
   receivePack,
@@ -88,21 +89,66 @@ const pathArgs = (args: ReadonlyArray<string>): ReadonlyArray<string> => {
   return dashes === -1 ? args.filter((arg) => !arg.startsWith("-")) : args.slice(dashes + 1);
 };
 
-/** The blob ids a git index records, by path; dorbs's clone and isomorphic-git write version 2. */
-const indexOids = (index: Uint8Array): ReadonlyMap<string, string> => {
+/** A path's index entry: its blob id and mode. */
+type Staged = { readonly oid: string; readonly mode: number };
+
+/** The entries a git index records, by path; dorbs's clone and isomorphic-git write version 2. */
+const indexEntries = (index: Uint8Array): ReadonlyMap<string, Staged> => {
   const view = new DataView(index.buffer, index.byteOffset, index.byteLength);
-  const oids = new Map<string, string>();
+  const entries = new Map<string, Staged>();
   let at = 12;
   for (let n = view.getUint32(8); n > 0; n -= 1) {
     const oid = Array.from(index.subarray(at + 40, at + 60), (byte) =>
       byte.toString(16).padStart(2, "0"),
     ).join("");
     const length = view.getUint16(at + 60) & 0xfff;
-    oids.set(new TextDecoder().decode(index.subarray(at + 62, at + 62 + length)), oid);
+    const path = new TextDecoder().decode(index.subarray(at + 62, at + 62 + length));
+    entries.set(path, { oid, mode: view.getUint32(at + 24) });
     at += Math.ceil((62 + length + 1) / 8) * 8;
   }
-  return oids;
+  return entries;
 };
+
+/** What the agent changed since the clone. */
+type Changes = {
+  readonly written: ReadonlyArray<string>;
+  readonly deleted: ReadonlyArray<string>;
+  readonly stage: ReadonlyMap<string, Staged>;
+  /** Every path whose work tree file or index entry is not the base's. */
+  readonly changed: ReadonlyArray<string>;
+};
+
+const changesOf = async (context: GitContext): Promise<Changes> => {
+  const { written, deleted } = await context.fs.changes();
+  const stage = indexEntries(await context.fs.readBytes(`${context.dir}/.git/index`));
+  const base = await context.fs.base();
+  const changed = new Set([...written, ...deleted]);
+  if (base !== undefined) {
+    // Staged and unstaged paths, which no file write shows, such as after git rm --cached.
+    for (const [path, { oid }] of stage) if (base.entry(path)?.oid !== oid) changed.add(path);
+    for (const entry of base.entries) if (!stage.has(entry.path)) changed.add(entry.path);
+  }
+  return { written, deleted, stage, changed: [...changed].toSorted() };
+};
+
+/** A pathspec as a repo-relative path; the whole repo is "". */
+const specPath = (spec: string, dir: string): string => {
+  const parts: string[] = [];
+  for (const part of (spec.startsWith("/") ? spec : `${dir}/${spec}`).split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  const path = parts.join("/");
+  const root = dir.replace(/^\/+|\/+$/gu, "");
+  return path === root ? "" : path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path;
+};
+
+const under = (path: string, spec: string): boolean =>
+  spec === "" || path === spec || path.startsWith(`${spec}/`);
+
+// One command moves at most this many paths: Computer's git rewrites the index once per path.
+const MAX_PATHS = 500;
 
 /**
  * git status over the paths the agent changed, printed as Computer's git prints it. A whole-repo status walks every
@@ -110,11 +156,10 @@ const indexOids = (index: Uint8Array): ReadonlyMap<string, string> => {
  */
 const scopedStatus = async (
   context: GitContext,
-  paths: ReadonlyArray<string>,
+  { changed: paths, stage }: Changes,
   args: ReadonlyArray<string>,
 ): Promise<string> => {
   const { workspace, fs, dir } = context;
-  const stage = indexOids(await fs.readBytes(`${dir}/.git/index`));
   const trees = new Map<string, ReadonlyMap<string, string>>();
   const headOid = async (path: string): Promise<string | undefined> => {
     const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
@@ -138,48 +183,285 @@ const scopedStatus = async (
     const work =
       content === undefined ? undefined : await workspace.git.hashObject({ dir, content });
     const head = await headOid(path);
-    const staged = stage.get(path);
-    // isomorphic-git's statusMatrix numbers, which Computer's status codes read.
-    const h = head === undefined ? 0 : 1;
-    const w = work === undefined ? 0 : work === head ? 1 : 2;
-    const s = staged === undefined ? 0 : staged === head ? 1 : staged === work ? 2 : 3;
-    const index = h === 0 && s > 0 ? "A" : h === 1 && s === 0 ? "D" : h === 1 && s >= 2 ? "M" : " ";
+    const staged = stage.get(path)?.oid;
+    // git's two columns: the index against HEAD, then the work tree against the index.
+    const index =
+      staged === head ? " " : head === undefined ? "A" : staged === undefined ? "D" : "M";
     const tree =
-      w === 0 && s > 0 ? "D" : h === 0 && s === 0 && w > 0 ? "?" : w === 2 && s !== 3 ? "M" : " ";
-    if (index === " " && tree === " ") continue;
+      staged === undefined ? " " : work === undefined ? "D" : work === staged ? " " : "M";
     const short = args.includes("-s") || args.includes("--short");
     const v1 = args.some((arg) => arg === "--porcelain=v1" || arg === "--porcelain=1");
-    if (tree === "?") lines.push(short ? ` ? ${path}` : v1 ? `?? ${path}` : `? ${path}`);
-    else lines.push(short || v1 ? `${index}${tree} ${path}` : `1 ${index}${tree} ${path}`);
+    if (index !== " " || tree !== " ")
+      lines.push(short || v1 ? `${index}${tree} ${path}` : `1 ${index}${tree} ${path}`);
+    // A file the index does not hold is untracked, beside the deletion git stages for it after rm --cached.
+    if (staged === undefined && work !== undefined)
+      lines.push(short ? ` ? ${path}` : v1 ? `?? ${path}` : `? ${path}`);
   }
   return lines.length === 0 ? "(no output)" : lines.join("\n");
 };
 
 /**
- * The command line to run with whole-repo forms narrowed to the paths the agent changed: `diff` without paths, and
- * `add -A`, `add .` or `add <directory>`, which become the changed paths in them.
+ * A diff's command line with its paths cut to the changed ones they name, or all changed ones when it names none;
+ * undefined when none is left. Every file outside them is the base's on both sides, so the diff has nothing there.
  */
-const narrowed = async (
-  argv: ReadonlyArray<string>,
-  paths: ReadonlyArray<string>,
+const narrowedDiff = async (
+  args: ReadonlyArray<string>,
+  changes: Changes,
   context: GitContext,
-): Promise<ReadonlyArray<string>> => {
-  const [subcommand, ...args] = argv;
-  if (subcommand === "diff" && !args.includes("--")) return [...argv, "--", ...paths];
-  if (subcommand !== "add") return argv;
+): Promise<ReadonlyArray<string> | undefined> => {
+  const dashes = args.indexOf("--");
+  let options = dashes === -1 ? args : args.slice(0, dashes);
+  let specs = dashes === -1 ? [] : args.slice(dashes + 1);
+  if (dashes === -1) {
+    // As git does, an argument that names a file or a changed path is a path, not a revision.
+    const paths: string[] = [];
+    for (const arg of options) {
+      if (arg.startsWith("-")) continue;
+      const path = specPath(arg, context.dir);
+      if (
+        changes.changed.some((changed) => under(changed, path)) ||
+        (await context.fs.lstat(`${context.dir}/${path}`)) !== undefined
+      )
+        paths.push(arg);
+    }
+    options = options.filter((arg) => !paths.includes(arg));
+    specs = paths;
+  }
+  const wanted = specs.map((spec) => specPath(spec, context.dir));
+  const picked = changes.changed.filter(
+    (path) => wanted.length === 0 || wanted.some((spec) => under(path, spec)),
+  );
+  return picked.length === 0 ? undefined : ["diff", ...options, "--", ...picked];
+};
+
+/** Stages `paths` as the work tree has them: an edited or new file is added, a deleted one leaves the index. */
+const stagePaths = async (
+  paths: ReadonlyArray<string>,
+  changes: Changes,
+  context: GitContext,
+  flags: ReadonlyArray<string> = [],
+): Promise<GitCliResult | undefined> => {
+  const present: string[] = [];
+  const gone: string[] = [];
+  for (const path of paths) {
+    if ((await context.fs.lstat(`${context.dir}/${path}`)) !== undefined) present.push(path);
+    else if (changes.stage.has(path)) gone.push(path);
+  }
+  for (const [argv, list] of [
+    [["add", ...flags], present],
+    [["rm", "--cached"], gone],
+  ] as const) {
+    if (list.length === 0) continue;
+    const result = await context.workspace.git.cli({
+      argv: [...argv, "--", ...list],
+      cwd: context.dir,
+    });
+    if (result.exitCode !== 0) return result;
+  }
+  return undefined;
+};
+
+/** `add` of the changed paths its pathspecs name: `add -A` and `add .` stage every change and no other file. */
+const added = async (
+  args: ReadonlyArray<string>,
+  changes: Changes,
+  context: GitContext,
+): Promise<string> => {
   const flags = args.filter((arg) => arg.startsWith("-") && !["-A", "--all", "--"].includes(arg));
   const all = args.some((arg) => ["-A", "--all"].includes(arg));
-  const wanted = all ? [] : pathArgs(args);
+  const specs = all ? [""] : pathArgs(args).map((spec) => specPath(spec, context.dir));
+  if (specs.length === 0) return failed("Nothing specified, nothing added.");
   const picked = new Set<string>();
-  for (const arg of all ? ["."] : wanted) {
-    const dir = arg.replace(/^\.\/?/u, "").replace(/\/+$/u, "");
-    const stat = await context.fs.lstat(dir === "" ? context.dir : `${context.dir}/${dir}`);
-    if (stat?.isDirectory() !== false || dir === "") {
-      for (const path of paths)
-        if (dir === "" || path === dir || path.startsWith(`${dir}/`)) picked.add(path);
-    } else picked.add(dir);
+  for (const spec of specs) {
+    const matched = changes.changed.filter((path) => under(path, spec));
+    if (
+      matched.length === 0 &&
+      spec !== "" &&
+      (await context.fs.lstat(`${context.dir}/${spec}`)) === undefined
+    )
+      return failed(`fatal: pathspec '${spec}' did not match any files`);
+    for (const path of matched) picked.add(path);
   }
-  return ["add", ...flags, "--", ...picked];
+  if (picked.size > MAX_PATHS)
+    return failed(`git add would stage ${picked.size} paths; stage at most ${MAX_PATHS} at once.`);
+  const result = await stagePaths([...picked], changes, context, flags);
+  return result === undefined ? "(no output)" : cliText(result);
+};
+
+/** `rm`: drops tracked paths from the index and, without --cached, from the work tree. */
+const removed = async (
+  args: ReadonlyArray<string>,
+  changes: Changes,
+  context: GitContext,
+): Promise<string> => {
+  const flags = args.filter((arg) => arg.startsWith("-") && arg !== "--");
+  const unknown = flags.find(
+    (flag) => !/^-[rfq]+$/u.test(flag) && !["--cached", "--force", "--quiet"].includes(flag),
+  );
+  if (unknown !== undefined) return failed(`git rm does not take ${unknown} here.`);
+  const recursive = flags.some((flag) => /^-[fq]*r/u.test(flag));
+  const paths: string[] = [];
+  for (const spec of pathArgs(args).map((arg) => specPath(arg, context.dir))) {
+    const tracked = [...changes.stage.keys()].filter((path) => under(path, spec));
+    if (tracked.length === 0) return failed(`fatal: pathspec '${spec}' did not match any files`);
+    if (!recursive && !tracked.includes(spec))
+      return failed(`fatal: not removing '${spec}' recursively without -r`);
+    paths.push(...tracked);
+  }
+  if (paths.length > MAX_PATHS)
+    return failed(
+      `git rm would remove ${paths.length} paths; remove at most ${MAX_PATHS} at once.`,
+    );
+  const result = await context.workspace.git.cli({
+    argv: ["rm", "--cached", "--", ...paths],
+    cwd: context.dir,
+  });
+  if (result.exitCode !== 0) return cliText(result);
+  if (!flags.includes("--cached"))
+    for (const path of paths)
+      await context.fs.promises.rm(`${context.dir}/${path}`, { force: true });
+  return paths.map((path) => `rm '${path}'`).join("\n");
+};
+
+/** `mv` of a tracked file or directory: copies it in the work tree, then moves its index entries along. */
+const moved = async (
+  args: ReadonlyArray<string>,
+  changes: Changes,
+  context: GitContext,
+): Promise<string> => {
+  const { fs, dir } = context;
+  const flags = args.filter((arg) => arg.startsWith("-") && arg !== "--");
+  const unknown = flags.find((flag) => !["-f", "--force", "-v", "--verbose"].includes(flag));
+  if (unknown !== undefined) return failed(`git mv does not take ${unknown} here.`);
+  const specs = pathArgs(args).map((arg) => specPath(arg, dir));
+  const [source, destination] = specs;
+  if (specs.length !== 2 || source === undefined || destination === undefined || source === "")
+    return failed("git mv takes one source and one destination here.");
+  if ((await fs.lstat(`${dir}/${source}`)) === undefined)
+    return failed(`fatal: bad source, source=${source}, destination=${destination}`);
+  const into = (await fs.lstat(`${dir}/${destination}`))?.isDirectory() === true;
+  const target = into ? `${destination}/${source.slice(source.lastIndexOf("/") + 1)}` : destination;
+  if (target === source || target.startsWith(`${source}/`))
+    return failed(
+      `fatal: can not move directory into itself, source=${source}, destination=${target}`,
+    );
+  const force = flags.includes("-f") || flags.includes("--force");
+  if (!force && (await fs.lstat(`${dir}/${target}`)) !== undefined)
+    return failed(`fatal: destination exists, source=${source}, destination=${target}`);
+  const files = await fs.files(`${dir}/${source}`);
+  const tracked = files.filter((file) => changes.stage.has(file));
+  if (tracked.length === 0)
+    return failed(`fatal: not under version control, source=${source}, destination=${target}`);
+  if (files.length > MAX_PATHS)
+    return failed(`git mv would move ${files.length} paths; move at most ${MAX_PATHS} at once.`);
+  const targetOf = (file: string) => `${target}${file.slice(source.length)}`;
+  for (const file of files) {
+    const stats = await fs.lstat(`${dir}/${file}`);
+    if (stats?.isSymbolicLink() === true)
+      await fs.promises.symlink(
+        String(await fs.promises.readlink(`${dir}/${file}`)),
+        `${dir}/${targetOf(file)}`,
+      );
+    else
+      await fs.promises.writeFile(
+        `${dir}/${targetOf(file)}`,
+        await fs.readBytes(`${dir}/${file}`),
+        {
+          mode: ((stats?.mode ?? 0) & 0o111) === 0 ? 0o644 : 0o755,
+        },
+      );
+  }
+  await fs.promises.rm(`${dir}/${source}`, { recursive: true, force: true });
+  const after = await changesOf(context);
+  const result = await stagePaths([...tracked, ...tracked.map(targetOf)], after, context);
+  return result === undefined ? "(no output)" : cliText(result);
+};
+
+/**
+ * `restore` and `checkout -- <paths>`: puts changed paths back as the index has them, the index back as HEAD has
+ * it with --staged, or both from HEAD for `checkout HEAD -- <paths>`. Paths the base holds unchanged come back from
+ * the base, so restoring copies nothing.
+ */
+const restored = async (
+  subcommand: "restore" | "checkout",
+  args: ReadonlyArray<string>,
+  changes: Changes,
+  context: GitContext,
+): Promise<string> => {
+  const { fs, dir, workspace } = context;
+  let staged = false;
+  let worktree = false;
+  let source: string | undefined;
+  const specs: string[] = [];
+  const dashes = args.indexOf("--");
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at] ?? "";
+    if (dashes !== -1 && at > dashes) specs.push(arg);
+    else if (arg === "--") continue;
+    else if (subcommand === "restore" && ["-S", "--staged"].includes(arg)) staged = true;
+    else if (subcommand === "restore" && ["-W", "--worktree"].includes(arg)) worktree = true;
+    else if (subcommand === "restore" && arg === "-s") source = args[(at += 1)];
+    else if (subcommand === "restore" && arg.startsWith("--source=")) source = arg.slice(9);
+    else if (arg.startsWith("-")) return failed(`git ${subcommand} does not take ${arg} here.`);
+    else if (subcommand === "checkout") source = arg;
+    else specs.push(arg);
+  }
+  if (subcommand === "checkout" && source !== undefined) staged = worktree = true;
+  if (!staged) worktree = true;
+  if (specs.length === 0) return failed(`git ${subcommand} needs the paths it acts on.`);
+  const wanted = specs.map((spec) => specPath(spec, dir));
+  for (const spec of wanted)
+    if (
+      !changes.changed.some((path) => under(path, spec)) &&
+      ![...changes.stage.keys()].some((path) => under(path, spec)) &&
+      (await fs.lstat(`${dir}/${spec}`)) === undefined
+    )
+      return failed(`error: pathspec '${spec}' did not match any file(s) known to git`);
+  const picked = changes.changed.filter((path) => wanted.some((spec) => under(path, spec)));
+  if (picked.length > MAX_PATHS)
+    return failed(
+      `git ${subcommand} would restore ${picked.length} paths; restore at most ${MAX_PATHS} at once.`,
+    );
+  if (picked.length === 0)
+    return subcommand === "checkout" ? "Updated 0 paths from the index" : "(no output)";
+  if (source !== undefined && source !== "HEAD") {
+    // From another commit Computer's checkout puts both back; with the paths cut to changed ones it reads no more.
+    const result = await workspace.git.cli({
+      argv: ["checkout", source, "--", ...picked],
+      cwd: dir,
+    });
+    return cliText(result);
+  }
+  let stage = changes.stage;
+  if (staged) {
+    const result = await workspace.git.cli({ argv: ["reset", "--", ...picked], cwd: dir });
+    if (result.exitCode !== 0) return cliText(result);
+    stage = (await changesOf(context)).stage;
+  }
+  if (worktree) {
+    const base = await fs.base();
+    for (const path of picked) {
+      const entry = stage.get(path);
+      if (entry === undefined) continue;
+      const original = base?.entry(path);
+      if (original?.oid === entry.oid && Number.parseInt(original.mode, 8) === entry.mode) {
+        await fs.revert(`${dir}/${path}`);
+        continue;
+      }
+      const object = `${dir}/.git/objects/${entry.oid.slice(0, 2)}/${entry.oid.slice(2)}`;
+      const { data } = looseObject(await fs.readBytes(object));
+      await fs.promises.rm(`${dir}/${path}`, { recursive: true, force: true });
+      if (entry.mode === 0o120000)
+        await fs.promises.symlink(new TextDecoder().decode(data), `${dir}/${path}`);
+      else
+        await fs.promises.writeFile(`${dir}/${path}`, data, {
+          mode: (entry.mode & 0o111) === 0 ? 0o644 : 0o755,
+        });
+    }
+  }
+  return subcommand === "checkout"
+    ? `Updated ${picked.length} paths from the index`
+    : "(no output)";
 };
 
 /** `commit -a`, `-am` and `--all` without the stage-all flag, or undefined when the commit has none. */
@@ -262,7 +544,8 @@ const newObjects = async (
         if (entry.mode !== "160000") pending.push(entry.oid);
     if (object.type === "commit")
       for (const line of new TextDecoder().decode(object.data).split("\n\n")[0]?.split("\n") ?? [])
-        if (line.startsWith("tree ") || line.startsWith("parent ")) pending.push(line.split(" ")[1] ?? "");
+        if (line.startsWith("tree ") || line.startsWith("parent "))
+          pending.push(line.split(" ")[1] ?? "");
   }
   return { objects, seen };
 };
@@ -304,6 +587,7 @@ const push = async (args: ReadonlyArray<string>, context: GitContext): Promise<s
   if (target === clone.branch) {
     return `The base branch ${clone.branch} is protected. Create a branch with git checkout -b <name>, commit, then push it.`;
   }
+  if (!isBranchName(target)) return failed(`${target} is not a valid branch name.`);
   if (!target.startsWith(BRANCH_PREFIX)) {
     return `Push to a branch under ${BRANCH_PREFIX}, such as git push origin HEAD:${BRANCH_PREFIX}my-change; ${target} is not one.`;
   }
@@ -388,25 +672,34 @@ export const git = async (line: string, context: GitContext): Promise<string> =>
   ) {
     return failed(`git ${subcommand} needs the paths it acts on.`);
   }
-  const { written, deleted } = await context.fs.changes();
-  const changed = [...written, ...deleted].toSorted();
-  if (subcommand === "status") return scopedStatus(context, changed, args);
-  if (subcommand === "commit") {
-    const rest = withoutCommitAll(args);
-    if (rest !== undefined && changed.length > 0) {
-      const staged = await context.workspace.git.cli({
-        argv: ["add", "--", ...changed],
-        cwd: context.dir,
-      });
-      if (staged.exitCode !== 0) return cliText(staged);
-      return run(["commit", ...rest]);
+  const changes = await changesOf(context);
+  switch (subcommand) {
+    case "status":
+      return scopedStatus(context, changes, args);
+    case "diff": {
+      const line = await narrowedDiff(args, changes, context);
+      return line === undefined ? "(no output)" : run(line);
     }
-    if (rest !== undefined) return run(["commit", ...rest]);
+    case "add":
+      return added(args, changes, context);
+    case "rm":
+      return removed(args, changes, context);
+    case "mv":
+      return moved(args, changes, context);
+    case "restore":
+    case "checkout":
+      return restored(subcommand, args, changes, context);
+    case "commit": {
+      const rest = withoutCommitAll(args);
+      if (rest === undefined) return run(argv);
+      // As git's -a: tracked files only, deletions included; a new file waits for git add.
+      const tracked = [...changes.written, ...changes.deleted].filter((path) =>
+        changes.stage.has(path),
+      );
+      const staged = await stagePaths(tracked, changes, context);
+      return staged === undefined ? run(["commit", ...rest]) : cliText(staged);
+    }
+    default:
+      return run(argv);
   }
-  if (subcommand === "diff" && changed.length === 0) return "(no output)";
-  if (subcommand === "add") {
-    const line = await narrowed(argv, changed, context);
-    return line.length <= 2 && line[line.length - 1] === "--" ? "(no output)" : run(line);
-  }
-  return run(await narrowed(argv, changed, context));
 };
