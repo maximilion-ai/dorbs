@@ -126,6 +126,10 @@ export default defineConfig({
       // Restarts under both loops, apart from the suites above, whose held check they would release.
       harness("pi-restart", "pi", ["test/restart.test.ts"]),
       harness("opencode-restart", "opencode", ["test/restart.test.ts"]),
+      // Only with DORBS_BENCH_REPO, a bare clone of a large repo: clone, read, grep and commit on it, timed and metered.
+      ...(process.env["DORBS_BENCH_REPO"] === undefined
+        ? []
+        : [harness("bench", "pi", ["test/bench.test.ts"])]),
     ],
   },
 });

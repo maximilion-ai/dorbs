@@ -68,6 +68,12 @@ export const makeOutboundDouble = () => {
       skills: { symlink: "docs" },
       loop: { symlink: "loop" },
     }),
+    // A repo whose main moves on /__move, for bases that reuse the parts of the one before.
+    "moving.git": () => ({
+      "a.ts": "export const alpha = 1;\n",
+      "b.ts": "export const beta = 2;\n",
+      "docs/c.md": "gamma notes\n",
+    }),
     // 2,000 distinct files in 20 directories, for the workspace cost bounds in cost.test.ts.
     "large.git": () =>
       Object.fromEntries(
@@ -77,6 +83,9 @@ export const makeOutboundDouble = () => {
         ]),
       ),
   };
+  // A real repo for test/bench.test.ts, from a bare clone the bench is run with.
+  const bench = process.env["DORBS_BENCH_REPO"];
+  if (bench !== undefined) NodeFS.symlinkSync(bench, NodePath.join(gitRoot, "bench.git"));
   const ensureLazy = (pathname: string) => {
     const name = Object.keys(lazy).find((repo) => pathname.startsWith(`/${repo}/`));
     if (name === undefined || NodeFS.existsSync(NodePath.join(gitRoot, name))) return;
@@ -198,6 +207,48 @@ export const makeOutboundDouble = () => {
         `git ${url.pathname}${request.headers.has("authorization") ? " with credentials" : ""}`,
       );
       if (url.pathname === "/__commit") return json(fixtureCommit);
+      if (url.pathname === "/__move") {
+        // Changes b.ts and adds d.ts in a new commit on main.
+        ensureLazy("/moving.git/");
+        const gitDir = NodePath.join(gitRoot, "moving.git");
+        const work = NodeFS.mkdtempSync(`${gitDir}.work-`);
+        const run = (...args: string[]) =>
+          NodeChildProcess.execFileSync(
+            "git",
+            ["--git-dir", gitDir, "--work-tree", work, ...args],
+            {
+              encoding: "utf8",
+            },
+          );
+        run("read-tree", "HEAD");
+        run("checkout-index", "--all");
+        NodeFS.writeFileSync(NodePath.join(work, "b.ts"), "export const betaMoved = 3;\n");
+        NodeFS.writeFileSync(NodePath.join(work, "d.ts"), "export const delta = 4;\n");
+        run("add", "--all");
+        run(
+          "-c",
+          "user.name=dorbs",
+          "-c",
+          "user.email=dorbs@example.test",
+          "commit",
+          "-qm",
+          "move",
+        );
+        NodeFS.rmSync(work, { recursive: true, force: true });
+        return json(run("rev-parse", "HEAD").trim());
+      }
+      if (url.pathname === "/__bench/report" && bench !== undefined) {
+        NodeFS.writeFileSync(process.env["DORBS_BENCH_OUT"] ?? "bench.json", await request.text());
+        return json(true);
+      }
+      if (url.pathname === "/__bench" && bench !== undefined) {
+        const parent = NodeChildProcess.execFileSync(
+          "git",
+          ["--git-dir", bench, "rev-parse", "HEAD~1"],
+          { encoding: "utf8" },
+        );
+        return json(parent.trim());
+      }
       if (url.pathname === "/__ref") {
         return json(readRef(url.searchParams.get("repo") ?? "", url.searchParams.get("ref") ?? ""));
       }

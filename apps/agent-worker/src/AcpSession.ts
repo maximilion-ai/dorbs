@@ -13,6 +13,7 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as GitHub from "./GitHub.ts";
 import { tokenCache } from "./GitHubTokens.ts";
 import { forgetBase, openBase, type Base } from "./base.ts";
+import { keepBase } from "./cloneRepo.ts";
 import { LayeredFs, type OverlayState } from "./layered.ts";
 import type { Loop, LoopHost } from "./Loop.ts";
 import { ModelChoices, ModelProvider, type ModelUnavailable } from "./ModelProvider.ts";
@@ -176,7 +177,8 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
       });
       const base = this.ctx.storage.kv.get<Checker.Clone>(CLONE_KEY)?.base;
       if (base === undefined || Date.now() - this.#baseUsedAt < HOUR_MS) return;
-      if (!(await this.env.RepoBase.getByName(base).used(base))) {
+      const loaded = await this.fs.base().catch(() => undefined);
+      if (loaded === undefined || !(await keepBase(this.toolHost.bases, loaded))) {
         // Its deletion is under way: reads now fail with the reason rather than find parts missing.
         this.#base = undefined;
         forgetBase(base);

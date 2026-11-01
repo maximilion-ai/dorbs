@@ -398,3 +398,58 @@ it("restores a directory that a file replaced", async () => {
     assert.strictEqual(await git("status"), "(no output)");
   });
 });
+
+it("builds the base of a moved main from the last base's parts and fetches only the changed files", async () => {
+  const { openBase } = await import("../src/base.ts");
+  const { cloneRepo } = await import("../src/cloneRepo.ts");
+  const clone = (name: string) =>
+    runInDurableObject(env.AcpSession.getByName(name), async (instance: AcpSession) => {
+      const cloned = await cloneRepo(
+        instance.fs,
+        instance.toolHost.bases,
+        { url: "http://git.test/moving.git", headers: undefined },
+        "test/moving",
+        ROOT,
+        name,
+      );
+      instance.toolHost.saveClone({
+        repo: decodeRepo("test/moving"),
+        commit: decodeCommit(cloned.commit),
+        branch: cloned.branch,
+        base: cloned.base,
+      });
+      return cloned;
+    });
+  const before = await clone("moving-before");
+  await fetch("http://git.test/__move");
+  const after = await clone("moving-after");
+  assert.notStrictEqual(after.base, before.base);
+
+  const base = await openBase(env.Bases, after.base);
+  assert.deepStrictEqual(base?.manifest.uses, [before.base]);
+  // Its own parts hold only what changed: the new b.ts and d.ts.
+  const own = base?.manifest.parts.filter((part) => part.key.startsWith(`${after.base}/`)) ?? [];
+  assert.strictEqual(
+    own.reduce((sum, part) => sum + part.size, 0),
+    "export const betaMoved = 3;\n".length + "export const delta = 4;\n".length,
+  );
+
+  await runInDurableObject(
+    env.AcpSession.getByName("moving-after"),
+    async (instance: AcpSession) => {
+      assert.strictEqual(await instance.fs.readText(`${ROOT}/a.ts`), "export const alpha = 1;\n");
+      assert.strictEqual(
+        await instance.fs.readText(`${ROOT}/b.ts`),
+        "export const betaMoved = 3;\n",
+      );
+      const paths = async (pattern: RegExp) =>
+        (await instance.fs.grep(pattern, ROOT, 10)).map((match) => match.path);
+      assert.deepStrictEqual(await paths(/alpha/u), ["a.ts"]);
+      assert.deepStrictEqual(await paths(/betaMoved|delta/u), ["b.ts", "d.ts"]);
+      assert.deepStrictEqual(await paths(/beta\b/u), []);
+      // No literal piece narrows this one, so every file is read.
+      assert.deepStrictEqual(await paths(/^[a-z]+ notes$/u), ["docs/c.md"]);
+      assert.deepStrictEqual(await instance.workspace.git.status({ dir: ROOT }), []);
+    },
+  );
+});

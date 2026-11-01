@@ -1,4 +1,4 @@
-import { basePrefix, buildBase, forgetBase, openBase } from "./base.ts";
+import { type Base, basePrefix, buildBase, forgetBase, latestBase, openBase } from "./base.ts";
 import { head, type Origin } from "./clone.ts";
 import type { LayeredFs } from "./layered.ts";
 
@@ -22,6 +22,20 @@ const WAIT_MS = 3000;
 // A builder renews its lease this often; RepoBase lets another take over after two minutes of silence.
 const RENEW_MS = 30_000;
 
+/** Puts off deleting `base` and the bases whose parts it reads; false once any of their deletions has begun. */
+export const keepBase = async (store: BaseStore, base: Base): Promise<boolean> => {
+  for (const prefix of [base.prefix, ...base.manifest.uses])
+    if (!(await store.lease(prefix).used(prefix))) return false;
+  return true;
+};
+
+/** The repo's latest base, whose parts a new base may read, unless it or a base it reads is being deleted. */
+const parentOf = async (store: BaseStore, repo: string): Promise<Base | undefined> => {
+  const latest = await latestBase(store.bucket, repo);
+  const parent = latest === undefined ? undefined : await openBase(store.bucket, latest);
+  return parent !== undefined && (await keepBase(store, parent)) ? parent : undefined;
+};
+
 /** The base of `repo` at `commit`, built by this session under the lease or waited for while another builds it. */
 const ensureBase = async (
   store: BaseStore,
@@ -33,8 +47,9 @@ const ensureBase = async (
   const prefix = basePrefix(repo, commit);
   const lease = store.lease(prefix);
   for (;;) {
-    if ((await openBase(store.bucket, prefix)) !== undefined) {
-      if (await lease.used(prefix)) return prefix;
+    const base = await openBase(store.bucket, prefix);
+    if (base !== undefined) {
+      if (await keepBase(store, base)) return prefix;
       // RepoBase is deleting it; once it is gone, a builder makes it again.
       forgetBase(prefix);
     } else if (await lease.lease(holder)) {
@@ -42,7 +57,7 @@ const ensureBase = async (
       await lease.used(prefix);
       const renew = setInterval(() => void lease.lease(holder).catch(() => undefined), RENEW_MS);
       try {
-        await buildBase(store.bucket, origin, repo, commit);
+        await buildBase(store.bucket, origin, repo, commit, await parentOf(store, repo));
       } finally {
         clearInterval(renew);
         await lease.release(holder);

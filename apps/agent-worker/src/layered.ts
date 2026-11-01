@@ -1,6 +1,7 @@
 import * as NodeBuffer from "node:buffer";
 
-import type { Base, BaseStats } from "./base.ts";
+import { type Base, type BaseStats, GREP_MAX_BYTES, isText } from "./base.ts";
+import { plan } from "./words.ts";
 
 /**
  * The session's repo: its own writes, in its VFS, over the shared base in R2. Tools and isomorphic-git both use it.
@@ -631,20 +632,19 @@ export class LayeredFs {
   }
 
   /**
-   * Lines matching `pattern` in the files under `dir`, at most `limit`. Base files stream from R2 in large ranges;
-   * binary files (a NUL in their first 8 KB) and files over `maxBytes` are skipped.
+   * Lines matching `pattern` in the files under `dir`, at most `limit`. Base files the word index leaves possible
+   * stream from R2 in large ranges; binary files (a NUL in their first 8 KB) and files over GREP_MAX_BYTES are skipped.
    */
   async grep(
     pattern: RegExp,
     dir: string,
     limit: number,
-    maxBytes = 2 * 1024 * 1024,
   ): Promise<
     ReadonlyArray<{ readonly path: string; readonly line: number; readonly text: string }>
   > {
     const matches: Array<{ path: string; line: number; text: string }> = [];
     const search = (path: string, bytes: Uint8Array): boolean => {
-      if (bytes.length > maxBytes || bytes.subarray(0, 8192).includes(0)) return true;
+      if (!isText(bytes)) return true;
       const lines = decoder.decode(bytes).split("\n");
       for (let at = 0; at < lines.length; at += 1) {
         const text = lines[at] ?? "";
@@ -661,7 +661,7 @@ export class LayeredFs {
     const fromBase = files.flatMap((path) => {
       if (this.#paths.has(path)) return [];
       const entry = base?.entry(path);
-      return entry !== undefined && entry.mode !== "120000" && entry.size <= maxBytes
+      return entry !== undefined && entry.mode !== "120000" && entry.size <= GREP_MAX_BYTES
         ? [entry]
         : [];
     });
@@ -674,7 +674,11 @@ export class LayeredFs {
       )
         return matches.toSorted(byPathLine);
     }
-    if (base !== undefined) await base.scan(fromBase, (entry, bytes) => search(entry.path, bytes));
+    if (base === undefined) return matches.toSorted(byPathLine).slice(0, limit);
+    // Only the files whose words hold the pattern's literal pieces, when it has any.
+    const pieces = plan(pattern.source, pattern.flags);
+    const scanned = pieces === undefined ? fromBase : await base.candidates(pieces, fromBase);
+    await base.scan(scanned, (entry, bytes) => search(entry.path, bytes));
     return matches.toSorted(byPathLine).slice(0, limit);
   }
 }
