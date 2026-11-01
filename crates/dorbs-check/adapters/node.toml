@@ -52,6 +52,11 @@ errorformat = [
   '%E%f(%l\,%c): %trror %n: %m',
   '%W%f(%l\,%c): %tarning %n: %m',
   '%I%f(%l\,%c): message %n: %m',
+  # tsc's pretty location, as it prints under vp run; vp names each task's package before its lines
+  '%f:%l:%c - %trror %n: %m',
+  '%f:%l:%c - %tarning %n: %m',
+  '%D~/%f$ %.%#',
+  '%D~$ %.%#',
   # svelte-check --output machine
   '%*\d %tRROR "%f" %l:%c "%m"',
   '%*\d %tARNING "%f" %l:%c "%m"',
@@ -442,3 +447,9 @@ when.contains = [
 ]
 per_package = true
 format = "raw"
+
+# Vite+'s task cache keeps one entry per task: put back after each run, so a session re-checks only what its own
+# change touches, not what the session before it changed.
+[[warm]]
+path = "node_modules/.vite/task-cache"
+when.contains = [{ file = "package.json", regex = '"vite-plus"\s*:' }]

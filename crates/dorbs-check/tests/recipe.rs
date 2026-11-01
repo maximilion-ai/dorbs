@@ -657,3 +657,31 @@ fn resolves_the_same_recipe_from_only_the_files_the_adapters_read() {
     assert!(!adapters.reads.is_match("packages/a/src/index.ts"));
     assert!(adapters.reads.is_match("packages/a/package.json"));
 }
+
+#[test]
+fn seeds_and_keeps_vite_plus_caches_only_where_the_repo_uses_vite_plus() {
+    let vite_plus = recipe(&[
+        (
+            "package.json",
+            r#"{"packageManager":"pnpm@10.0.0","devDependencies":{"vite-plus":"1.4.0"}}"#,
+        ),
+        ("pnpm-lock.yaml", PNPM_LOCK),
+    ]);
+    assert_eq!(
+        setup(&vite_plus)[1],
+        (
+            "vite-plus package manager".to_owned(),
+            "pnpm install --offline --frozen-lockfile --ignore-scripts --ignore-pnpmfile --filter . \
+             && node_modules/.bin/vp exec true"
+                .to_owned(),
+            Phase::Online
+        )
+    );
+    assert_eq!(vite_plus.warm, ["node_modules/.vite/task-cache"]);
+    let plain = recipe(&[
+        ("package.json", r#"{"packageManager":"pnpm@10.0.0"}"#),
+        ("pnpm-lock.yaml", PNPM_LOCK),
+    ]);
+    assert!(setup(&plain).iter().all(|(id, _, _)| id != "vite-plus package manager"));
+    assert!(plain.warm.is_empty());
+}

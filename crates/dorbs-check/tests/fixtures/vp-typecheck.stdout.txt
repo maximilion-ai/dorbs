@@ -1,0 +1,16 @@
+~/infra/task-cache$ tsc --noEmit ◉ cache hit, replaying
+~/packages/contracts$ tsc --noEmit ◉ cache hit, replaying
+~/packages/shared$ tsc --noEmit ○ cache miss: 'packages/shared/src/String.ts' modified, executing
+src/String.ts:10:14 - error TS2322: Type 'string' is not assignable to type 'number'.
+
+10 export const __probe: number = "x";
+                ~~~~~~~
+
+
+Found 1 error in src/String.ts:10
+
+~$ tsc --noEmit -p scripts ◉ cache hit, replaying
+scripts/a.ts:2:1 - error TS2304: Cannot find name 'x'.
+
+---
+vp run: 6/7 cache hit (85%), 6/7 successful, 10s saved. (Run `vp run --last-details` for full details)

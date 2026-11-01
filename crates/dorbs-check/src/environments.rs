@@ -18,7 +18,19 @@ use crate::git::{Overlaid, Tree};
 use crate::process::ProcessResult;
 use crate::protocol::{Change, CommitSha, RelativePath, RepoId, SetupFailed};
 use crate::recipe::{Recipe, SetupStep};
-use crate::run::{Command, Ran, Runner};
+use crate::run::{self, Command, Ran, Runner};
+
+/// The warm-up's caches, in the environment's directory.
+const WARM: &str = "/env/warm.tar";
+
+/// The recipe's warm paths as shell words.
+fn warm_words(paths: &[String]) -> String {
+    paths
+        .iter()
+        .map(|path| run::quote(path))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// What makes an environment: its key, and what setting it up needs.
 pub struct EnvSpec {
@@ -691,8 +703,34 @@ impl Environments {
                 &env.dir,
             )
             .await?;
+        self.warm_up(env, spec, &keeper).await;
         env.inner.lock().expect("the env").keeper = Some(keeper);
         Ok(None)
+    }
+
+    /// Runs the checks once on the commit, so the caches the recipe names start warm, and keeps them
+    /// as the warm-up left them for every run to get back: a session then pays for its own change,
+    /// not for the one before it.
+    async fn warm_up(&self, env: &Env, spec: &EnvSpec, keeper: &str) {
+        if spec.recipe.warm.is_empty() {
+            return;
+        }
+        let runner = InContainer {
+            docker: &self.docker,
+            container: &env.container,
+        };
+        for check in &spec.recipe.checks {
+            if let Some(command) = run::check_command(check, &Change::default()) {
+                runner.exec(&command, self.limits.setup_timeout).await;
+            }
+        }
+        self.docker.reap(&env.container, keeper).await;
+        let paths = warm_words(&spec.recipe.warm);
+        let save =
+            format!(r#"for p in {paths}; do [ -e "$p" ] && echo "$p"; done | tar -cf {WARM} -T -"#);
+        (self.docker)
+            .exec(&env.container, ".", &save, Duration::from_secs(300))
+            .await;
     }
 
     async fn setup(
@@ -886,7 +924,15 @@ impl Environments {
                     .map_err(|e| UseError::Internal(e.to_string()))?;
                 let queue_ms = (waited + queued.elapsed()).as_millis() as u64;
                 let ran = self
-                    .run_held(&env, &tree, &from, &commit, &change, &keeper, &commands)
+                    .run_held(
+                        &env,
+                        &tree,
+                        (&from, &commit),
+                        &change,
+                        &keeper,
+                        &commands,
+                        &spec.recipe.warm,
+                    )
                     .await;
                 (ran, queue_ms)
             };
@@ -934,11 +980,11 @@ impl Environments {
         &self,
         env: &Env,
         tree: &Tree,
-        from: &CommitSha,
-        commit: &CommitSha,
+        (from, commit): (&CommitSha, &CommitSha),
         change: &Change,
         keeper: &str,
         commands: &[(Command, Duration)],
+        warm: &[String],
     ) -> Result<(Vec<Ran>, u64), UseError> {
         tree.recover().await.map_err(UseError::Internal)?;
         let started = Instant::now();
@@ -987,6 +1033,13 @@ impl Environments {
             env.inner.lock().expect("the env").keeper = None;
         }
         let restoring = Instant::now();
+        if !warm.is_empty() {
+            let paths = warm_words(warm);
+            let back = format!("[ -f {WARM} ] && rm -rf {paths} && tar -xf {WARM}");
+            (self.docker)
+                .exec(&env.container, ".", &back, Duration::from_secs(300))
+                .await;
+        }
         tree.restore(&overlay).await.map_err(UseError::Internal)?;
         Ok((ran, (laid + restoring.elapsed()).as_millis() as u64))
     }
