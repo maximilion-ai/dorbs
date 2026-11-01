@@ -878,6 +878,43 @@ const SUMMARIES = new Set(["--stat", "--name-only", "--name-status"]);
 const FORMATS = (arg: string): boolean =>
   arg === "--oneline" || arg.startsWith("--format") || arg.startsWith("--pretty");
 
+/** The paths whose entries differ between two commits' trees, reading only the subtrees that differ. */
+const treeChanges = async (context: GitContext, from: string, to: string): Promise<string[]> => {
+  const list = async (ref: string, dir: string) =>
+    new Map(
+      (
+        await context.workspace.git
+          .lsTree({ dir: context.dir, ref, ...(dir === "" ? {} : { path: dir }) })
+          .catch(() => [])
+      ).map((entry) => [entry.path, entry]),
+    );
+  const changed: string[] = [];
+  const walk = async (dir: string, sides: ReadonlyArray<string>): Promise<void> => {
+    const [before, after] = await Promise.all([
+      sides.includes(from) ? list(from, dir) : new Map(),
+      sides.includes(to) ? list(to, dir) : new Map(),
+    ]);
+    for (const name of new Set([...before.keys(), ...after.keys()])) {
+      const [old, now] = [before.get(name), after.get(name)];
+      if (old?.oid === now?.oid && old?.mode === now?.mode) continue;
+      const path = dir === "" ? name : `${dir}/${name}`;
+      const trees = [
+        old?.type === "tree" ? from : undefined,
+        now?.type === "tree" ? to : undefined,
+      ];
+      if (trees.some((ref) => ref !== undefined))
+        await walk(
+          path,
+          trees.filter((ref) => ref !== undefined),
+        );
+      if (old?.type !== "tree" && old !== undefined) changed.push(path);
+      else if (now?.type !== "tree" && now !== undefined) changed.push(path);
+    }
+  };
+  await walk("", [from, to]);
+  return [...new Set(changed)].toSorted();
+};
+
 /**
  * What a commit changed against its parent: as a diff, or as `summary` (--stat, --name-only, --name-status) prints
  * it. The clone's own commit has no parent in the clone, so it gets a note.
@@ -890,13 +927,18 @@ const commitChanges = async (
 ): Promise<string> => {
   if (commit === context.clone.commit)
     return "(This is the commit the repo was cloned at; its parent is not in the clone, so its changes are not shown.)";
-  const line = await narrowedDiff(
-    [...summary, `${commit}~1`, commit, ...(paths.length === 0 ? [] : ["--", ...paths])],
-    await changesOf(context),
-    context,
+  const parent = await context.workspace.git.revParse({ dir: context.dir, ref: `${commit}~1` });
+  // Computer's diff of two commits walks both whole trees; named paths keep it to what changed.
+  const changed = (await treeChanges(context, parent, commit)).filter(
+    (path) => paths.length === 0 || paths.some((spec) => under(path, specPath(spec, context.dir))),
   );
-  if (line === undefined) return "";
-  return cliText(await context.workspace.git.cli({ argv: [...line], cwd: context.dir }));
+  if (changed.length === 0) return "";
+  return cliText(
+    await context.workspace.git.cli({
+      argv: ["diff", ...summary, parent, commit, "--", ...changed],
+      cwd: context.dir,
+    }),
+  );
 };
 
 /** git show: a commit with its changes, or a file at a revision as `rev:path`. */

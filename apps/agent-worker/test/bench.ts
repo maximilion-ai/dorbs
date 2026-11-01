@@ -183,6 +183,8 @@ it(
           'commit -m "bench edits"',
           "status",
           "log -n 3 --oneline",
+          "show --stat",
+          "log -n 2 --stat",
         ]) {
           const step = await timed(() => git(line, context));
           gitSteps[line] = {
