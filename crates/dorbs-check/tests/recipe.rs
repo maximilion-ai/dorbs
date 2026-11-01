@@ -682,6 +682,10 @@ fn seeds_and_keeps_vite_plus_caches_only_where_the_repo_uses_vite_plus() {
         ("package.json", r#"{"packageManager":"pnpm@10.0.0"}"#),
         ("pnpm-lock.yaml", PNPM_LOCK),
     ]);
-    assert!(setup(&plain).iter().all(|(id, _, _)| id != "vite-plus package manager"));
+    assert!(
+        setup(&plain)
+            .iter()
+            .all(|(id, _, _)| id != "vite-plus package manager")
+    );
     assert!(plain.warm.is_empty());
 }

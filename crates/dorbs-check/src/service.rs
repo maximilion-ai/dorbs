@@ -40,6 +40,11 @@ type Files = Arc<(Vec<RelativePath>, HashMap<String, String>)>;
 /// How many commits' files the service keeps; sessions start from few commits.
 const KEPT_COMMITS: usize = 16;
 
+/// How long a check's answer serves the same request again: an agent that checks an unchanged
+/// workspace twice gets the answer at once, and a workspace a session changed is another request.
+const REMEMBER_CHECKS: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const KEPT_CHECKS: usize = 256;
+
 pub struct Service {
     pub settings: Settings,
     caches: Caches,
@@ -48,6 +53,8 @@ pub struct Service {
     /// Numbers requests as they arrive, so they take the environment in that order.
     tickets: AtomicU64,
     files: Mutex<HashMap<(PathBuf, CommitSha), Files>>,
+    /// Recent checks' answers, by their environment and request.
+    checks: Mutex<HashMap<String, (Instant, crate::protocol::CheckResult)>>,
 }
 
 struct Prepared {
@@ -94,6 +101,7 @@ impl Service {
             environments,
             tickets: AtomicU64::new(0),
             files: Mutex::new(HashMap::new()),
+            checks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -259,6 +267,23 @@ impl Service {
             Ok(checks) => checks,
             Err(reason) => return Ok(CheckResponse::Rejected { reason }),
         };
+        let memo = sha256(
+            serde_json::json!({ "env": prepared.spec.key, "request": request })
+                .to_string()
+                .as_bytes(),
+        );
+        if let Some((at, result)) = self.checks.lock().expect("the checks").get(&memo)
+            && at.elapsed() < REMEMBER_CHECKS
+        {
+            crate::log(&format!(
+                "check {}@{} env {}: the same as {} s ago",
+                request.repo,
+                &request.commit[..12],
+                &prepared.spec.key[..12],
+                at.elapsed().as_secs()
+            ));
+            return Ok(CheckResponse::CheckResult(result.clone()));
+        }
         let planned: Vec<Option<run::Command>> = checks
             .iter()
             .map(|check| run::check_command(check, &request.change))
@@ -344,6 +369,13 @@ impl Service {
             result.setup_ms,
             result.overlay_ms
         ));
+        if result.complete {
+            let mut kept = self.checks.lock().expect("the checks");
+            kept.retain(|_, (at, _)| at.elapsed() < REMEMBER_CHECKS);
+            if kept.len() < KEPT_CHECKS {
+                kept.insert(memo, (Instant::now(), result.clone()));
+            }
+        }
         Ok(CheckResponse::CheckResult(result))
     }
 
