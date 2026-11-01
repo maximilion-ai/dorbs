@@ -12,12 +12,12 @@ commit_only = [
   "bunfig.toml",
 ]
 
-# Node with corepack's pnpm and yarn shims, and bun.
+# Node with corepack's pnpm and yarn shims, and bun; ssh for tests of code that parses its config with ssh -G.
 image = '''
 FROM oven/bun:1-slim AS bun
 FROM node:24-slim
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ca-certificates \
+  && apt-get install -y --no-install-recommends git ca-certificates openssh-client \
   && rm -rf /var/lib/apt/lists/* \
   && corepack enable
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
@@ -69,6 +69,9 @@ errorformat = [
   '::%trror title=%n\,file=%f\,line=%l\,endLine=%e\,col=%c\,endColumn=%k::%m',
   '::%tarning title=%n\,file=%f\,line=%l\,endLine=%e\,col=%c\,endColumn=%k::%m',
   '::%totice title=%n\,file=%f\,line=%l\,endLine=%e\,col=%c\,endColumn=%k::%m',
+  # oxlint --format github, as vp lint prints it: the rule last
+  '::%trror file=%f\,line=%l\,endLine=%e\,col=%c\,endColumn=%k\,title=%n::%m',
+  '::%tarning file=%f\,line=%l\,endLine=%e\,col=%c\,endColumn=%k\,title=%n::%m',
   '::%trror file=%f\,line=%l\,col=%c::%m',
   '::%tarning file=%f\,line=%l\,col=%c::%m',
   # prettier --check names each file it would change
@@ -279,6 +282,15 @@ key = [
   ".yarn/plugins/**",
   ".yarn/patches/**",
 ]
+
+# Vite+ fetches the package manager packageManager pins before each vp command and, offline, retries for ~5 s.
+# It keeps it in the home, so one vp command here, from the root's packages alone, saves every check that wait.
+[[setup]]
+id = "vite-plus package manager"
+run = "{install.offline} --filter . && node_modules/.bin/vp exec true"
+phase = "online"
+key = ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"]
+when = { vars = { "pm.name" = "pnpm" }, contains = [{ file = "package.json", regex = '"vite-plus"\s*:' }] }
 
 [[setup]]
 id = "install"

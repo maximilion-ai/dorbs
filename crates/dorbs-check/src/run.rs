@@ -159,7 +159,11 @@ pub fn check_run(check: &Check, ran: &Ran, root: &str, streams: &Streams) -> Che
     diagnostics.sort_by_key(|d| d.severity);
     let cut_diagnostics = diagnostics.len() > MAX_DIAGNOSTICS;
     diagnostics.truncate(MAX_DIAGNOSTICS);
-    let (output, cut_output) = cap_lines(parsed.output);
+    let mut lines = parsed.output;
+    if let Some(killed) = killed(result) {
+        lines.insert(0, killed.to_owned());
+    }
+    let (output, cut_output) = cap_lines(lines);
     CheckRun {
         id: check.id.clone(),
         command: ran.run.clone(),
@@ -170,6 +174,13 @@ pub fn check_run(check: &Check, ran: &Ran, root: &str, streams: &Streams) -> Che
         output,
         truncated: result.truncated || cut_output || cut_diagnostics,
     }
+}
+
+/// Why a run that a signal killed ended, which its own output does not say.
+fn killed(result: &ProcessResult) -> Option<&'static str> {
+    (!result.timed_out && result.exit_code == Some(137)).then_some(
+        "Killed (exit 137): the run most likely ran out of memory, so its output may be incomplete.",
+    )
 }
 
 /// The first output lines, within a line and a byte cap.
@@ -191,6 +202,8 @@ pub struct Timings {
     pub started: Instant,
     pub setup_ms: u64,
     pub overlay_ms: u64,
+    /// None where nothing queues, as in a local checkout.
+    pub queue_ms: Option<u64>,
 }
 
 pub fn check_result(
@@ -203,6 +216,7 @@ pub fn check_result(
         duration_ms: timings.started.elapsed().as_millis() as u64,
         setup_ms: timings.setup_ms,
         overlay_ms: timings.overlay_ms,
+        queue_ms: timings.queue_ms,
         scope: if checks.iter().any(|check| check.run.contains("{changed}")) {
             Scope::Changed
         } else {
@@ -358,6 +372,10 @@ pub fn test_result(test: &Test, runs: &[Ran], timings: Timings) -> TestResult {
         })
         .sum();
     let failed = runs.iter().find(|ran| ran.result.exit_code != Some(0));
+    let output = match runs.iter().find_map(|ran| killed(&ran.result)) {
+        Some(killed) => format!("{output}\n{killed}"),
+        None => output,
+    };
     // A run's failures and summary come last, so its end is what stays.
     let cut = output.len() > OUTPUT_BYTES;
     let output = if cut {
@@ -374,6 +392,7 @@ pub fn test_result(test: &Test, runs: &[Ran], timings: Timings) -> TestResult {
         duration_ms: timings.started.elapsed().as_millis() as u64,
         setup_ms: timings.setup_ms,
         overlay_ms: timings.overlay_ms,
+        queue_ms: timings.queue_ms,
         command: runs
             .iter()
             .map(|ran| ran.run.as_str())

@@ -261,7 +261,8 @@ fn compile(pattern: &str) -> Result<Entry, String> {
                 match code {
                     'f' => regex.push_str(r"(?P<f>(?:\\ |[^ ])+?)"),
                     'l' | 'c' | 'e' | 'k' => regex.push_str(&format!(r"(?P<{code}>\d+)")),
-                    'n' => regex.push_str(r"(?P<n>[\w./@-]+)"),
+                    // A rule such as eslint(no-debugger), as oxlint names it.
+                    'n' => regex.push_str(r"(?P<n>[\w./@()-]+)"),
                     't' => regex.push_str(r"(?P<t>.)"),
                     'm' => regex.push_str(r"(?P<m>.+)"),
                     '%' => regex.push('%'),

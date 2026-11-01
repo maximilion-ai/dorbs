@@ -1,0 +1,5 @@
+::error file=packages/shared/src/__probe.ts,line=2,endLine=2,col=5,endColumn=6,title=eslint(no-unused-vars)::packages/shared/src/__probe.ts:2:5: Variable 'b' is declared but never used. Unused variables should start with a '_'.
+::warning file=packages/shared/src/__probe.ts,line=2,endLine=2,col=12,endColumn=21,title=eslint(no-debugger)::packages/shared/src/__probe.ts:2:12: `debugger` statement is not allowed
+
+Found 1 warning and 1 error.
+Finished in 297ms on 1 file with 200 rules using 4 threads.
