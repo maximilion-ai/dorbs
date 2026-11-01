@@ -154,6 +154,13 @@ export const makeAcpSession = (modelLayer: ModelLayer) =>
       this.ctx.abort("Retired after its retention period", { retryAlarm: false });
     }
 
+    /** Deletes this session now, as retirement would after the retention period. */
+    async purge(): Promise<void> {
+      await this.ctx.storage.deleteAlarm();
+      await this.ctx.storage.deleteAll();
+      this.ctx.abort("Purged", { retryAlarm: false });
+    }
+
     readonly history = (() => {
       const { sql } = this.ctx.storage;
       sql.exec(

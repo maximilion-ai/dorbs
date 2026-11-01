@@ -61,10 +61,35 @@ const connectChatGpt = async (request: Request, env: Cloudflare.Env): Promise<Re
   return new Response(null, { status: 204 });
 };
 
+const decodeSessionIds = Schema.decodeUnknownOption(
+  Schema.Struct({ sessions: Schema.Array(Schema.NonEmptyString).check(Schema.isMaxLength(100)) }),
+);
+
+/** Deletes the named sessions at once, rather than after the retention period. */
+const purgeSessions = async (request: Request, env: Cloudflare.Env): Promise<Response> => {
+  if (request.method !== "POST") return new Response("Expected POST", { status: 405 });
+  const body = decodeSessionIds(await request.json().catch(() => undefined));
+  if (body._tag === "None")
+    return new Response("Expected { sessions: string[] } of at most 100", { status: 400 });
+  // Purging aborts the object, so its call fails once the storage is gone; that failure is the success.
+  await Promise.all(
+    body.value.sessions.map((id) =>
+      env.AcpSession.getByName(id)
+        .purge()
+        .catch(() => undefined),
+    ),
+  );
+  return Response.json({ purged: body.value.sessions.length });
+};
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname !== "/acp" && url.pathname !== "/chatgpt/connect") {
+    if (
+      url.pathname !== "/acp" &&
+      url.pathname !== "/chatgpt/connect" &&
+      url.pathname !== "/sessions/purge"
+    ) {
       return new Response("Not found", { status: 404 });
     }
     const authorized = await Effect.runPromise(Effect.result(authorize(request, env)));
@@ -73,6 +98,7 @@ export default {
     }
     if (!authorized.success) return new Response("Unauthorized", { status: 401 });
     if (url.pathname === "/chatgpt/connect") return connectChatGpt(request, env);
+    if (url.pathname === "/sessions/purge") return purgeSessions(request, env);
     const connection = url.searchParams.get("connection");
     if (connection === null || connection === "") {
       return new Response("Missing ?connection=<id>", { status: 400 });
