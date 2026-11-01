@@ -388,3 +388,13 @@ it("checks a file out of HEAD~1", async () => {
     assert.strictEqual(await git("status --short"), "M  file.txt");
   });
 });
+
+it("restores a directory that a file replaced", async () => {
+  await withClone("restore-dir-over-file", async ({ fs, git }) => {
+    await fs.promises.rm(`${ROOT}/d/sub`, { recursive: true });
+    await fs.writeFile(`${ROOT}/d/sub`, "x\n");
+    assert.strictEqual(await git("restore --source=HEAD d/sub"), "(no output)");
+    assert.strictEqual(await fs.readText(`${ROOT}/d/sub/deep/e.ts`), "e\n");
+    assert.strictEqual(await git("status"), "(no output)");
+  });
+});

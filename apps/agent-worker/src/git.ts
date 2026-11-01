@@ -669,6 +669,12 @@ const restored = async (
   const from = new Map<string, Entry | undefined>();
   for (const path of picked) {
     const entry = tree === undefined ? changes.stage.get(path) : await tree(path);
+    if (entry?.mode === 0o40000) {
+      // A directory in the source: its files are picked one by one; what stands in its place goes.
+      if ((await fs.lstat(`${dir}/${path}`))?.isDirectory() === false)
+        await fs.promises.rm(`${dir}/${path}`, { force: true });
+      continue;
+    }
     // checkout <rev> leaves a path the revision lacks; only restore removes it.
     if (entry !== undefined || subcommand === "restore") from.set(path, entry);
   }
@@ -678,9 +684,7 @@ const restored = async (
       // A path the source lacks leaves the work tree only when git tracks it; untracked files stay.
       if (entry !== undefined || (source !== undefined && changes.stage.has(path)))
         await writeWork(context, path, entry);
-  return subcommand === "checkout"
-    ? `Updated ${picked.length} paths from the index`
-    : "(no output)";
+  return subcommand === "checkout" ? `Updated ${from.size} paths from the index` : "(no output)";
 };
 
 /** `commit -a`, `-am` and `--all` without the stage-all flag, or undefined when the commit has none. */
