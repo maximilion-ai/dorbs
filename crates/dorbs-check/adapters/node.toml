@@ -455,3 +455,12 @@ format = "raw"
 [[warm]]
 path = "node_modules/.vite/task-cache"
 when.contains = [{ file = "package.json", regex = '"vite-plus"\s*:' }]
+
+# A lint script that runs oxlint, or vp lint, over the whole repo runs on the changed files instead, as a staged-files
+# hook would, and in a format the patterns above read. Rules that need the whole repo, such as import cycles, see
+# only those files; a script with paths, --fix or its own --format keeps running as it is.
+[[narrow]]
+role = "lint"
+body = '^(?P<tool>vp lint|oxlint)(?P<flags>(?:\s+--?[\w-]+(?:=\S+)?)*)\s*$'
+unless = '--fix|--format|\s-f\b'
+run = "{pm.exec}{tool}{flags} --format github --no-error-on-unmatched-pattern {changed}"

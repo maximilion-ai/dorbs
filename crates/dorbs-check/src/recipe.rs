@@ -145,6 +145,16 @@ fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
     Option::<T>::deserialize(deserializer).map(Some)
 }
 
+/// For a role, the body a repo command matches, unless it matches `unless`, and what runs instead,
+/// the body's groups still to fill.
+#[derive(Debug, Clone)]
+pub struct Narrow {
+    pub role: Role,
+    pub body: regex::Regex,
+    pub unless: Option<regex::Regex>,
+    pub run: String,
+}
+
 /// What the adapter offers one repo, its conditions and templates resolved.
 #[derive(Debug, Clone)]
 pub struct Defaults {
@@ -159,6 +169,7 @@ pub struct Defaults {
     pub commands: BTreeMap<String, String>,
     pub errorformat: Vec<String>,
     pub warm: Vec<String>,
+    pub narrow: Vec<Narrow>,
 }
 
 #[derive(Debug, Clone)]
@@ -243,9 +254,27 @@ fn merge_checks(repo: &[RepoCommand], defaults: &Defaults, notes: &mut Vec<Strin
                 command.source.key(),
                 command.name
             ));
+            let body = command.body.trim();
+            let narrowed = (defaults.narrow.iter())
+                .filter(|narrow| narrow.role == *role)
+                .filter(|narrow| !narrow.unless.as_ref().is_some_and(|u| u.is_match(body)))
+                .find_map(|narrow| {
+                    let caps = narrow.body.captures(body)?;
+                    let names = narrow.body.capture_names().flatten();
+                    let filled = names.fold(narrow.run.clone(), |run, name| {
+                        run.replace(
+                            &format!("{{{name}}}"),
+                            caps.name(name).map_or("", |m| m.as_str()),
+                        )
+                    });
+                    Some(filled)
+                });
+            if narrowed.is_some() {
+                notes.push(format!("{} on the changed files only", role.name()));
+            }
             Check {
                 id: CheckId::try_from(role.name()).expect("a role is a check id"),
-                run: runner.replace("{name}", &command.name),
+                run: narrowed.unwrap_or_else(|| runner.replace("{name}", &command.name)),
                 cwd: ".".to_owned(),
                 format: Format::Errorformat(defaults.errorformat.clone()),
             }
@@ -399,6 +428,21 @@ pub fn defaults(scope: &Scope, local: bool) -> Result<Defaults, String> {
             .filter(|warm| scope.holds(&warm.when, &mut BTreeMap::new()))
             .map(|warm| warm.path.clone())
             .collect(),
+        narrow: (adapter.narrow.iter())
+            .map(|def| {
+                let regex = def.body.regex();
+                // The body's groups are filled per command; the adapter's values now.
+                let groups: BTreeMap<String, String> = (regex.capture_names().flatten())
+                    .map(|name| (name.to_owned(), format!("{{{name}}}")))
+                    .collect();
+                Ok(Narrow {
+                    role: def.role,
+                    body: regex.clone(),
+                    unless: def.unless.as_ref().map(|unless| unless.regex().clone()),
+                    run: scope.expand(&def.run, &groups)?,
+                })
+            })
+            .collect::<Result<_, String>>()?,
     })
 }
 

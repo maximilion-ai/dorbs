@@ -29,7 +29,9 @@ Two rules decide almost everything:
 4. **Register it with the Worker.** Add the same id and url to the Worker's `REPOS` and redeploy (see the `dorbs-setup` skill).
 5. **Prove it on the service, not the CLI.** Run one check and one test through the HTTP API or a dorbs thread. A first request sets the environment up (seconds to minutes); the second shows the warm time. Then add one deliberate type error and confirm `check` reports it at the right `path:line`. A clean result alone proves nothing.
 
-### When detection gets it wrong
+#6. **Make it fast.** Follow the `dorbs-checker-speed` skill: a job set of the repo's real changes, the bench, and the levers that cut a run without losing a diagnostic.
+
+## When detection gets it wrong
 
 Fix it in this order and stop at the first that works:
 

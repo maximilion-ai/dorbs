@@ -66,6 +66,7 @@ An adapter is one TOML file per ecosystem in `adapters/`, which the binary embed
 - `[[let.NAME]]`: options for a value the templates name as `{NAME.field}`; the first whose `when` holds wins.
 - `[[setup]]`, `[[checks]]`, `[[tests]]`: the defaults, each with an optional `when`. A setup step's `each` runs it in each workspace package whose files match.
 - `[[warm]]`: a cache under the repo root, with an optional `when`, that each run gets back as a warm-up on the commit left it.
+- `[[narrow]]`: a repo check command of a `role` whose `body` matches, and not `unless`, runs as `run` instead, with the body's named groups and `{changed}`: a linter over the whole repo runs on the changed files.
 
 A `when` holds when each field it gives does: `exists` (a path matches one of these globs), `absent` (none matches), `contains` (a matching file's content matches a regex, whose named groups the templates can use), `vars` (template values equal these) and `any` (one of these conditions holds).
 
@@ -109,5 +110,5 @@ systemctl --user enable --now dorbs-checker
 pnpm rust                                                   # anywhere: fmt, clippy, the parsers, recipes, trees, the CLI
 cargo test --test live -- --ignored                         # on the host: the setup and tree escapes
 node scripts/checker-accept.ts [owner/name ...]             # on the host: the spike repos against their own commands
-node scripts/checker-bench.ts up --binary PATH | run | down   # on the host: 20 eval jobs on a bench instance, port 8791
+node scripts/checker-bench.ts up --binary PATH | run --set NAME | down   # on the host: a repo's real changes, port 8791
 ```
