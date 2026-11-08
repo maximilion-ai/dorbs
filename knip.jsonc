@@ -4,16 +4,8 @@
   "rules": { "types": "off", "nsTypes": "off" },
   "workspaces": {
     ".": {
-      // Run by hand against the checker service; the escape probe is sent to it as a test file. The replay
-      // scripts run by hand against the hc stage.
-      "entry": [
-        "scripts/checker.ts",
-        "scripts/checker-accept.ts",
-        "scripts/checker-bench.ts",
-        "scripts/checkerEscapeProbe.ts",
-        "scripts/hillclimb/plans.ts",
-        "scripts/hillclimb/replay.ts",
-      ],
+      // Run by hand against the checker service.
+      "entry": ["scripts/checker.ts", "scripts/checker-accept.ts"],
     },
     "packages/*": {
       "includeEntryExports": true,

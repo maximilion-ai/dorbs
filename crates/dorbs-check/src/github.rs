@@ -244,8 +244,8 @@ mod tests {
     #[test]
     fn names_the_github_repo_of_a_url() {
         assert_eq!(
-            repo_of("https://github.com/maximilionai/dorbs-sandbox"),
-            Some(("maximilionai".into(), "dorbs-sandbox".into()))
+            repo_of("https://github.com/acme/widgets"),
+            Some(("acme".into(), "widgets".into()))
         );
         assert_eq!(
             repo_of("https://github.com/cli/cli.git/"),

@@ -25,7 +25,7 @@ Two rules decide almost everything:
 
    `recipe` prints the resolved setup, checks and test command. Check each against what the repo's CI runs.
 
-3. **Register it on the checker host.** Add `{ "id": "owner/name", "url": "https://github.com/owner/name.git" }` to the host's `REPOS_FILE` (devbox: `~/dorbs-checker/repos.json`), then `systemctl --user restart dorbs-checker`.
+3. **Register it on the checker host.** Add `{ "id": "owner/name", "url": "https://github.com/owner/name.git" }` to the host's `REPOS_FILE`, then `systemctl --user restart dorbs-checker`.
 4. **Register it with the Worker.** Add the same id and url to the Worker's `REPOS` and redeploy (see the `dorbs-setup` skill).
 5. **Prove it on the service, not the CLI.** Run one check and one test through the HTTP API or a dorbs thread. A first request sets the environment up (seconds to minutes); the second shows the warm time. Then add one deliberate type error and confirm `check` reports it at the right `path:line`. A clean result alone proves nothing.
 
