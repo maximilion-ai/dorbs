@@ -11,6 +11,8 @@ A coding agent spends most of its time waiting on the model. dorbs gives each se
 
 Adding a session costs no checkout, no dependency install and no machine of its own.
 
+[Don't give every agent a computer](blog/dont-give-every-agent-a-computer.md) runs 100 agents on one server, with and without dorbs.
+
 ## How it works
 
 ```
