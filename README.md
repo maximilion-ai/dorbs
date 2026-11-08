@@ -93,7 +93,7 @@ T3 Code starts one `nc` per thread. Each thread gets its own WebSocket and its o
 ## Guarantees and limits
 
 - A session pushes only to new `dorbs/*` branches it created. Pushes to base branches, force pushes, deletes, other remotes and writes under `.git` are refused.
-- A thread survives idle days and restarts mid-turn. Sessions delete themselves after `SESSION_RETENTION_DAYS` idle days (30 by default).
+- A thread survives idle days and restarts mid-turn. Sessions delete themselves after `SESSION_RETENTION_DAYS` idle days (7 by default).
 - The checker runs each job without network, without capabilities and with a read-only root, and it never hands a secret to a container.
 - Checks queue per repo. With many sessions on one checker, a check can wait for minutes; add replicas or capacity with `REPLICAS` and `RUN_SLOTS`.
 

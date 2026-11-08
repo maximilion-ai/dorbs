@@ -85,7 +85,7 @@ It opens Sign in with ChatGPT in the browser and posts the credential to the Wor
    pnpm exec alchemy deploy --no-input --yes --stage <stage>
    ```
 
-   For another model, swap `MODEL_PROVIDER`, `MODEL_ID` and the key (see Models). It prints the Worker URL. Optional vars: `HARNESS` (`pi` default, `opencode` needs the Workers paid plan for its bundle size), `SESSION_RETENTION_DAYS` (30), `GITHUB_API_URL`.
+   For another model, swap `MODEL_PROVIDER`, `MODEL_ID` and the key (see Models). It prints the Worker URL. Optional vars: `HARNESS` (`pi` default, `opencode` needs the Workers paid plan for its bundle size), `SESSION_RETENTION_DAYS` (7), `GITHUB_API_URL`.
 
 3. **Run acp-mux** on the machine that runs the T3 Code server:
 
