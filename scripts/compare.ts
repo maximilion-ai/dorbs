@@ -21,7 +21,7 @@ if (provider === "openrouter" && openrouterKey === "") {
   process.exit(1);
 }
 
-/** The scripted model's clone, write, check run; the real model gets soak.ts's conc prompt. */
+/** The scripted model's clone, write, check run; the real model gets a prompt that does the same. */
 const PROMPT = (n: number) =>
   provider === "scripted"
     ? "e2e"
