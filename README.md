@@ -106,6 +106,10 @@ pnpm e2e     # the whole chain with a scripted model, on Pi and on OpenCode
 
 The [`dorbs-checker`](.claude/skills/dorbs-checker/SKILL.md) guide explains how to register a repo with the checker and how to add a language toolchain.
 
+## Contributing
+
+dorbs doesn't accept outside pull requests for now. Bug reports and questions in issues are welcome.
+
 ## License
 
 [MIT](LICENSE)
